@@ -6,7 +6,6 @@ import uuid
 from contextlib import ExitStack
 from datetime import datetime
 from typing import Literal
-from zoneinfo import ZoneInfo
 import requests
 from bs4 import BeautifulSoup
 
@@ -44,7 +43,6 @@ def get_conversation_tools_description():
     Returns a dictionary of available tools and their descriptions.
     """
     conversation_tool_dict = {
-        "convert_timezone": (convert_timezone, "Convert a datetime string and timezone to Brazil and US timezones"),
         "get_current_time": (get_current_time, "Fetch the current time (US / Central Standard Time)."),
         "scrape_website": (scrape_web, "If provided a URL by the user, this can be used to scrape a website's HTML."),
         "search_web": (search_web, "Use only to search the internet if you are unsure about something."),
@@ -128,31 +126,6 @@ def get_current_time_internal():
 
     print(rfc3339_timestamp)
     return rfc3339_timestamp
-
-@tool(parse_docstring=True, return_direct=True)
-def convert_timezone(time_str: str, from_tz: str, fmt: str = "%Y-%m-%d %H:%M") -> str:
-    """
-    Convert a datetime string from one timezone to US Central time.
-
-    Args:
-        time_str (str): The datetime string (e.g., "2025-04-18 14:00").
-        from_tz (str): The timezone name of the input time (e.g., "Europe/London").
-        fmt (str): Format of the input and output datetime strings.
-
-    Returns:
-        str: The converted time in US Central time in the same format.
-    """
-    dt = datetime.strptime(time_str, fmt)
-    dt = dt.replace(tzinfo=ZoneInfo(from_tz))
-
-    central_time = dt.astimezone(ZoneInfo("America/Chicago")).strftime(fmt)
-    eastern_time = dt.astimezone(ZoneInfo("America/New_York")).strftime(fmt)
-    brasilia_time = dt.astimezone(ZoneInfo("America/Sao_Paulo")).strftime(fmt)
-    return f"""For {time_str} in {from_tz}:    
-    In US Central Time: {central_time}
-    In US Eastern Time: {eastern_time}
-    In Brasilia Time: {brasilia_time}
-    """
 
 @tool(parse_docstring=True)
 def scrape_web(url: str):
@@ -291,20 +264,8 @@ exit_stack = ExitStack()
 checkpointer = exit_stack.enter_context(SqliteSaver.from_conn_string(DB_NAME))
 llama_instance = ChatOllama(model=LLAMA_MODEL)
 
-MISTRAL_MODEL = "mistral"
-mistral_instance = ChatOllama(model=MISTRAL_MODEL)
-
-CODE_MODEL = "codellama"
-code_instance = ChatOllama(model=CODE_MODEL)
-
-MISTRAL_ORCA_MODEL = "mistral-openorca"
-orca_instance = ChatOllama(model=MISTRAL_ORCA_MODEL)
-
 HERMES_MODEL = "hermes3"
 hermes_instance = ChatOllama(model=HERMES_MODEL)
-
-QWEN_MODEL = "qwen2.5-coder"
-qwen_instance = ChatOllama(model=HERMES_MODEL)
 
 conversation_react_agent = create_react_agent(llama_instance, tools=conversation_tools)
 
@@ -371,29 +332,6 @@ def should_continue(state: MessagesState) -> Literal["summarize_conversation", E
     return SUMMARIZE_CONVERSATION_NODE if len(state["messages"]) > 15 else END
 
 
-def tell_a_story(state: MessagesState, config: RunnableConfig):
-    """Handles requests to tell a story."""
-    messages = state["messages"]
-    latest_message = messages[-1].content if messages else ""
-    inputs = [
-        ("system", "You are a ChatBot that receives a prompt and tells a story based off of it."),
-        ("user", latest_message)]
-    resp = orca_instance.invoke(inputs, config=get_config_values(config))
-    return {'messages': [resp]}
-
-
-def help_with_coding(state: MessagesState, config: RunnableConfig):
-    """Handles requests for coding help."""
-    print("In: help_with_coding")
-    messages = state["messages"]
-    latest_message = messages[-1].content if messages else ""
-    inputs = [
-        ("system", "You are a ChatBot that assists with writing or explaining code."),
-        ("user", latest_message)]
-    code_resp = qwen_instance.invoke(inputs, config=get_config_values(config))
-    return {'messages': [code_resp]}
-
-
 def summarize_conversation(state: MessagesState, config: RunnableConfig):
     print("In: summarize_conversation")
     user_id = config.get("metadata").get("user_id")
@@ -444,15 +382,10 @@ workflow = StateGraph(MessagesState)
 # Define nodes
 workflow.add_node(CONVERSATION_NODE, conversation)
 workflow.add_node(SUMMARIZE_CONVERSATION_NODE, summarize_conversation)
-workflow.add_node(CODING_NODE, help_with_coding)
-workflow.add_node(STORY_NODE, tell_a_story)
 
 # Set workflow edges
-workflow.add_conditional_edges(START, supervisor_routing,
-                               {CONVERSATION_NODE: CONVERSATION_NODE, CODING_NODE: CODING_NODE, STORY_NODE: STORY_NODE})
+workflow.add_conditional_edges(START, supervisor_routing,{CONVERSATION_NODE: CONVERSATION_NODE})
 workflow.add_conditional_edges(CONVERSATION_NODE, should_continue)
-workflow.add_conditional_edges(CODING_NODE, should_continue)
-workflow.add_conditional_edges(STORY_NODE, should_continue)
 workflow.add_edge(SUMMARIZE_CONVERSATION_NODE, END)
 
 # Compile graph
