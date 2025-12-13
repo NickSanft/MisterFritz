@@ -95,7 +95,7 @@ def format_prompt(prompt: str, source: MessageSource, user_id: str) -> str:
 
 def search_memories_internal(config: RunnableConfig):
     user_id = config.get("metadata").get("user_id")
-    search_result = chroma_store.search((user_id, "memories"), 30)
+    search_result = chroma_store.search("memories", (user_id, "memories"), limit=30)
     summaries = {}
     for _, summary_dict in search_result:
         for key, summary in summary_dict.items():
