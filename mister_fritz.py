@@ -26,8 +26,7 @@ from message_source import MessageSource
 from sqlite_store import SQLiteStore
 
 # ===== CONFIGURATION =====
-LLAMA_MODEL = "llama3.2"
-IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff"]
+OLLAMA_MODEL = "gpt-oss"
 DB_NAME = "chat_history.db"
 
 # Constants for the routing decisions
@@ -261,12 +260,9 @@ store = SQLiteStore(DB_NAME)
 chroma_store = ChromaStore()
 exit_stack = ExitStack()
 checkpointer = exit_stack.enter_context(SqliteSaver.from_conn_string(DB_NAME))
-llama_instance = ChatOllama(model=LLAMA_MODEL)
+ollama_instance = ChatOllama(model=OLLAMA_MODEL)
 
-HERMES_MODEL = "hermes3"
-hermes_instance = ChatOllama(model=HERMES_MODEL)
-
-conversation_react_agent = create_agent(llama_instance, tools=conversation_tools)
+conversation_react_agent = create_agent(ollama_instance, tools=conversation_tools)
 
 
 def supervisor_routing(state: MessagesState, config: RunnableConfig):
@@ -279,19 +275,15 @@ def supervisor_routing(state: MessagesState, config: RunnableConfig):
     supervisor_prompt = f"""
     Your response must always be one of the following options:
     "{CONVERSATION_NODE}" - used by default.
-    "{CODING_NODE}" - use if the user is asking for something code-related.
-    "{STORY_NODE}" - use if the user is asking you tell a story.
 
     Do NOT generate any additional text or explanations.
     Only return one of the above values as the complete response.
     Example inputs and expected outputs:
-    - "Can you help me with a Python script to list all values in a dict" → "{CODING_NODE}"
-    - "Can you tell me a story about frogs?" → "{STORY_NODE}"
     - "How are you doing?" → "{CONVERSATION_NODE}"
     """
     print(f"Supervisor prompt: {supervisor_prompt}")
     inputs = [("system", supervisor_prompt), ("user", latest_message)]
-    original_response = hermes_instance.invoke(inputs)
+    original_response = ollama_instance.invoke(inputs)
     route = original_response.content.lower().replace("\"", "")
     print(f"ROUTE DETERMINED: {route}")
 
@@ -316,7 +308,7 @@ def supervisor_routing(state: MessagesState, config: RunnableConfig):
 
     print(f"Judge system prompt: {judge_system_prompt}")
     judge_inputs = [("system", judge_system_prompt), ("user", judge_user_prompt)]
-    judge_response = hermes_instance.invoke(judge_inputs)
+    judge_response = ollama_instance.invoke(judge_inputs)
     print(f"Judge response: {judge_response.content}")
 
     if route not in [CODING_NODE, STORY_NODE, CONVERSATION_NODE]:
@@ -340,7 +332,7 @@ def summarize_conversation(state: MessagesState, config: RunnableConfig):
     messages = state["messages"]
     # messages[-1].content = messages[-1].content + "\r\n I am wrapping up this conversation and starting a new one :)"
     messages = messages + [HumanMessage(content=summary_message_prompt)]
-    summary_response = llama_instance.invoke(messages)
+    summary_response = ollama_instance.invoke(messages)
     timestamp = get_current_time_internal()
     summary = f"Summary made at {timestamp} \r\n {summary_response.content}"
     print(f"Summary: {summary}")
@@ -348,7 +340,7 @@ def summarize_conversation(state: MessagesState, config: RunnableConfig):
         ("system",
          "Please provide a short sentence describing this memory starting with the word \"memory\". Example - memory_of_pie"),
         ("user", summary)]
-    summary_response_key = llama_instance.invoke(response_key_inputs, config=get_config_values(config))
+    summary_response_key = ollama_instance.invoke(response_key_inputs, config=get_config_values(config))
     print(f"Summary Key: {summary_response_key.content}")
     add_memory(user_id, summary_response_key.content, summary)
     # Remove all but the last message

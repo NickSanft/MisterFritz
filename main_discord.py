@@ -3,9 +3,8 @@ import json
 import discord
 from discord.ext import commands
 
-import fritters_utils
 from message_source import MessageSource
-from mister_fritz import ask_stuff, IMAGE_EXTENSIONS
+from mister_fritz import ask_stuff
 
 discord_key = "discord_bot_token"
 command_prefix = "$"
@@ -112,5 +111,5 @@ def get_key_from_json_config_file(key_name: str) -> str | None:
 
 
 if __name__ == '__main__':
-    discord_secret = get_key_from_json_config_file(fritters_utils.DISCORD_KEY)
+    discord_secret = get_key_from_json_config_file(discord_key)
     client.run(discord_secret)
