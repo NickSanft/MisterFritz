@@ -61,18 +61,6 @@ async def on_message(message):
         print("Not a DM or mention, not responding :)")
         return
 
-    if message.attachments:
-        print("Attachment found!")
-        split_v1 = str(message.attachments).split("filename='")[1]
-        filename = str(split_v1).split("' ")[0]
-        filepath = "./input/{}".format(filename)
-        if filename.endswith(tuple(IMAGE_EXTENSIONS)):
-            await message.attachments[0].save(fp=filepath)  # saves the file
-            print("File saved!")
-
-    else:
-        print("There is no attachment")
-
     print("Incoming message: {} \r\n from: {}".format(message.clean_content, author))
 
     original_response = ask_stuff(message.clean_content, MessageSource.DISCORD_TEXT, author)
