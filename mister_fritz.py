@@ -92,7 +92,7 @@ def format_prompt(prompt: str, source: MessageSource, user_id: str) -> str:
 
 def search_memories_internal(config: RunnableConfig, query: str):
     user_id = config.get("metadata").get("user_id")
-    search_result = chroma_store.search(query, (user_id, "memories"), limit=30)
+    search_result = chroma_store.search(query, (str(user_id), "memories"), limit=30)
     summaries = {}
     for _, summary_dict in search_result:
         for key, summary in summary_dict.items():
@@ -152,7 +152,7 @@ def scrape_web(url: str):
 
         # 4. Extract text
         # get_text() with separator=' ' prevents words merging (e.g. "hello</div><div>world")
-        text = soup.get_text(separator=' ')
+        text = soup.get_text(' ')
 
         # 5. Clean up whitespace
         # This collapses multiple spaces/newlines into a single space and strips edges
@@ -273,7 +273,8 @@ def supervisor_routing(state: MessagesState, config: RunnableConfig):
     """Handles general conversation, calling appropriate helpers for specific tasks."""
     messages = state["messages"]
     latest_message = messages[-1].content if messages else ""
-    user_id = config.get("metadata").get("user_id")
+    metadata = config.get("metadata", {})
+    user_id = metadata.get("user_id")
 
     supervisor_prompt = f"""
     Your response must always be one of the following options:
@@ -324,7 +325,7 @@ def supervisor_routing(state: MessagesState, config: RunnableConfig):
     return route
 
 
-def should_continue(state: MessagesState) -> Literal["summarize_conversation", END]:
+def should_continue(state: MessagesState) -> Literal["summarize_conversation", "__end__"]:
     #messages = state["messages"]
     #print(f"Messages: {messages}")
     """Decide whether to summarize or end the conversation."""
@@ -333,7 +334,8 @@ def should_continue(state: MessagesState) -> Literal["summarize_conversation", E
 
 def summarize_conversation(state: MessagesState, config: RunnableConfig):
     print("In: summarize_conversation")
-    user_id = config.get("metadata").get("user_id")
+    metadata = config.get("metadata", {})
+    user_id = metadata.get("user_id")
     summary_message_prompt = "Please summarize the conversation above:"
     messages = state["messages"]
     # messages[-1].content = messages[-1].content + "\r\n I am wrapping up this conversation and starting a new one :)"
@@ -365,11 +367,12 @@ def conversation(state: MessagesState, config: RunnableConfig):
     return {'messages': [resp]}
 
 
-def get_config_values(config: RunnableConfig):
-    config_values = {
+def get_config_values(config: RunnableConfig) -> RunnableConfig:
+    metadata = config.get("metadata", {})
+    config_values: RunnableConfig = {
         "configurable": {
-            "user_id": config.get("metadata").get("user_id"),
-            "thread_id": config.get("metadata").get("thread_id"),
+            "user_id": metadata.get("user_id"),
+            "thread_id": metadata.get("thread_id"),
         }
     }
     return config_values
