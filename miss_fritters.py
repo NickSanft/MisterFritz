@@ -49,7 +49,7 @@ def get_conversation_tools_description():
         "scrape_website": (scrape_web, "If provided a URL by the user, this can be used to scrape a website's HTML."),
         "search_web": (search_web, "Use only to search the internet if you are unsure about something."),
         "roll_dice": (roll_dice, "Roll different types of dice."),
-        "search_memories": (search_memories, "Returns a JSON payload of stored memories you have had with a user.")
+        "search_memories": (search_memories, "Returns a JSON payload of stored memories you have had with a user based on a search term.")
     }
     return conversation_tool_dict
 
@@ -93,9 +93,9 @@ def format_prompt(prompt: str, source: MessageSource, user_id: str) -> str:
     """
 
 
-def search_memories_internal(config: RunnableConfig):
+def search_memories_internal(config: RunnableConfig, query: str):
     user_id = config.get("metadata").get("user_id")
-    search_result = chroma_store.search("memories", (user_id, "memories"), limit=30)
+    search_result = chroma_store.search(query, (user_id, "memories"), limit=30)
     summaries = {}
     for _, summary_dict in search_result:
         for key, summary in summary_dict.items():
@@ -229,14 +229,15 @@ def roll_dice(num_dice: int, num_sides: int, config: RunnableConfig):
 
 
 @tool(parse_docstring=True)
-def search_memories(config: RunnableConfig):
-    """ This function returns memories in JSON format.
+def search_memories(config: RunnableConfig, query: str):
+    """ This function returns memories in JSON format based on a search term.
 
     Args:
         config: The RunnableConfig.
+        query: The keywords do to a semantic search for.
     """
     print("TOOL CALLED")
-    return search_memories_internal(config)
+    return search_memories_internal(config, query)
 
 
 def add_memory(user_id: str, memory_key: str, memory_to_store: str):
@@ -471,7 +472,7 @@ def test_asking_stuff():
     ask_stuff("I am tired", MessageSource.DISCORD_TEXT, "hello")
     ask_stuff("Thanks", MessageSource.DISCORD_TEXT, "hello")
     ask_stuff("Wow", MessageSource.DISCORD_TEXT, "hello")
+    ask_stuff("What was my favorite pie?", MessageSource.DISCORD_TEXT, "hello")
 
 
-#test_asking_stuff()
-
+test_asking_stuff()

@@ -4,6 +4,7 @@ input/*
 *.wav
 .cache.sqlite
 chat_history.db*
+memory_history.db*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
