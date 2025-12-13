@@ -31,8 +31,6 @@ DB_NAME = "chat_history.db"
 
 # Constants for the routing decisions
 CONVERSATION_NODE = "conversation"
-CODING_NODE = "help_with_coding"
-STORY_NODE = "tell_a_story"
 SUMMARIZE_CONVERSATION_NODE = "summarize_conversation"
 
 
@@ -265,58 +263,6 @@ ollama_instance = ChatOllama(model=OLLAMA_MODEL)
 conversation_react_agent = create_agent(ollama_instance, tools=conversation_tools)
 
 
-def supervisor_routing(state: MessagesState, config: RunnableConfig):
-    """Handles general conversation, calling appropriate helpers for specific tasks."""
-    messages = state["messages"]
-    latest_message = messages[-1].content if messages else ""
-    metadata = config.get("metadata", {})
-    user_id = metadata.get("user_id")
-
-    supervisor_prompt = f"""
-    Your response must always be one of the following options:
-    "{CONVERSATION_NODE}" - used by default.
-
-    Do NOT generate any additional text or explanations.
-    Only return one of the above values as the complete response.
-    Example inputs and expected outputs:
-    - "How are you doing?" → "{CONVERSATION_NODE}"
-    """
-    print(f"Supervisor prompt: {supervisor_prompt}")
-    inputs = [("system", supervisor_prompt), ("user", latest_message)]
-    original_response = ollama_instance.invoke(inputs)
-    route = original_response.content.lower().replace("\"", "")
-    print(f"ROUTE DETERMINED: {route}")
-
-    judge_system_prompt = f"""
-    You are an AI judge who evaluates the quality of a response. 
-    Please return "Yes" or "No" to answer whether or not the AI made right decision. 
-    """
-
-    judge_user_prompt = f"""
-    A supervisor agent was given the following system prompt:
-    
-    {supervisor_prompt}
-    
-    The user asked the following prompt:
-    {latest_message}
-    
-    The supervisor agent then responded with:
-    
-    {route}
-    """
-
-
-    print(f"Judge system prompt: {judge_system_prompt}")
-    judge_inputs = [("system", judge_system_prompt), ("user", judge_user_prompt)]
-    judge_response = ollama_instance.invoke(judge_inputs)
-    print(f"Judge response: {judge_response.content}")
-
-    if route not in [CODING_NODE, STORY_NODE, CONVERSATION_NODE]:
-        print("This bot went a little crazy, defaulting to conversation.")
-        route = CONVERSATION_NODE
-    return route
-
-
 def should_continue(state: MessagesState) -> Literal["summarize_conversation", "__end__"]:
     #messages = state["messages"]
     #print(f"Messages: {messages}")
@@ -378,7 +324,7 @@ workflow.add_node(CONVERSATION_NODE, conversation)
 workflow.add_node(SUMMARIZE_CONVERSATION_NODE, summarize_conversation)
 
 # Set workflow edges
-workflow.add_conditional_edges(START, supervisor_routing,{CONVERSATION_NODE: CONVERSATION_NODE})
+workflow.add_edge(START, CONVERSATION_NODE)
 workflow.add_conditional_edges(CONVERSATION_NODE, should_continue)
 workflow.add_edge(SUMMARIZE_CONVERSATION_NODE, END)
 
