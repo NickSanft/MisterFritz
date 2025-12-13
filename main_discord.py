@@ -4,7 +4,7 @@ from discord.ext import commands
 import fritters_utils
 from fritters_utils import get_key_from_json_config_file
 from message_source import MessageSource
-from miss_fritters import ask_stuff, IMAGE_EXTENSIONS
+from mister_fritz import ask_stuff, IMAGE_EXTENSIONS
 
 command_prefix = "$"
 intents = discord.Intents.default()

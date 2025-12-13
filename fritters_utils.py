@@ -2,8 +2,6 @@ import json
 
 DISCORD_KEY = "discord_bot_token"
 ROOT_USER_ID_KEY = "root_user_id"
-KASA_USER_KEY = "kasa_username"
-KASA_PASSWORD_KEY = "kasa_password"
 
 def get_key_from_json_config_file(key_name: str) -> str | None:
     file_path = "config.json"

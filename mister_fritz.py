@@ -475,4 +475,4 @@ def test_asking_stuff():
     ask_stuff("What was my favorite pie?", MessageSource.DISCORD_TEXT, "hello")
 
 
-test_asking_stuff()
+#test_asking_stuff()
