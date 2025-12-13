@@ -334,18 +334,3 @@ app = workflow.compile(checkpointer=checkpointer, store=store)
 
 # with open("mermaid_diagram.png", "wb") as binary_file:
 #     binary_file.write(app.get_graph().draw_mermaid_png())
-
-
-def test_asking_stuff():
-    ask_stuff("Can you give me a Python function that prints the numbers 1 through 10?", MessageSource.DISCORD_TEXT, "hello")
-    ask_stuff("Hi there!", MessageSource.DISCORD_TEXT, "hello")
-    ask_stuff("Apple pie is my favorite, what is your favorite pie?", MessageSource.DISCORD_TEXT, "hello")
-    ask_stuff("What other desserts are similar to pie?", MessageSource.DISCORD_TEXT, "hello")
-    ask_stuff("What pie is the most famous in New York?", MessageSource.DISCORD_TEXT, "hello")
-    ask_stuff("I am tired", MessageSource.DISCORD_TEXT, "hello")
-    ask_stuff("Thanks", MessageSource.DISCORD_TEXT, "hello")
-    ask_stuff("Wow", MessageSource.DISCORD_TEXT, "hello")
-    ask_stuff("What was my favorite pie?", MessageSource.DISCORD_TEXT, "hello")
-
-
-#test_asking_stuff()
