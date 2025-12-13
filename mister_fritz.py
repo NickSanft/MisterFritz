@@ -18,9 +18,8 @@ from langchain_ollama import ChatOllama
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.constants import START, END
 from langgraph.graph import StateGraph, MessagesState
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 
-import fritters_utils
 from chroma_store import ChromaStore
 # ===== LOCAL MODULES =====
 from message_source import MessageSource
@@ -267,7 +266,7 @@ llama_instance = ChatOllama(model=LLAMA_MODEL)
 HERMES_MODEL = "hermes3"
 hermes_instance = ChatOllama(model=HERMES_MODEL)
 
-conversation_react_agent = create_react_agent(llama_instance, tools=conversation_tools)
+conversation_react_agent = create_agent(llama_instance, tools=conversation_tools)
 
 
 def supervisor_routing(state: MessagesState, config: RunnableConfig):
