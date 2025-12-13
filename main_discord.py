@@ -1,11 +1,13 @@
+import json
+
 import discord
 from discord.ext import commands
 
 import fritters_utils
-from fritters_utils import get_key_from_json_config_file
 from message_source import MessageSource
 from mister_fritz import ask_stuff, IMAGE_EXTENSIONS
 
+discord_key = "discord_bot_token"
 command_prefix = "$"
 intents = discord.Intents.default()
 intents.message_content = True
@@ -93,6 +95,20 @@ async def on_message(message):
 
 def split_into_chunks(s, chunk_size=2000):
     return [s[i:i + chunk_size] for i in range(0, len(s), chunk_size)]
+
+def get_key_from_json_config_file(key_name: str) -> str | None:
+    file_path = "config.json"
+    try:
+        with open(file_path, 'r') as file:
+            data = json.load(file)
+            return data.get(key_name)  # Get the key value by key name
+    except FileNotFoundError:
+        print(f"Error: The file at {file_path} was not found.")
+    except json.JSONDecodeError:
+        print(f"Error: The file at {file_path} is not a valid JSON file.")
+    except Exception as e:
+        print(f"Error reading file: {e}")
+    return None
 
 
 if __name__ == '__main__':
