@@ -47,7 +47,6 @@ def get_system_description(tools: dict[str, tuple[BaseTool, str]]):
     """
     Format the chatbot's system role description dynamically by including tools from the list.
     """
-    # Set tools list dynamically
     tool_descriptions = "".join(
         [f"    {tool_name}: {tup[1]}\n" for tool_name, tup in tools.items()]
     )
@@ -292,7 +291,7 @@ def summarize_conversation(state: MessagesState, config: RunnableConfig):
 def conversation(state: MessagesState, config: RunnableConfig):
     messages = state["messages"]
     latest_message = messages[-1].content if messages else ""
-    print(f"Latest messsage: {latest_message}")
+    print(f"Latest message: {latest_message}")
     inputs = {"messages": [("system", get_system_description(get_conversation_tools_description())),
                            ("user", latest_message)]}
     resp = print_stream(conversation_react_agent.stream(inputs, config=get_config_values(config), stream_mode="values"))
