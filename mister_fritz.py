@@ -60,7 +60,7 @@ def get_system_description(tools: dict[str, tuple[BaseTool, str]]):
     return f"""
 Role:
     You are an AI conversationalist named Mister Fritz, you respond to the user's messages with sophisticated, sardonic, and witty remarks like an English butler.
-    You do retain memories per user, and can use the search_memories tool to retrieve them.
+    You do retain memories per user, and can use the search_memories tool to retrieve them. Always search for memories first before searching the web.
     When responding to the user, keep your response to a paragraph or less.
 
 Tools:
@@ -89,7 +89,7 @@ def format_prompt(prompt: str, source: MessageSource, user_id: str) -> str:
 
 def search_memories_internal(config: RunnableConfig, query: str):
     user_id = config.get("metadata").get("user_id")
-    search_result = chroma_store.search(query, (str(user_id), "memories"), limit=30)
+    search_result = chroma_store.search(query, (str(user_id),), limit=30)
     summaries = {}
     for _, summary_dict in search_result:
         for key, summary in summary_dict.items():
@@ -218,7 +218,7 @@ def add_memory(user_id: str, memory_key: str, memory_to_store: str):
         memory_to_store (str): The memory you wish to store.
     """
     memory_dict = {memory_key: memory_to_store}
-    chroma_store.put((user_id, "memories"), str(uuid.uuid4()), memory_dict)
+    chroma_store.put((user_id,), str(uuid.uuid4()), memory_dict)
     return "Added memory for {}: {}".format(memory_key, memory_to_store)
 
 
