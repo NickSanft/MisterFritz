@@ -205,7 +205,6 @@ def search_memories(config: RunnableConfig, query: str):
         config: The RunnableConfig.
         query: The keywords do to a semantic search for.
     """
-    print("TOOL CALLED")
     return search_memories_internal(config, query)
 
 
@@ -218,7 +217,7 @@ def add_memory(user_id: str, memory_key: str, memory_to_store: str):
         memory_to_store (str): The memory you wish to store.
     """
     memory_dict = {memory_key: memory_to_store}
-    chroma_store.put((user_id,), str(uuid.uuid4()), memory_dict)
+    chroma_store.put((str(user_id),), str(uuid.uuid4()), memory_dict)
     return "Added memory for {}: {}".format(memory_key, memory_to_store)
 
 
