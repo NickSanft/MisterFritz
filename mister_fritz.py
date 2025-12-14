@@ -1,4 +1,3 @@
-# ===== IMPORTS =====
 import json
 import random
 import re
@@ -21,15 +20,11 @@ from langgraph.graph import StateGraph, MessagesState
 from langchain.agents import create_agent
 
 from chroma_store import ChromaStore
-# ===== LOCAL MODULES =====
 from message_source import MessageSource
 from sqlite_store import SQLiteStore
 
-# ===== CONFIGURATION =====
 OLLAMA_MODEL = "gpt-oss"
 DB_NAME = "chat_history.db"
-
-# Constants for the routing decisions
 CONVERSATION_NODE = "conversation"
 SUMMARIZE_CONVERSATION_NODE = "summarize_conversation"
 
@@ -315,19 +310,15 @@ def get_config_values(config: RunnableConfig) -> RunnableConfig:
     return config_values
 
 
-# ===== GRAPH WORKFLOW =====
 workflow = StateGraph(MessagesState)
 
-# Define nodes
 workflow.add_node(CONVERSATION_NODE, conversation)
 workflow.add_node(SUMMARIZE_CONVERSATION_NODE, summarize_conversation)
 
-# Set workflow edges
 workflow.add_edge(START, CONVERSATION_NODE)
 workflow.add_conditional_edges(CONVERSATION_NODE, should_continue)
 workflow.add_edge(SUMMARIZE_CONVERSATION_NODE, END)
 
-# Compile graph
 app = workflow.compile(checkpointer=checkpointer, store=store)
 
 
