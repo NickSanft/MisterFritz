@@ -9,7 +9,7 @@ import requests
 from bs4 import BeautifulSoup
 
 import pytz
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from langchain_core.messages import HumanMessage, RemoveMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool, BaseTool
