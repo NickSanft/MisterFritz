@@ -1,6 +1,7 @@
 import os
 import sys
 from typing import List
+import io
 
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from pydantic import BaseModel, Field
@@ -14,10 +15,94 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import END, StateGraph, START
 
+try:
+    from PIL import Image
+    import easyocr
+    OCR_AVAILABLE = True
+    # Initialize EasyOCR reader (done once)
+    reader = easyocr.Reader(['en'], gpu=False)
+except ImportError:
+    OCR_AVAILABLE = False
+    reader = None
+    print("Warning: EasyOCR not installed. OCR fallback for PDFs without embedded text will not be available.")
+
+try:
+    import fitz  # PyMuPDF
+    PYMUPDF_AVAILABLE = True
+except ImportError:
+    PYMUPDF_AVAILABLE = False
+    print("Warning: PyMuPDF not installed. Cannot render PDF pages for OCR.")
+
 DOCS_FOLDER = "./input"  # Folder containing your .docx and .pdf files
 DB_PATH = "./chroma_store"  # Where the vector DB will be saved
 COLLECTION_NAME = "word_docs_rag"
 INDEXED_FILES_PATH = os.path.join(DB_PATH, "indexed_files.txt")
+
+
+def load_pdf_with_ocr_fallback(file_path: str) -> List[Document]:
+    """
+    Loads a PDF file. First tries PyPDFLoader for embedded text.
+    If text is empty or too short, falls back to OCR using EasyOCR (no Tesseract required).
+    """
+    # Try standard PDF loading first
+    loader = PyPDFLoader(file_path)
+    docs = loader.load()
+
+    # Check if we got meaningful text (more than 50 characters total)
+    total_text = "".join([doc.page_content for doc in docs]).strip()
+
+    if len(total_text) > 50:
+        print(f"   - Extracted text from embedded PDF content")
+        return docs
+
+    # Fall back to OCR
+    print(f"   - No embedded text found, using OCR...")
+
+    if not OCR_AVAILABLE or not PYMUPDF_AVAILABLE:
+        print(f"   - WARNING: OCR not available. Install with: pip install easyocr PyMuPDF pillow")
+        return docs  # Return empty/minimal docs
+
+    try:
+        # Open PDF with PyMuPDF
+        pdf_document = fitz.open(file_path)
+        ocr_docs = []
+
+        for page_num in range(len(pdf_document)):
+            page = pdf_document[page_num]
+
+            # Render page to an image (higher DPI = better quality)
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom for better OCR
+
+            # Convert to PIL Image
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+            # Save to bytes for EasyOCR
+            img_byte_arr = io.BytesIO()
+            img.save(img_byte_arr, format='PNG')
+            img_byte_arr = img_byte_arr.getvalue()
+
+            # Extract text using EasyOCR (no Tesseract needed!)
+            result = reader.readtext(img_byte_arr, detail=0)
+            text = "\n".join(result)
+
+            # Create a Document object for each page
+            doc = Document(
+                page_content=text,
+                metadata={
+                    "source": file_path,
+                    "page": page_num,
+                    "extraction_method": "ocr_easyocr"
+                }
+            )
+            ocr_docs.append(doc)
+
+        pdf_document.close()
+        print(f"   - OCR extracted text from {len(ocr_docs)} pages")
+        return ocr_docs
+
+    except Exception as e:
+        print(f"   - OCR failed: {e}")
+        return docs  # Return original docs as fallback
 
 
 # --- PART 1: INGESTION ENGINE ---
@@ -61,22 +146,19 @@ def get_vectorstore_retriever():
             for file_path in new_files:
                 print(f"   - Loading: {file_path}")
                 if file_path.endswith('.pdf'):
-                    loader = PyPDFLoader(file_path)
-                    print(loader.file_path)
-                    docs.extend(loader.load())
-
+                    docs.extend(load_pdf_with_ocr_fallback(file_path))
                 else:
                     loader = UnstructuredWordDocumentLoader(file_path)
                     docs.extend(loader.load())
 
             if docs:
                 text_splitter = RecursiveCharacterTextSplitter(
-                    chunk_size=1000,
+                    chunk_size=10000,
                     chunk_overlap=200,
                     add_start_index=True
                 )
                 for doc in docs:
-                    print(f"   - Splitting: {doc.content}")
+                    print(f"   - Splitting: {doc.page_content[:100]}...")
                 splits = text_splitter.split_documents(docs)
                 vectorstore.add_documents(splits)
 
@@ -108,15 +190,13 @@ def get_vectorstore_retriever():
         )
         docs.extend(docx_loader.load())
 
-        # Load .pdf files
-        pdf_loader = DirectoryLoader(
-            DOCS_FOLDER,
-            glob="**/*.pdf",
-            loader_cls=PyPDFLoader,
-            show_progress=True,
-            use_multithreading=True
-        )
-        docs.extend(pdf_loader.load())
+        # Load .pdf files with OCR fallback
+        for root, dirs, files in os.walk(DOCS_FOLDER):
+            for file in files:
+                if file.endswith('.pdf'):
+                    file_path = os.path.join(root, file)
+                    print(f"Loading PDF: {file_path}")
+                    docs.extend(load_pdf_with_ocr_fallback(file_path))
 
         if not docs:
             print("No documents found. Please add .docx or .pdf files to the folder.")
@@ -316,5 +396,5 @@ def ask_question(user_input):
     return app.invoke(inputs)["generation"]
 
 if __name__ == '__main__':
-    answer = ask_question("Who is Aryabhata?")
+    answer = ask_question("Who is Senialis?")
     print("FINAL ANSWER: ", answer)
