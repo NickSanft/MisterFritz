@@ -393,7 +393,8 @@ def ask_question(user_input):
                 final_generation = value["generation"]
 
     print(f"Agent: {final_generation}")
-    return app.invoke(inputs)["generation"]
+    # Return the generation captured during streaming to avoid running the graph twice
+    return final_generation
 
 if __name__ == '__main__':
     answer = ask_question("Who is Senialis?")
