@@ -20,14 +20,16 @@ from langgraph.graph import END, StateGraph, START
 # os.environ["OPENAI_API_KEY"] = "sk-..."
 
 DOCS_FOLDER = "./input"  # Folder containing your .docx files
-DB_PATH = "./test_store"  # Where the vector DB will be saved
+DB_PATH = "./chroma_store"  # Where the vector DB will be saved
 COLLECTION_NAME = "word_docs_rag"
+INDEXED_FILES_PATH = os.path.join(DB_PATH, "indexed_files.txt")
 
 
 # --- PART 1: INGESTION ENGINE ---
 def get_vectorstore_retriever():
     """
     Checks if a local vector store exists. If not, ingests documents from DOCS_FOLDER.
+    If vector store exists, checks for new documents and adds them.
     Returns a retriever object.
     """
     embeddings = OllamaEmbeddings(model="mxbai-embed-large")
@@ -40,6 +42,49 @@ def get_vectorstore_retriever():
             embedding_function=embeddings,
             collection_name=COLLECTION_NAME
         )
+
+        # Check for new documents
+        indexed_files = set()
+        if os.path.exists(INDEXED_FILES_PATH):
+            with open(INDEXED_FILES_PATH, 'r') as f:
+                indexed_files = set(line.strip() for line in f)
+
+        # Find all current .docx files
+        current_files = set()
+        if os.path.exists(DOCS_FOLDER):
+            for root, dirs, files in os.walk(DOCS_FOLDER):
+                for file in files:
+                    if file.endswith('.docx'):
+                        current_files.add(os.path.join(root, file))
+
+        new_files = current_files - indexed_files
+
+        if new_files:
+            print(f"--- FOUND {len(new_files)} NEW DOCUMENTS ---")
+            # Load and process only new files
+            docs = []
+            for file_path in new_files:
+                print(f"   - Loading: {file_path}")
+                loader = UnstructuredWordDocumentLoader(file_path)
+                docs.extend(loader.load())
+
+            if docs:
+                text_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=1000,
+                    chunk_overlap=200,
+                    add_start_index=True
+                )
+                splits = text_splitter.split_documents(docs)
+                vectorstore.add_documents(splits)
+
+                # Update indexed files list
+                with open(INDEXED_FILES_PATH, 'a') as f:
+                    for file_path in new_files:
+                        f.write(f"{file_path}\n")
+
+                print("--- NEW DOCUMENTS ADDED ---")
+        else:
+            print("--- NO NEW DOCUMENTS FOUND ---")
     else:
         print("--- CREATING NEW VECTOR STORE FROM DOCUMENTS ---")
         if not os.path.exists(DOCS_FOLDER):
@@ -79,6 +124,15 @@ def get_vectorstore_retriever():
             persist_directory=DB_PATH
         )
         print("--- INGESTION COMPLETE ---")
+
+        # Track indexed files
+        if not os.path.exists(DB_PATH):
+            os.makedirs(DB_PATH)
+        with open(INDEXED_FILES_PATH, 'w') as f:
+            for root, dirs, files in os.walk(DOCS_FOLDER):
+                for file in files:
+                    if file.endswith('.docx'):
+                        f.write(f"{os.path.join(root, file)}\n")
 
     return vectorstore.as_retriever()
 

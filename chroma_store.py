@@ -18,7 +18,7 @@ class ChromaStore(BaseStore[str, Union[str, bytes]]):
     def __init__(
             self,
             collection_name: str = "langchain_store",
-            persist_directory: Optional[str] = 'memory_history.db'
+            persist_directory: Optional[str] = 'chroma_store'
     ):
         """
         Initialize the ChromaStore.5
