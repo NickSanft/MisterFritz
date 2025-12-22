@@ -1,25 +1,20 @@
 import os
 import sys
-from typing import List, Literal
+from typing import List
 
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
-from langchain_community.document_loaders import DirectoryLoader, UnstructuredWordDocumentLoader
+from langchain_community.document_loaders import DirectoryLoader, UnstructuredWordDocumentLoader, PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 from langgraph.graph import END, StateGraph, START
 
-# --- CONFIGURATION ---
-# Ensure you have your OpenAI API Key set in your environment
-# os.environ["OPENAI_API_KEY"] = "sk-..."
-
-DOCS_FOLDER = "./input"  # Folder containing your .docx files
+DOCS_FOLDER = "./input"  # Folder containing your .docx and .pdf files
 DB_PATH = "./chroma_store"  # Where the vector DB will be saved
 COLLECTION_NAME = "word_docs_rag"
 INDEXED_FILES_PATH = os.path.join(DB_PATH, "indexed_files.txt")
@@ -49,12 +44,12 @@ def get_vectorstore_retriever():
             with open(INDEXED_FILES_PATH, 'r') as f:
                 indexed_files = set(line.strip() for line in f)
 
-        # Find all current .docx files
+        # Find all current .docx and .pdf files
         current_files = set()
         if os.path.exists(DOCS_FOLDER):
             for root, dirs, files in os.walk(DOCS_FOLDER):
                 for file in files:
-                    if file.endswith('.docx'):
+                    if file.endswith(('.docx', '.pdf')):
                         current_files.add(os.path.join(root, file))
 
         new_files = current_files - indexed_files
@@ -65,8 +60,14 @@ def get_vectorstore_retriever():
             docs = []
             for file_path in new_files:
                 print(f"   - Loading: {file_path}")
-                loader = UnstructuredWordDocumentLoader(file_path)
-                docs.extend(loader.load())
+                if file_path.endswith('.pdf'):
+                    loader = PyPDFLoader(file_path)
+                    print(loader.file_path)
+                    docs.extend(loader.load())
+
+                else:
+                    loader = UnstructuredWordDocumentLoader(file_path)
+                    docs.extend(loader.load())
 
             if docs:
                 text_splitter = RecursiveCharacterTextSplitter(
@@ -74,6 +75,8 @@ def get_vectorstore_retriever():
                     chunk_overlap=200,
                     add_start_index=True
                 )
+                for doc in docs:
+                    print(f"   - Splitting: {doc.content}")
                 splits = text_splitter.split_documents(docs)
                 vectorstore.add_documents(splits)
 
@@ -92,19 +95,31 @@ def get_vectorstore_retriever():
             print(f"Created folder {DOCS_FOLDER}. Please add .docx files and restart.")
             sys.exit()
 
-        # 1. Load Word Documents
-        # UnstructuredWordDocumentLoader is robust for unformatted text
-        loader = DirectoryLoader(
+        # 1. Load Word Documents and PDFs
+        docs = []
+
+        #Load .docx files
+        docx_loader = DirectoryLoader(
             DOCS_FOLDER,
             glob="**/*.docx",
             loader_cls=UnstructuredWordDocumentLoader,
             show_progress=True,
             use_multithreading=True
         )
-        docs = loader.load()
+        docs.extend(docx_loader.load())
+
+        # Load .pdf files
+        pdf_loader = DirectoryLoader(
+            DOCS_FOLDER,
+            glob="**/*.pdf",
+            loader_cls=PyPDFLoader,
+            show_progress=True,
+            use_multithreading=True
+        )
+        docs.extend(pdf_loader.load())
 
         if not docs:
-            print("No documents found. Please add .docx files to the folder.")
+            print("No documents found. Please add .docx or .pdf files to the folder.")
             sys.exit()
 
         # 2. Split Text
@@ -131,7 +146,7 @@ def get_vectorstore_retriever():
         with open(INDEXED_FILES_PATH, 'w') as f:
             for root, dirs, files in os.walk(DOCS_FOLDER):
                 for file in files:
-                    if file.endswith('.docx'):
+                    if file.endswith(('.docx', '.pdf')):
                         f.write(f"{os.path.join(root, file)}\n")
 
     return vectorstore.as_retriever()
@@ -150,6 +165,7 @@ class GraphState(TypedDict):
 
 # --- PART 3: PROMPTS & MODELS ---
 llm = ChatOllama(model="gpt-oss", temperature=0)
+#llm = ChatOllama(model="llama3.2", temperature=0)
 
 
 # B. Document Grader Data Model
@@ -300,5 +316,5 @@ def ask_question(user_input):
     return app.invoke(inputs)["generation"]
 
 if __name__ == '__main__':
-    answer = ask_question("Who is Senialis?")
+    answer = ask_question("Who is Aryabhata?")
     print("FINAL ANSWER: ", answer)
