@@ -37,7 +37,19 @@ async def join(ctx):
 @client.command()
 async def lore(ctx, *, message):
     print(message)
-    await ctx.send(ask_question(message))
+    original_message = await ctx.send("This may take a few seconds, please wait. This message will be updated with the result!")
+    original_response = ask_question(message)
+    resp_len = len(original_response)
+    author = ctx.author.name
+
+    if resp_len > 2000:
+        response = "The answer was over 2000 ({}), so you're getting multiple messages {} \r\n".format(resp_len,
+                                                                                                       author) + original_response
+        responses = split_into_chunks(response)
+        for i, response in enumerate(responses):
+            await ctx.send(response)
+    else:
+        await original_message.edit(content=original_response)
 
 @client.command()
 async def leave(ctx):
