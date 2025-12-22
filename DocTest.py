@@ -153,7 +153,7 @@ def get_vectorstore_retriever():
 
             if docs:
                 text_splitter = RecursiveCharacterTextSplitter(
-                    chunk_size=10000,
+                    chunk_size=1000,
                     chunk_overlap=200,
                     add_start_index=True
                 )
