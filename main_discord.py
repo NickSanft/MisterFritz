@@ -3,6 +3,7 @@ import json
 import discord
 from discord.ext import commands
 
+from DocTest import ask_question
 from message_source import MessageSource
 from mister_fritz import ask_stuff
 
@@ -33,11 +34,10 @@ async def join(ctx):
     except AttributeError as e:
         await ctx.send("You are not connected to a voice channel, buddy!")
 
-
 @client.command()
-async def emote(ctx):
-    await ctx.send("<:MissFritters:1325945940716290151>")
-
+async def lore(ctx, *, message):
+    print(message)
+    await ctx.send(ask_question(message))
 
 @client.command()
 async def leave(ctx):
