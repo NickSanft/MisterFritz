@@ -1,6 +1,8 @@
 import json
 from enum import Enum
 
+DOCUMENT_STORAGE_DESCRIPTION = """Stuff"""
+
 class MessageSource(Enum):
     DISCORD_TEXT = 0,
     DISCORD_VOICE = 1,

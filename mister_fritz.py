@@ -21,7 +21,7 @@ from langchain.agents import create_agent
 
 import document_engine
 from chroma_store import ChromaStore
-from fritz_utils import MessageSource
+from fritz_utils import MessageSource, DOCUMENT_STORAGE_DESCRIPTION
 from sqlite_store import SQLiteStore
 
 OLLAMA_MODEL = "gpt-oss"
@@ -39,7 +39,9 @@ def get_conversation_tools_description():
         "scrape_website": (scrape_web, "If provided a URL by the user, this can be used to scrape a website's HTML."),
         "search_web": (search_web, "Use only to search the internet if you are unsure about something."),
         "roll_dice": (roll_dice, "Roll different types of dice."),
-        "search_memories": (search_memories, "Returns a JSON payload of stored memories you have had with a user based on a search term.")
+        "search_memories": (search_memories, "Returns a JSON payload of stored memories you have had with a user based on a search term."),
+        "search_lore": (search_lore, f"Search local documents. Use this for questions about: {DOCUMENT_STORAGE_DESCRIPTION}"
+        )
     }
     return conversation_tool_dict
 
@@ -193,7 +195,7 @@ def roll_dice(num_dice: int, num_sides: int, config: RunnableConfig):
 
 # ===== NEW TOOL DEFINITION =====
 @tool(parse_docstring=True)
-def search_local_knowledge_base(query: str):
+def search_lore(query: str):
     """
     Searches the local document repository (PDFs, Word Docs) to find answers to questions.
     Use this tool when the user asks about internal documents, uploaded files, or specific knowledge stored locally.
@@ -204,7 +206,7 @@ def search_local_knowledge_base(query: str):
     Returns:
     string: The answer derived from the documents.
     """
-    return document_engine.search_documents.query_documents(query)
+    return document_engine.query_documents(query)
 
 
 @tool(parse_docstring=True)
