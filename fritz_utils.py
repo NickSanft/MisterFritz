@@ -2,7 +2,7 @@ import json
 import os
 from enum import Enum
 
-DOC_STORAGE_DESCRIPTION = """Stuff"""
+DOC_STORAGE_DESCRIPTION = """anything you don't know about."""
 DOC_FOLDER = "./input"  # Folder containing your .docx and .pdf files
 CHROMA_DB_PATH = "./chroma_store"  # Where the vector DB will be saved
 CHROMA_COLLECTION_NAME = "word_docs_rag"
@@ -27,3 +27,7 @@ def get_key_from_json_config_file(key_name: str) -> str | None:
     except Exception as e:
         print(f"Error reading file: {e}")
     return None
+
+dcd = get_key_from_json_config_file("doc_storage_description")
+if dcd:
+    DOC_STORAGE_DESCRIPTION = get_key_from_json_config_file("doc_storage_description")

@@ -195,10 +195,10 @@ def roll_dice(num_dice: int, num_sides: int, config: RunnableConfig):
 @tool(parse_docstring=True)
 def search_documents(query: str):
     """
-    Use this tool to get information when the user asks about {DOC_STORAGE_DESCRIPTION}.
+    Use this tool to get information when the user asks about the description provided in the prompt.
 
     Args:
-    query: The question or search term to look for in the documents.
+    query: The question or search term to look for in the documents that match the search_documents description.
 
     Returns:
     string: The answer derived from the documents.
@@ -335,6 +335,7 @@ workflow.add_edge(SUMMARIZE_CONVERSATION_NODE, END)
 
 app = workflow.compile(checkpointer=checkpointer, store=store)
 
+print(get_conversation_tools_description())
 
-# with open("mermaid_diagram.png", "wb") as binary_file:
-#     binary_file.write(app.get_graph().draw_mermaid_png())
+with open("mermaid_diagram.png", "wb") as binary_file:
+    binary_file.write(app.get_graph().draw_mermaid_png())
