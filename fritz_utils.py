@@ -1,7 +1,13 @@
 import json
+import os
 from enum import Enum
 
-DOCUMENT_STORAGE_DESCRIPTION = """Stuff"""
+DOC_STORAGE_DESCRIPTION = """Stuff"""
+DOC_FOLDER = "./input"  # Folder containing your .docx and .pdf files
+CHROMA_DB_PATH = "./chroma_store"  # Where the vector DB will be saved
+CHROMA_COLLECTION_NAME = "word_docs_rag"
+CHAT_DB_NAME = "chat_history.db"
+INDEXED_FILES_PATH = os.path.join(CHROMA_DB_PATH, "indexed_files.txt")
 
 class MessageSource(Enum):
     DISCORD_TEXT = 0,

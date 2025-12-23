@@ -195,8 +195,7 @@ def roll_dice(num_dice: int, num_sides: int, config: RunnableConfig):
 @tool(parse_docstring=True)
 def search_documents(query: str):
     """
-    Searches the local document repository (PDFs, Word Docs) to find answers to questions.
-    Use this tool when the user asks about internal documents, uploaded files, or specific knowledge stored locally.
+    Use this tool to get information when the user asks about {DOC_STORAGE_DESCRIPTION}.
 
     Args:
     query: The question or search term to look for in the documents.

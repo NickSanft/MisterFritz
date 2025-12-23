@@ -1,3 +1,5 @@
+import asyncio
+
 import discord
 from discord.ext import commands
 
@@ -58,36 +60,61 @@ async def leave(ctx):
 
 
 @client.event
-async def on_message(message):
-    author = message.author.name
-    channel_type = message.channel
-    if message.author == client.user:
-        print("That's me, not responding :)")
+async def on_message(ctx):
+    author = ctx.author.name
+    channel_type = ctx.channel
+    if ctx.author == client.user:
         return
-    elif message.content.startswith(command_prefix):
-        await client.process_commands(message)
+    elif ctx.content.startswith(command_prefix):
+        await client.process_commands(ctx)
         return
-    elif not isinstance(channel_type, discord.DMChannel) and not client.user.mentioned_in(message):
-        print("Not a DM or mention, not responding :)")
+    elif not isinstance(channel_type, discord.DMChannel) and not client.user.mentioned_in(ctx):
         return
 
-    print("Incoming message: {} \r\n from: {}".format(message.clean_content, author))
+    print(f"Incoming message from: {author}")
 
-    original_response = ask_stuff(message.clean_content, MessageSource.DISCORD_TEXT, author)
-    print("Final response: {}".format(original_response))
+    # This variable will hold the message object if the 5-second timer finishes
+    patience_msg = None
+
+    async def send_patience_warning():
+        nonlocal patience_msg
+        await asyncio.sleep(5)
+        print("Time's up!")
+        patience_msg = await ctx.channel.send("Please hold, this requires more thought. This message will be edited once complete.")
+
+    # Start the timer task
+    patience_task = asyncio.create_task(send_patience_warning())
+
+    # Run the blocking ask_stuff function in a thread
+    loop = asyncio.get_running_loop()
+    try:
+        original_response = await loop.run_in_executor(
+            None,
+            lambda: ask_stuff(ctx.clean_content, MessageSource.DISCORD_TEXT, author)
+        )
+    finally:
+        # Stop the timer if ask_stuff finishes (even if it already sent the message)
+        patience_task.cancel()
 
     if not original_response:
         original_response = "The bot got sad and doesn't want to talk to you at the moment :("
 
+    # --- THE EDIT LOGIC ---
     resp_len = len(original_response)
+
     if resp_len > 2000:
-        response = "The answer was over 2000 ({}), so you're getting multiple messages {} \r\n".format(resp_len,
-                                                                                                       author) + original_response
-        responses = split_into_chunks(response)
-        for i, response in enumerate(responses):
-            await message.channel.send(response)
+        responses = split_into_chunks(original_response)
+        for chunk in responses:
+            if patience_msg:
+                await patience_msg.edit(content=chunk)
+                patience_msg = None
+            await ctx.channel.send(chunk)
     else:
-        await message.channel.send(original_response)
+        # If we have a patience message, EDIT it. Otherwise, SEND a new one.
+        if patience_msg:
+            await patience_msg.edit(content=original_response)
+        else:
+            await ctx.channel.send(original_response)
 
 
 def split_into_chunks(s, chunk_size=2000):
