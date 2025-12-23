@@ -15,6 +15,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import END, StateGraph, START
 
+from fritz_utils import CHROMA_DB_PATH, INDEXED_FILES_PATH, CHROMA_COLLECTION_NAME, DOC_FOLDER
+
 try:
     from PIL import Image
     import easyocr
@@ -33,10 +35,7 @@ except ImportError:
     PYMUPDF_AVAILABLE = False
     print("Warning: PyMuPDF not installed. Cannot render PDF pages for OCR.")
 
-DOCS_FOLDER = "./input"  # Folder containing your .docx and .pdf files
-DB_PATH = "./chroma_store"  # Where the vector DB will be saved
-COLLECTION_NAME = "word_docs_rag"
-INDEXED_FILES_PATH = os.path.join(DB_PATH, "indexed_files.txt")
+
 
 
 def load_pdf_with_ocr_fallback(file_path: str) -> List[Document]:
@@ -115,12 +114,12 @@ def get_vectorstore_retriever():
     embeddings = OllamaEmbeddings(model="mxbai-embed-large")
 
     # Check if DB exists
-    if os.path.exists(DB_PATH) and os.listdir(DB_PATH):
+    if os.path.exists(CHROMA_DB_PATH) and os.listdir(CHROMA_DB_PATH):
         print("--- LOADING EXISTING VECTOR STORE ---")
         vectorstore = Chroma(
-            persist_directory=DB_PATH,
+            persist_directory=CHROMA_DB_PATH,
             embedding_function=embeddings,
-            collection_name=COLLECTION_NAME
+            collection_name=CHROMA_COLLECTION_NAME
         )
 
         # Check for new documents
@@ -131,8 +130,8 @@ def get_vectorstore_retriever():
 
         # Find all current .docx and .pdf files
         current_files = set()
-        if os.path.exists(DOCS_FOLDER):
-            for root, dirs, files in os.walk(DOCS_FOLDER):
+        if os.path.exists(DOC_FOLDER):
+            for root, dirs, files in os.walk(DOC_FOLDER):
                 for file in files:
                     if file.endswith(('.docx', '.pdf')):
                         current_files.add(os.path.join(root, file))
@@ -172,9 +171,9 @@ def get_vectorstore_retriever():
             print("--- NO NEW DOCUMENTS FOUND ---")
     else:
         print("--- CREATING NEW VECTOR STORE FROM DOCUMENTS ---")
-        if not os.path.exists(DOCS_FOLDER):
-            os.makedirs(DOCS_FOLDER)
-            print(f"Created folder {DOCS_FOLDER}. Please add .docx files and restart.")
+        if not os.path.exists(DOC_FOLDER):
+            os.makedirs(DOC_FOLDER)
+            print(f"Created folder {DOC_FOLDER}. Please add .docx files and restart.")
             sys.exit()
 
         # 1. Load Word Documents and PDFs
@@ -182,7 +181,7 @@ def get_vectorstore_retriever():
 
         #Load .docx files
         docx_loader = DirectoryLoader(
-            DOCS_FOLDER,
+            DOC_FOLDER,
             glob="**/*.docx",
             loader_cls=UnstructuredWordDocumentLoader,
             show_progress=True,
@@ -191,7 +190,7 @@ def get_vectorstore_retriever():
         docs.extend(docx_loader.load())
 
         # Load .pdf files with OCR fallback
-        for root, dirs, files in os.walk(DOCS_FOLDER):
+        for root, dirs, files in os.walk(DOC_FOLDER):
             for file in files:
                 if file.endswith('.pdf'):
                     file_path = os.path.join(root, file)
@@ -215,16 +214,16 @@ def get_vectorstore_retriever():
         vectorstore = Chroma.from_documents(
             documents=splits,
             embedding=embeddings,
-            collection_name=COLLECTION_NAME,
-            persist_directory=DB_PATH
+            collection_name=CHROMA_COLLECTION_NAME,
+            persist_directory=CHROMA_DB_PATH
         )
         print("--- INGESTION COMPLETE ---")
 
         # Track indexed files
-        if not os.path.exists(DB_PATH):
-            os.makedirs(DB_PATH)
+        if not os.path.exists(CHROMA_DB_PATH):
+            os.makedirs(CHROMA_DB_PATH)
         with open(INDEXED_FILES_PATH, 'w') as f:
-            for root, dirs, files in os.walk(DOCS_FOLDER):
+            for root, dirs, files in os.walk(DOC_FOLDER):
                 for file in files:
                     if file.endswith(('.docx', '.pdf')):
                         f.write(f"{os.path.join(root, file)}\n")

@@ -21,11 +21,10 @@ from langchain.agents import create_agent
 
 import document_engine
 from chroma_store import ChromaStore
-from fritz_utils import MessageSource, DOCUMENT_STORAGE_DESCRIPTION
+from fritz_utils import MessageSource, DOC_STORAGE_DESCRIPTION, CHAT_DB_NAME
 from sqlite_store import SQLiteStore
 
 OLLAMA_MODEL = "gpt-oss"
-DB_NAME = "chat_history.db"
 CONVERSATION_NODE = "conversation"
 SUMMARIZE_CONVERSATION_NODE = "summarize_conversation"
 
@@ -40,7 +39,7 @@ def get_conversation_tools_description():
         "search_web": (search_web, "Use only to search the internet if you are unsure about something."),
         "roll_dice": (roll_dice, "Roll different types of dice."),
         "search_memories": (search_memories, "Returns a JSON payload of stored memories you have had with a user based on a search term."),
-        "search_documents": (search_documents, f"Search local documents. Use this for questions about: {DOCUMENT_STORAGE_DESCRIPTION}"
+        "search_documents": (search_documents, f"Search local documents. Use this for questions about: {DOC_STORAGE_DESCRIPTION}"
         )
     }
     return conversation_tool_dict
@@ -264,10 +263,10 @@ def print_stream(stream):
 conversation_tools = [tool_info[0] for tool_info in get_conversation_tools_description().values()]
 print(conversation_tools)
 
-store = SQLiteStore(DB_NAME)
+store = SQLiteStore(CHAT_DB_NAME)
 chroma_store = ChromaStore()
 exit_stack = ExitStack()
-checkpointer = exit_stack.enter_context(SqliteSaver.from_conn_string(DB_NAME))
+checkpointer = exit_stack.enter_context(SqliteSaver.from_conn_string(CHAT_DB_NAME))
 ollama_instance = ChatOllama(model=OLLAMA_MODEL)
 
 conversation_react_agent = create_agent(ollama_instance, tools=conversation_tools)
