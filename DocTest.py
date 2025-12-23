@@ -244,8 +244,8 @@ class GraphState(TypedDict):
 
 
 # --- PART 3: PROMPTS & MODELS ---
-llm = ChatOllama(model="gpt-oss", temperature=0)
-#llm = ChatOllama(model="llama3.2", temperature=0)
+thinking_llm = ChatOllama(model="gpt-oss", temperature=0)
+fast_llm = ChatOllama(model="llama3.2", temperature=0)
 
 
 # B. Document Grader Data Model
@@ -254,7 +254,7 @@ class GradeDocuments(BaseModel):
     binary_score: str = Field(description="Documents are relevant to the question, 'yes' or 'no'")
 
 
-structured_llm_grader = llm.with_structured_output(GradeDocuments)
+structured_llm_grader = fast_llm.with_structured_output(GradeDocuments)
 grader_system = """You are a grader assessing relevance of a retrieved document to a user question. 
 If the document contains keyword(s) or semantic meaning related to the user question, grade it as relevant. 
 Give a binary score 'yes' or 'no' score to indicate whether the document is relevant to the question."""
@@ -271,7 +271,7 @@ rag_prompt = ChatPromptTemplate.from_messages(
         ("human", "Question: {question} \n\n Context: {context} \n\n Answer:"),
     ]
 )
-rag_chain = rag_prompt | llm | StrOutputParser()
+rag_chain = rag_prompt | thinking_llm | StrOutputParser()
 
 # D. Query Rewriter
 rewrite_system = """You are a question re-writer that converts an input question to a better version that is optimized for vectorstore retrieval. 
@@ -280,7 +280,7 @@ rewrite_prompt = ChatPromptTemplate.from_messages(
     [("system", rewrite_system),
      ("human", "Here is the initial question: \n\n {question} \n Formulate an improved question.")]
 )
-rewriter_chain = rewrite_prompt | llm | StrOutputParser()
+rewriter_chain = rewrite_prompt | fast_llm | StrOutputParser()
 
 
 # --- PART 4: NODES ---
