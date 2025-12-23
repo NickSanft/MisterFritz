@@ -378,7 +378,7 @@ workflow.add_edge("generate_rag", END)
 # Compile
 app = workflow.compile()
 
-def ask_question(user_input):
+def query_documents(user_input):
     # Run the graph
     inputs = {
         "question": user_input,
@@ -395,7 +395,3 @@ def ask_question(user_input):
     print(f"Agent: {final_generation}")
     # Return the generation captured during streaming to avoid running the graph twice
     return final_generation
-
-if __name__ == '__main__':
-    answer = ask_question("Who is Senialis?")
-    print("FINAL ANSWER: ", answer)

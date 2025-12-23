@@ -19,8 +19,9 @@ from langgraph.constants import START, END
 from langgraph.graph import StateGraph, MessagesState
 from langchain.agents import create_agent
 
+import document_engine
 from chroma_store import ChromaStore
-from message_source import MessageSource
+from fritz_utils import MessageSource
 from sqlite_store import SQLiteStore
 
 OLLAMA_MODEL = "gpt-oss"
@@ -189,6 +190,21 @@ def roll_dice(num_dice: int, num_sides: int, config: RunnableConfig):
     rolls = [random.randint(1, num_sides) for _ in range(num_dice)]
     return (f"Here are the results: {user_id}."
             f" {rolls}")
+
+# ===== NEW TOOL DEFINITION =====
+@tool(parse_docstring=True)
+def search_local_knowledge_base(query: str):
+    """
+    Searches the local document repository (PDFs, Word Docs) to find answers to questions.
+    Use this tool when the user asks about internal documents, uploaded files, or specific knowledge stored locally.
+
+    Args:
+    query: The question or search term to look for in the documents.
+
+    Returns:
+    string: The answer derived from the documents.
+    """
+    return document_engine.search_documents.query_documents(query)
 
 
 @tool(parse_docstring=True)
