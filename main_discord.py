@@ -5,6 +5,7 @@ from discord.ext import commands
 
 from document_engine import query_documents
 from fritz_utils import get_key_from_json_config_file, MessageSource
+from generate_image import generate_image
 from mister_fritz import ask_stuff
 
 discord_key = "discord_bot_token"
@@ -24,6 +25,14 @@ async def on_ready():
 @client.command()
 async def hello(ctx):
     await ctx.send("Hello!")
+
+@client.command()
+async def gen(ctx, *, message):
+    print(message)
+    output_file = generate_image(message)
+    file = discord.File(output_file)
+    # Send the file
+    await ctx.send(file=file, content="Here is your file!")
 
 
 @client.command()
