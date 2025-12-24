@@ -32,7 +32,7 @@ def generate_image(prompt):
     # Ensure the pipeline runs on the GPU if available
     pipeline.to(method)
     # Generate the image using the refined prompt
-    image = pipeline(prompt, num_inference_steps=10, guidance_scale=0.0).images[0]
+    image = pipeline(prompt, num_inference_steps=2, guidance_scale=0.0).images[0]
     # Save or display the image
     os.makedirs(output_directory, exist_ok=True)
 
