@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 
 from diffusers import AutoPipelineForText2Image
 import torch
@@ -34,7 +35,11 @@ def generate_image(prompt):
     image = pipeline(prompt, num_inference_steps=10, guidance_scale=0.0).images[0]
     # Save or display the image
     os.makedirs(output_directory, exist_ok=True)
-    output_file = os.path.join(output_directory, "generated_image.png")
+
+    now = datetime.now()
+    timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
+
+    output_file = os.path.join(output_directory, f"generated_image-{timestamp}.png")
     image.save(output_file)
     print(f"Image saved as {output_file}")
     return output_file
