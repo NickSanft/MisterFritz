@@ -23,8 +23,8 @@ def generate_image(prompt):
     # Load the pipeline (this might take time on the first run)
     # 'stabilityai/stable-diffusion-xl-base-1.0' is a common choice
     pipeline = AutoPipelineForText2Image.from_pretrained(
-        #"stabilityai/stable-diffusion-xl-base-1.0",
-        "stabilityai/sd-turbo",
+        "stabilityai/stable-diffusion-xl-base-1.0",
+        #"stabilityai/sd-turbo",
         dtype=dtype,
         variant="fp16",
         use_safetensors=True
@@ -32,7 +32,7 @@ def generate_image(prompt):
     # Ensure the pipeline runs on the GPU if available
     pipeline.to(method)
     # Generate the image using the refined prompt
-    image = pipeline(prompt, num_inference_steps=2, guidance_scale=0.0).images[0]
+    image = pipeline(prompt, num_inference_steps=10, guidance_scale=5).images[0]
     # Save or display the image
     os.makedirs(output_directory, exist_ok=True)
 
