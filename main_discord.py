@@ -5,7 +5,7 @@ from discord.ext import commands
 
 from document_engine import query_documents
 from fritz_utils import get_key_from_json_config_file, MessageSource
-from generate_image import generate_image
+from image_generator import generate_image
 from mister_fritz import ask_stuff
 
 discord_key = "discord_bot_token"
@@ -98,7 +98,7 @@ async def on_message(ctx):
     # Run the blocking ask_stuff function in a thread
     loop = asyncio.get_running_loop()
     try:
-        original_response = await loop.run_in_executor(
+        response_data = await loop.run_in_executor(
             None,
             lambda: ask_stuff(ctx.clean_content, MessageSource.DISCORD_TEXT, author)
         )
@@ -106,25 +106,49 @@ async def on_message(ctx):
         # Stop the timer if ask_stuff finishes (even if it already sent the message)
         patience_task.cancel()
 
-    if not original_response:
+    print(response_data)
+
+    if not response_data or not response_data.get("text"):
         original_response = "The bot got sad and doesn't want to talk to you at the moment :("
+        image_paths = []
+    else:
+        original_response = response_data["text"]
+        image_paths = response_data.get("image_paths", [])
+
+    # Prepare any image files for upload
+    files = []
+    if image_paths:
+        for image_path in image_paths:
+            try:
+                files.append(discord.File(image_path))
+            except Exception as e:
+                print(f"Error loading image file {image_path}: {e}")
 
     # --- THE EDIT LOGIC ---
     resp_len = len(original_response)
 
     if resp_len > 2000:
         responses = split_into_chunks(original_response)
-        for chunk in responses:
+        for i, chunk in enumerate(responses):
+            # Attach files to the first message only
+            chunk_files = files if i == 0 else []
             if patience_msg:
                 await patience_msg.edit(content=chunk)
                 patience_msg = None
-            await ctx.channel.send(chunk)
+                # Send files separately if we edited the patience message
+                if chunk_files:
+                    await ctx.channel.send(files=chunk_files)
+            else:
+                await ctx.channel.send(chunk, files=chunk_files)
     else:
         # If we have a patience message, EDIT it. Otherwise, SEND a new one.
         if patience_msg:
             await patience_msg.edit(content=original_response)
+            # Send files separately since we can't attach to edit
+            if files:
+                await ctx.channel.send(files=files)
         else:
-            await ctx.channel.send(original_response)
+            await ctx.channel.send(original_response, files=files)
 
 
 def split_into_chunks(s, chunk_size=2000):

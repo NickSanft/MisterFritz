@@ -4,22 +4,23 @@ import re
 import uuid
 from contextlib import ExitStack
 from datetime import datetime
-from typing import Literal
+from typing import Literal, TypedDict, Annotated
 import requests
 from bs4 import BeautifulSoup
 
 import pytz
 from ddgs import DDGS
-from langchain_core.messages import HumanMessage, RemoveMessage
+from langchain_core.messages import HumanMessage, RemoveMessage, AIMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool, BaseTool
 from langchain_ollama import ChatOllama
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.constants import START, END
-from langgraph.graph import StateGraph, MessagesState
+from langgraph.graph import StateGraph, MessagesState, add_messages
 from langchain.agents import create_agent
 
 import document_engine
+import image_generator
 from chroma_store import ChromaStore
 from fritz_utils import MessageSource, DOC_STORAGE_DESCRIPTION, CHAT_DB_NAME
 from sqlite_store import SQLiteStore
@@ -27,6 +28,12 @@ from sqlite_store import SQLiteStore
 OLLAMA_MODEL = "gpt-oss"
 CONVERSATION_NODE = "conversation"
 SUMMARIZE_CONVERSATION_NODE = "summarize_conversation"
+
+
+# Define extended state for tracking attachments
+class EnhancedState(TypedDict):
+    messages: Annotated[list, add_messages]
+    image_paths: list[str]
 
 
 def get_conversation_tools_description():
@@ -39,8 +46,8 @@ def get_conversation_tools_description():
         "search_web": (search_web, "Use only to search the internet if you are unsure about something."),
         "roll_dice": (roll_dice, "Roll different types of dice."),
         "search_memories": (search_memories, "Returns a JSON payload of stored memories you have had with a user based on a search term."),
-        "search_documents": (search_documents, f"Search local documents. Use this for questions about: {DOC_STORAGE_DESCRIPTION}"
-        )
+        "search_documents": (search_documents, f"Search local documents. Use this for questions about: {DOC_STORAGE_DESCRIPTION}"),
+        "generate_image": (generate_image, "Generates an image based on a given prompt.")
     }
     return conversation_tool_dict
 
@@ -191,7 +198,21 @@ def roll_dice(num_dice: int, num_sides: int, config: RunnableConfig):
     return (f"Here are the results: {user_id}."
             f" {rolls}")
 
-# ===== NEW TOOL DEFINITION =====
+@tool(parse_docstring=True)
+def generate_image(prompt: str):
+    """
+    Use this tool to generate an image if the user asks you to
+
+    Args:
+    prompt: The prompt to give to Stable Diffusion to generate the image.
+
+    Returns:
+    string: The path of the image.
+    """
+    return image_generator.generate_image(prompt)
+
+
+
 @tool(parse_docstring=True)
 def search_documents(query: str):
     """
@@ -231,8 +252,8 @@ def add_memory(user_id: str, memory_key: str, memory_to_store: str):
 
 
 # ===== MAIN FUNCTION =====
-def ask_stuff(base_prompt: str, source: MessageSource, user_id: str) -> str:
-    """Process user input and return the chatbot's response."""
+def ask_stuff(base_prompt: str, source: MessageSource, user_id: str) -> dict:
+    """Process user input and return structured output with text and attachments."""
     user_id_clean = re.sub(r'[^a-zA-Z0-9]', '', user_id)  # Clean special characters
     full_prompt = format_prompt(base_prompt, source, user_id_clean)
 
@@ -241,9 +262,33 @@ def ask_stuff(base_prompt: str, source: MessageSource, user_id: str) -> str:
     print(f"Prompt to ask: {full_prompt}")
 
     config = {"configurable": {"user_id": user_id_clean, "thread_id": user_id_clean}}
-    inputs = {"messages": [("user", full_prompt)]}
+    inputs = {"messages": [("user", full_prompt)], "image_paths": []}
 
-    return print_stream(app.stream(inputs, config=config, stream_mode="values"))
+    # Collect final state from stream
+    final_state = None
+    for s in app.stream(inputs, config=config, stream_mode="values"):
+        final_state = s
+        # Still print messages for backwards compatibility
+        message = s["messages"][-1] if "messages" in s and s["messages"] else None
+        if message:
+            if isinstance(message, tuple):
+                print(message)
+            elif hasattr(message, 'pretty_print'):
+                message.pretty_print()
+
+    # Extract structured output
+    final_text = ""
+    if final_state and "messages" in final_state and final_state["messages"]:
+        last_msg = final_state["messages"][-1]
+        final_text = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
+
+    image_paths = final_state.get("image_paths", []) if final_state else []
+
+    return {
+        "text": final_text,
+        "image_paths": image_paths,
+        "timestamp": get_current_time_internal()
+    }
 
 
 def print_stream(stream):
@@ -271,14 +316,14 @@ ollama_instance = ChatOllama(model=OLLAMA_MODEL)
 conversation_react_agent = create_agent(ollama_instance, tools=conversation_tools)
 
 
-def should_continue(state: MessagesState) -> Literal["summarize_conversation", "__end__"]:
+def should_continue(state: EnhancedState) -> Literal["summarize_conversation", "__end__"]:
     #messages = state["messages"]
     #print(f"Messages: {messages}")
     """Decide whether to summarize or end the conversation."""
     return SUMMARIZE_CONVERSATION_NODE if len(state["messages"]) > 15 else END
 
 
-def summarize_conversation(state: MessagesState, config: RunnableConfig):
+def summarize_conversation(state: EnhancedState, config: RunnableConfig):
     print("In: summarize_conversation")
     metadata = config.get("metadata", {})
     user_id = metadata.get("user_id")
@@ -303,14 +348,30 @@ def summarize_conversation(state: MessagesState, config: RunnableConfig):
     return {"messages": delete_messages}
 
 
-def conversation(state: MessagesState, config: RunnableConfig):
+def conversation(state: EnhancedState, config: RunnableConfig):
     messages = state["messages"]
     latest_message = messages[-1].content if messages else ""
     print(f"Latest message: {latest_message}")
     inputs = {"messages": [("system", get_system_description(get_conversation_tools_description())),
                            ("user", latest_message)]}
-    resp = print_stream(conversation_react_agent.stream(inputs, config=get_config_values(config), stream_mode="values"))
-    return {'messages': [resp]}
+
+    # Stream and collect the response
+    final_state = None
+    for s in conversation_react_agent.stream(inputs, config=get_config_values(config), stream_mode="values"):
+        final_state = s
+
+    # Extract text response
+    resp = final_state["messages"][-1].content if final_state and "messages" in final_state else ""
+
+    # Extract image paths from tool messages
+    image_paths = state.get("image_paths", []).copy()
+    if final_state and "messages" in final_state:
+        for msg in final_state["messages"]:
+            # Check if message is a ToolMessage from generate_image
+            if isinstance(msg, ToolMessage) and hasattr(msg, 'name') and msg.name == 'generate_image':
+                image_paths.append(msg.content)
+
+    return {'messages': [resp], 'image_paths': image_paths}
 
 
 def get_config_values(config: RunnableConfig) -> RunnableConfig:
@@ -324,7 +385,7 @@ def get_config_values(config: RunnableConfig) -> RunnableConfig:
     return config_values
 
 
-workflow = StateGraph(MessagesState)
+workflow = StateGraph(EnhancedState)
 
 workflow.add_node(CONVERSATION_NODE, conversation)
 workflow.add_node(SUMMARIZE_CONVERSATION_NODE, summarize_conversation)
