@@ -7,7 +7,9 @@ from langchain_core.stores import BaseStore
 from langchain_ollama import OllamaEmbeddings
 from typing_extensions import Literal
 
-embeddings = OllamaEmbeddings(model="mxbai-embed-large")
+from fritz_utils import EMBEDDING_MODEL
+
+embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
 
 class ChromaStore(BaseStore[str, Union[str, bytes]]):
     """

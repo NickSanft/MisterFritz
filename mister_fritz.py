@@ -10,13 +10,13 @@ from bs4 import BeautifulSoup
 
 import pytz
 from ddgs import DDGS
-from langchain_core.messages import HumanMessage, RemoveMessage, AIMessage, ToolMessage
+from langchain_core.messages import HumanMessage, RemoveMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool, BaseTool
 from langchain_ollama import ChatOllama
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.constants import START, END
-from langgraph.graph import StateGraph, MessagesState, add_messages
+from langgraph.graph import StateGraph, add_messages
 from langchain.agents import create_agent
 
 import document_engine
