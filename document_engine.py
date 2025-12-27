@@ -15,7 +15,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import END, StateGraph, START
 
-from fritz_utils import CHROMA_DB_PATH, INDEXED_FILES_PATH, CHROMA_COLLECTION_NAME, DOC_FOLDER
+from fritz_utils import CHROMA_DB_PATH, INDEXED_FILES_PATH, CHROMA_COLLECTION_NAME, DOC_FOLDER, FAST_OLLAMA_MODEL, \
+    THINKING_OLLAMA_MODEL
 
 try:
     from PIL import Image
@@ -243,8 +244,8 @@ class GraphState(TypedDict):
 
 
 # --- PART 3: PROMPTS & MODELS ---
-thinking_llm = ChatOllama(model="gpt-oss", temperature=0)
-fast_llm = ChatOllama(model="llama3.2", temperature=0)
+thinking_llm = ChatOllama(model=THINKING_OLLAMA_MODEL, temperature=0)
+fast_llm = ChatOllama(model=FAST_OLLAMA_MODEL, temperature=0)
 
 
 # B. Document Grader Data Model

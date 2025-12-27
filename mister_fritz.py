@@ -22,10 +22,9 @@ from langchain.agents import create_agent
 import document_engine
 import image_generator
 from chroma_store import ChromaStore
-from fritz_utils import MessageSource, DOC_STORAGE_DESCRIPTION, CHAT_DB_NAME
+from fritz_utils import MessageSource, DOC_STORAGE_DESCRIPTION, CHAT_DB_NAME, THINKING_OLLAMA_MODEL
 from sqlite_store import SQLiteStore
 
-OLLAMA_MODEL = "gpt-oss"
 CONVERSATION_NODE = "conversation"
 SUMMARIZE_CONVERSATION_NODE = "summarize_conversation"
 
@@ -311,7 +310,7 @@ store = SQLiteStore(CHAT_DB_NAME)
 chroma_store = ChromaStore()
 exit_stack = ExitStack()
 checkpointer = exit_stack.enter_context(SqliteSaver.from_conn_string(CHAT_DB_NAME))
-ollama_instance = ChatOllama(model=OLLAMA_MODEL)
+ollama_instance = ChatOllama(model=THINKING_OLLAMA_MODEL)
 
 conversation_react_agent = create_agent(ollama_instance, tools=conversation_tools)
 

@@ -3,9 +3,9 @@ from datetime import datetime
 
 from diffusers import AutoPipelineForText2Image
 import torch
+
 import transformers
 import accelerate
-
 import ollama
 
 output_directory = "output"
