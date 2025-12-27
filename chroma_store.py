@@ -7,7 +7,7 @@ from langchain_core.stores import BaseStore
 from langchain_ollama import OllamaEmbeddings
 from typing_extensions import Literal
 
-from fritz_utils import EMBEDDING_MODEL
+from fritz_utils import EMBEDDING_MODEL, CHROMA_DB_PATH
 
 embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
 
@@ -20,7 +20,7 @@ class ChromaStore(BaseStore[str, Union[str, bytes]]):
     def __init__(
             self,
             collection_name: str = "langchain_store",
-            persist_directory: Optional[str] = 'chroma_store'
+            persist_directory: Optional[str] = CHROMA_DB_PATH
     ):
         """
         Initialize the ChromaStore.5
