@@ -8,12 +8,14 @@ Mister Fritz is an AI-powered Discord bot with a sophisticated, sardonic persona
 - **Memory System**: Stores and retrieves conversation summaries per user using ChromaDB
 - **Document Search**: RAG (Retrieval-Augmented Generation) system for querying local documents (Word docs & PDFs)
 - **Web Integration**: Can search the web and scrape websites for information
+- **Image Generation**: Text-to-image generation using Stable Diffusion XL with support for long prompts (bypasses 77 token limit)
 - **Discord Commands**:
   - `$hello` - Greet the bot
   - `$lore <query>` - Search local documents
+  - `$gen <prompt>` - Generate images from text descriptions
   - `$join` / `$leave` - Voice channel management
   - Direct messages or mentions trigger conversational responses
-- **Tools**: Dice rolling, current time lookup, web search, document search, and memory retrieval
+- **Tools**: Dice rolling, current time lookup, web search, document search, memory retrieval, and image generation
 
 ## Architecture
 
@@ -22,6 +24,7 @@ The bot uses a LangGraph-based agent system with:
 - **Summarization Node**: Automatically summarizes long conversations and stores memories
 - **SQLite Checkpointing**: Persists conversation state
 - **ChromaDB**: Stores user memories and document embeddings
+- **Image Generation Pipeline**: Uses Stable Diffusion XL with custom prompt encoding to bypass the 77 token limit, supporting very long and detailed prompts
 
 ## Prerequisites
 
@@ -29,7 +32,21 @@ The bot uses a LangGraph-based agent system with:
 - Python 3.12+ is recommended
 - Download from [python.org](https://www.python.org/downloads/)
 
-### 2. Install Ollama
+### 2. Install PyTorch with CUDA Support (Optional but Recommended)
+
+For GPU-accelerated image generation, install PyTorch with CUDA support before installing other dependencies:
+
+**Windows/Linux with CUDA:**
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+```
+
+**macOS or CPU-only:**
+```bash
+pip install torch torchvision torchaudio
+```
+
+### 3. Install Ollama
 
 **Windows:**
 1. Download the Ollama installer from [ollama.com](https://ollama.com/download/windows)
@@ -49,7 +66,7 @@ brew install ollama
 curl -fsSL https://ollama.com/install.sh | sh
 ```
 
-### 3. Pull Required Ollama Models
+### 4. Pull Required Ollama Models
 
 After installing Ollama, pull the models used by Mister Fritz:
 
@@ -96,7 +113,7 @@ source .venv/bin/activate
 
 4. **Install dependencies:**
 ```bash
-pip install discord.py langchain langchain-ollama langchain-chroma langgraph duckduckgo-search beautifulsoup4 requests pytz chromadb unstructured python-docx pypdf pillow easyocr PyMuPDF
+pip install discord.py langchain langchain-ollama langchain-chroma langgraph duckduckgo-search beautifulsoup4 requests pytz chromadb unstructured python-docx pypdf pillow easyocr PyMuPDF diffusers transformers accelerate xformers safetensors
 ```
 
 5. **Configure the bot:**
@@ -165,6 +182,16 @@ $lore Tell me about the kingdom of Sennen
 @Botname What's the latest news about AI?
 ```
 
+**Generate images:**
+```
+$gen a majestic dragon flying over a medieval castle at sunset, highly detailed, fantasy art
+```
+
+The bot can also generate images through conversation when mentioned:
+```
+@Botname can you create an image of a cyberpunk cityscape with neon lights?
+```
+
 ## Troubleshooting
 
 **"Ollama connection refused":**
@@ -182,6 +209,13 @@ $lore Tell me about the kingdom of Sennen
 
 **OCR not working for PDFs:**
 - Install optional dependencies: `pip install easyocr PyMuPDF pillow`
+
+**Image generation is slow or fails:**
+- For GPU acceleration, ensure CUDA is installed and PyTorch detects your GPU
+- Check GPU availability: `python -c "import torch; print(torch.cuda.is_available())"`
+- The first image generation will download the Stable Diffusion XL model (~7GB)
+- CPU generation is supported but significantly slower
+- xformers is used for memory-efficient attention on compatible systems
 
 ## License
 
