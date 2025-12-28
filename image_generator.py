@@ -5,9 +5,6 @@ from diffusers import AutoPipelineForText2Image
 import torch
 
 import transformers
-import accelerate
-import ollama
-
 output_directory = "output"
 method = "cpu"
 dtype = torch.float16
@@ -17,7 +14,46 @@ print(f"CUDA Available: {cuda_available}")
 
 if cuda_available:
     method = "cuda"
-    dtype = torch.float32
+    dtype = torch.float16  # Use float16 for 2x speedup and 50% memory reduction
+
+# Global pipeline instance - loaded once and reused
+_pipeline = None
+
+def get_pipeline():
+    """Lazy load and return the global pipeline instance."""
+    global _pipeline
+    if _pipeline is None:
+        print("Loading SDXL pipeline (first time only)...")
+        _pipeline = AutoPipelineForText2Image.from_pretrained(
+            "stabilityai/stable-diffusion-xl-base-1.0",
+            torch_dtype=dtype,
+            variant="fp16",
+            use_safetensors=True
+        ).to(method)
+
+        # Enable VAE slicing for better memory efficiency
+        _pipeline.enable_vae_slicing()
+
+        # Enable xformers if available for faster attention
+        try:
+            _pipeline.enable_xformers_memory_efficient_attention()
+            print("xformers enabled for faster attention")
+        except Exception:
+            print("xformers not available, using default attention")
+
+        # Compile UNet for faster inference (PyTorch 2.0+)
+        # Note: torch.compile requires triton which doesn't work on Windows
+        # Skipping compilation to avoid runtime errors
+        # On Linux/Mac with triton installed, you can uncomment this block for 20-30% speedup
+        # try:
+        #     if hasattr(torch, 'compile') and method == "cuda":
+        #         print("Attempting to compile UNet model (one-time cost)...")
+        #         _pipeline.unet = torch.compile(_pipeline.unet, mode="default")
+        #         print("UNet compiled successfully")
+        # except Exception as e:
+        #     print(f"torch.compile failed: {type(e).__name__}")
+
+    return _pipeline
 
 def encode_prompt_xl(pipeline, prompt, negative_prompt=""):
     """Encode prompts for SDXL using both text encoders to bypass 77 token limit."""
@@ -134,21 +170,26 @@ def encode_prompt_xl(pipeline, prompt, negative_prompt=""):
 
     return prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds
 
-def generate_image(prompt):
-    # Load the pipeline (this might take time on the first run)
-    # 'stabilityai/stable-diffusion-xl-base-1.0' is a common choice
-    pipeline = AutoPipelineForText2Image.from_pretrained(
-        "stabilityai/stable-diffusion-xl-base-1.0",
-        #"stabilityai/sd-turbo",
-        dtype=dtype,
-        variant="fp16",
-        use_safetensors=True
-    )
-    # Ensure the pipeline runs on the GPU if available
-    pipeline.to(method)
+def generate_image(prompt, negative_prompt="", num_inference_steps=25, guidance_scale=7.5):
+    """
+    Generate an image from a text prompt using SDXL.
+
+    Args:
+        prompt: Text description of the image to generate
+        negative_prompt: Things to avoid in the generation (default: "")
+        num_inference_steps: Number of denoising steps (default: 25, range: 20-50)
+        guidance_scale: How closely to follow the prompt (default: 7.5, range: 5-15)
+
+    Returns:
+        Path to the saved image file
+    """
+    # Get the cached pipeline instance
+    pipeline = get_pipeline()
 
     # Encode the prompt to bypass 77 token limit
-    prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = encode_prompt_xl(pipeline, prompt)
+    prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = encode_prompt_xl(
+        pipeline, prompt, negative_prompt
+    )
 
     # Generate the image using the prompt embeddings
     image = pipeline(
@@ -156,8 +197,8 @@ def generate_image(prompt):
         negative_prompt_embeds=negative_prompt_embeds,
         pooled_prompt_embeds=pooled_prompt_embeds,
         negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-        num_inference_steps=10,
-        guidance_scale=5
+        num_inference_steps=num_inference_steps,
+        guidance_scale=guidance_scale
     ).images[0]
     # Save or display the image
     os.makedirs(output_directory, exist_ok=True)
