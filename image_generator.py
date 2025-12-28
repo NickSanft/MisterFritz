@@ -5,7 +5,6 @@ from diffusers import AutoPipelineForText2Image
 import torch
 import xformers
 
-import transformers
 output_directory = "output"
 method = "cpu"
 dtype = torch.float16
@@ -15,8 +14,6 @@ print(f"CUDA Available: {cuda_available}")
 
 if cuda_available:
     method = "cuda"
-    dtype = torch.float16  # Use float16 for 2x speedup and 50% memory reduction
-
 # Global pipeline instance - loaded once and reused
 _pipeline = None
 
