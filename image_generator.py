@@ -3,6 +3,7 @@ from datetime import datetime
 
 from diffusers import AutoPipelineForText2Image
 import torch
+import xformers
 
 import transformers
 output_directory = "output"
