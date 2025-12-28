@@ -41,7 +41,7 @@ def get_conversation_tools_description():
     """
     conversation_tool_dict = {
         "get_current_time": (get_current_time, "Fetch the current time (US / Central Standard Time)."),
-        "scrape_website": (scrape_web, "If provided a URL by the user, this can be used to scrape a website's HTML."),
+        "scrape_web": (scrape_web, "If provided a URL by the user, this can be used to scrape a website's HTML."),
         "search_web": (search_web, "Use only to search the internet if you are unsure about something."),
         "roll_dice": (roll_dice, "Roll different types of dice."),
         "search_memories": (search_memories, "Returns a JSON payload of stored memories you have had with a user based on a search term."),
@@ -251,8 +251,16 @@ def add_memory(user_id: str, memory_key: str, memory_to_store: str):
 
 
 # ===== MAIN FUNCTION =====
-def ask_stuff(base_prompt: str, source: MessageSource, user_id: str) -> dict:
-    """Process user input and return structured output with text and attachments."""
+def ask_stuff(base_prompt: str, source: MessageSource, user_id: str, progress_callback=None) -> dict:
+    """Process user input and return structured output with text and attachments.
+
+    Args:
+        base_prompt: The user's message/question
+        source: The messaging platform source
+        user_id: The user's identifier
+        progress_callback: Optional function to call with progress updates.
+                          Should accept a single string argument.
+    """
     user_id_clean = re.sub(r'[^a-zA-Z0-9]', '', user_id)  # Clean special characters
     full_prompt = format_prompt(base_prompt, source, user_id_clean)
 
@@ -260,7 +268,10 @@ def ask_stuff(base_prompt: str, source: MessageSource, user_id: str) -> dict:
     print(f"Role description: {system_prompt}")
     print(f"Prompt to ask: {full_prompt}")
 
-    config = {"configurable": {"user_id": user_id_clean, "thread_id": user_id_clean}}
+    config = {
+        "configurable": {"user_id": user_id_clean, "thread_id": user_id_clean},
+        "metadata": {"user_id": user_id_clean, "thread_id": user_id_clean, "progress_callback": progress_callback}
+    }
     inputs = {"messages": [("user", full_prompt)], "image_paths": []}
 
     # Collect final state from stream
@@ -354,10 +365,44 @@ def conversation(state: EnhancedState, config: RunnableConfig):
     inputs = {"messages": [("system", get_system_description(get_conversation_tools_description())),
                            ("user", latest_message)]}
 
+    # Get progress callback from config if available
+    metadata = config.get("metadata", {})
+    progress_callback = metadata.get("progress_callback")
+    print(f"Progress callback available: {progress_callback is not None}")
+
+    # Tool name to user-friendly message mapping
+    tool_messages = {
+        "generate_image": "Generating an image, this may take a moment...",
+        "search_documents": "Searching through documents for you...",
+        "search_web": "Searching the web...",
+        "scrape_website": "Scraping website content...",
+        "search_memories": "Looking through my memories...",
+    }
+
+    # Track which tools we've already notified about
+    notified_tools = set()
+
     # Stream and collect the response
     final_state = None
     for s in conversation_react_agent.stream(inputs, config=get_config_values(config), stream_mode="values"):
         final_state = s
+
+        # Check for tool calls in the latest message
+        if "messages" in s and s["messages"]:
+            latest = s["messages"][-1]
+            # Check if this is an AI message with tool calls
+            if hasattr(latest, 'tool_calls') and latest.tool_calls:
+                print(f"Detected tool calls: {[tc.get('name', '') for tc in latest.tool_calls]}")
+                if progress_callback:
+                    for tool_call in latest.tool_calls:
+                        tool_name = tool_call.get('name', '')
+                        # Only notify once per tool type
+                        if tool_name in tool_messages and tool_name not in notified_tools:
+                            print(f"Calling progress callback for tool: {tool_name}")
+                            progress_callback(tool_messages[tool_name])
+                            notified_tools.add(tool_name)
+                else:
+                    print("Progress callback is None, skipping notification")
 
     # Extract text response
     resp = final_state["messages"][-1].content if final_state and "messages" in final_state else ""
@@ -379,7 +424,8 @@ def get_config_values(config: RunnableConfig) -> RunnableConfig:
         "configurable": {
             "user_id": metadata.get("user_id"),
             "thread_id": metadata.get("thread_id"),
-        }
+        },
+        "metadata": metadata  # Preserve full metadata including progress_callback
     }
     return config_values
 

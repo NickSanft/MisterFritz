@@ -95,12 +95,22 @@ async def on_message(ctx):
     # Start the timer task
     patience_task = asyncio.create_task(send_patience_warning())
 
-    # Run the blocking ask_stuff function in a thread
+    # Create a progress callback that sends messages to Discord from the worker thread
     loop = asyncio.get_running_loop()
+
+    def progress_callback(message: str):
+        """Send progress updates to Discord from the worker thread."""
+        # Schedule the coroutine in the event loop from the worker thread
+        asyncio.run_coroutine_threadsafe(
+            ctx.channel.send(message),
+            loop
+        )
+
+    # Run the blocking ask_stuff function in a thread
     try:
         response_data = await loop.run_in_executor(
             None,
-            lambda: ask_stuff(ctx.clean_content, MessageSource.DISCORD_TEXT, author)
+            lambda: ask_stuff(ctx.clean_content, MessageSource.DISCORD_TEXT, author, progress_callback)
         )
     finally:
         # Stop the timer if ask_stuff finishes (even if it already sent the message)
