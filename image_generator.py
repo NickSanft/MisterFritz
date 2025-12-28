@@ -19,6 +19,121 @@ if cuda_available:
     method = "cuda"
     dtype = torch.float32
 
+def encode_prompt_xl(pipeline, prompt, negative_prompt=""):
+    """Encode prompts for SDXL using both text encoders to bypass 77 token limit."""
+    # SDXL has two text encoders
+    tokenizers = [pipeline.tokenizer, pipeline.tokenizer_2] if hasattr(pipeline, 'tokenizer_2') else [pipeline.tokenizer]
+    text_encoders = [pipeline.text_encoder, pipeline.text_encoder_2] if hasattr(pipeline, 'text_encoder_2') else [pipeline.text_encoder]
+
+    prompt_embeds_list = []
+    pooled_prompt_embeds = None
+
+    # Process with both text encoders
+    for idx, (tokenizer, text_encoder) in enumerate(zip(tokenizers, text_encoders)):
+        max_length = tokenizer.model_max_length
+        input_ids = tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=False,
+        ).input_ids.to(pipeline.device)
+
+        # Split into chunks if needed
+        if input_ids.shape[-1] > max_length:
+            chunks = []
+            for i in range(0, input_ids.shape[-1], max_length - 2):
+                chunk = input_ids[:, i:i + max_length - 2]
+                chunk = torch.cat([
+                    input_ids[:, :1],
+                    chunk,
+                    input_ids[:, -1:] if i + max_length - 2 >= input_ids.shape[-1] else input_ids[:, :1]
+                ], dim=-1)
+                chunks.append(chunk)
+
+            # Encode each chunk
+            chunk_embeds_list = []
+            for chunk in chunks:
+                outputs = text_encoder(chunk, output_hidden_states=True)
+                chunk_embeds_list.append(outputs.hidden_states[-2])
+
+            encoder_prompt_embeds = torch.cat(chunk_embeds_list, dim=1)
+
+            # Get pooled from last chunk (only from second encoder for SDXL)
+            if idx == len(text_encoders) - 1:
+                last_output = text_encoder(chunks[-1], output_hidden_states=True)
+                pooled_prompt_embeds = last_output.hidden_states[-1][:, 0, :]
+        else:
+            outputs = text_encoder(input_ids, output_hidden_states=True)
+            encoder_prompt_embeds = outputs.hidden_states[-2]
+            # Pooled output only from second encoder for SDXL
+            if idx == len(text_encoders) - 1:
+                pooled_prompt_embeds = outputs.hidden_states[-1][:, 0, :]
+
+        prompt_embeds_list.append(encoder_prompt_embeds)
+
+    # Concatenate embeddings from both encoders
+    prompt_embeds = torch.cat(prompt_embeds_list, dim=-1)
+
+    # Process negative prompt
+    target_length = prompt_embeds.shape[1]
+    neg_prompt_embeds_list = []
+    negative_pooled_prompt_embeds = None
+
+    for idx, (tokenizer, text_encoder) in enumerate(zip(tokenizers, text_encoders)):
+        max_length = tokenizer.model_max_length
+        neg_text = negative_prompt if negative_prompt else ""
+        neg_input_ids = tokenizer(
+            neg_text,
+            return_tensors="pt",
+            truncation=False,
+        ).input_ids.to(pipeline.device)
+
+        # Pad to match target length
+        if neg_input_ids.shape[-1] < target_length * max_length:
+            padding_length = target_length * max_length - neg_input_ids.shape[-1]
+            pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
+            padding = torch.full((1, padding_length), pad_token_id, device=pipeline.device)
+            neg_input_ids = torch.cat([neg_input_ids, padding], dim=-1)
+
+        # Chunk and encode
+        neg_chunks = []
+        for i in range(0, neg_input_ids.shape[-1], max_length - 2):
+            chunk = neg_input_ids[:, i:i + max_length - 2]
+            chunk = torch.cat([
+                neg_input_ids[:, :1],
+                chunk,
+                neg_input_ids[:, -1:] if i + max_length - 2 >= neg_input_ids.shape[-1] else neg_input_ids[:, :1]
+            ], dim=-1)
+            neg_chunks.append(chunk)
+
+        neg_chunk_embeds = []
+        for chunk in neg_chunks:
+            outputs = text_encoder(chunk, output_hidden_states=True)
+            neg_chunk_embeds.append(outputs.hidden_states[-2])
+
+        encoder_neg_embeds = torch.cat(neg_chunk_embeds, dim=1)
+
+        # Get pooled from last chunk (only from second encoder for SDXL)
+        if idx == len(text_encoders) - 1:
+            last_output = text_encoder(neg_chunks[-1], output_hidden_states=True)
+            negative_pooled_prompt_embeds = last_output.hidden_states[-1][:, 0, :]
+
+        neg_prompt_embeds_list.append(encoder_neg_embeds)
+
+    negative_prompt_embeds = torch.cat(neg_prompt_embeds_list, dim=-1)
+
+    # Ensure matching shapes
+    if negative_prompt_embeds.shape[1] > target_length:
+        negative_prompt_embeds = negative_prompt_embeds[:, :target_length, :]
+    elif negative_prompt_embeds.shape[1] < target_length:
+        padding = torch.zeros(
+            (1, target_length - negative_prompt_embeds.shape[1], negative_prompt_embeds.shape[2]),
+            device=pipeline.device,
+            dtype=negative_prompt_embeds.dtype
+        )
+        negative_prompt_embeds = torch.cat([negative_prompt_embeds, padding], dim=1)
+
+    return prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds
+
 def generate_image(prompt):
     # Load the pipeline (this might take time on the first run)
     # 'stabilityai/stable-diffusion-xl-base-1.0' is a common choice
@@ -31,8 +146,19 @@ def generate_image(prompt):
     )
     # Ensure the pipeline runs on the GPU if available
     pipeline.to(method)
-    # Generate the image using the refined prompt
-    image = pipeline(prompt, num_inference_steps=10, guidance_scale=5).images[0]
+
+    # Encode the prompt to bypass 77 token limit
+    prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = encode_prompt_xl(pipeline, prompt)
+
+    # Generate the image using the prompt embeddings
+    image = pipeline(
+        prompt_embeds=prompt_embeds,
+        negative_prompt_embeds=negative_prompt_embeds,
+        pooled_prompt_embeds=pooled_prompt_embeds,
+        negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+        num_inference_steps=10,
+        guidance_scale=5
+    ).images[0]
     # Save or display the image
     os.makedirs(output_directory, exist_ok=True)
 
