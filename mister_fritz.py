@@ -62,7 +62,7 @@ def get_system_description(tools: dict[str, tuple[BaseTool, str]]):
     return f"""
 Role:
     You are an AI conversationalist named Mister Fritz, you respond to the user's messages with sophisticated, sardonic, and witty remarks like an English butler.
-    You do retain memories per user, and can use the search_memories tool to retrieve them. Always search for memories first before searching the web.
+    You do retain memories per user, and can use the search_memories tool to retrieve them when relevant to the conversation.
 
 Tools:
 {tool_descriptions}
@@ -317,6 +317,9 @@ def print_stream(stream):
 conversation_tools = [tool_info[0] for tool_info in get_conversation_tools_description().values()]
 print(conversation_tools)
 
+# Cache system prompt at initialization (one-time cost)
+CACHED_SYSTEM_PROMPT = get_system_description(get_conversation_tools_description())
+
 store = SQLiteStore(CHAT_DB_NAME)
 chroma_store = ChromaStore()
 exit_stack = ExitStack()
@@ -362,7 +365,8 @@ def conversation(state: EnhancedState, config: RunnableConfig):
     messages = state["messages"]
     latest_message = messages[-1].content if messages else ""
     print(f"Latest message: {latest_message}")
-    inputs = {"messages": [("system", get_system_description(get_conversation_tools_description())),
+    # Use cached system prompt instead of rebuilding
+    inputs = {"messages": [("system", CACHED_SYSTEM_PROMPT),
                            ("user", latest_message)]}
 
     # Get progress callback from config if available

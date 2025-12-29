@@ -106,11 +106,14 @@ def load_pdf_with_ocr_fallback(file_path: str) -> List[Document]:
 
 
 # --- PART 1: INGESTION ENGINE ---
-def get_vectorstore_retriever():
+def get_vectorstore_retriever(k=2):
     """
     Checks if a local vector store exists. If not, ingests documents from DOCS_FOLDER.
     If vector store exists, checks for new documents and adds them.
     Returns a retriever object.
+
+    Args:
+        k: Number of top results to return (default: 2 for faster performance)
     """
     embeddings = OllamaEmbeddings(model="mxbai-embed-large")
 
@@ -229,7 +232,7 @@ def get_vectorstore_retriever():
                     if file.endswith(('.docx', '.pdf')):
                         f.write(f"{os.path.join(root, file)}\n")
 
-    return vectorstore.as_retriever()
+    return vectorstore.as_retriever(search_kwargs={"k": k})
 
 
 # --- PART 2: STATE DEFINITION ---
