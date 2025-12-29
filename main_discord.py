@@ -7,6 +7,7 @@ from document_engine import query_documents
 from fritz_utils import get_key_from_json_config_file, MessageSource
 from image_generator import generate_image
 from mister_fritz import ask_stuff
+from tts import StuffSayer
 
 discord_key = "discord_bot_token"
 command_prefix = "$"
@@ -15,6 +16,7 @@ intents.message_content = True
 client = commands.Bot(command_prefix=command_prefix, intents=intents)
 
 connection = None
+sayer = StuffSayer()
 
 
 @client.event
@@ -26,6 +28,14 @@ async def on_ready():
 async def hello(ctx):
     author = ctx.author.name
     await ctx.send(f"Hello, {author}!")
+
+@client.command()
+async def ask(ctx, *, message):
+    author = ctx.author.name
+    original_response = ask_stuff(message, MessageSource.DISCORD_VOICE, author)["text"]
+    output_file = sayer.say_stuff_advanced(original_response)
+    await ctx.voice_client.play(discord.FFmpegPCMAudio(source=output_file))
+
 
 @client.command()
 async def gen(ctx, *, message):
