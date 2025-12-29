@@ -74,7 +74,7 @@ def get_source_info(source: MessageSource, user_id: str) -> str:
     if source == MessageSource.DISCORD_TEXT:
         return f"User is texting from Discord (User ID: {user_id})"
     elif source == MessageSource.DISCORD_VOICE:
-        return f"User is speaking from Discord (User ID: {user_id}). Answer in 10 words or less."
+        return f"User is speaking from Discord (User ID: {user_id}). Please answer in 30 words or less."
     return f"User is interacting via CLI (User ID: {user_id})"
 
 

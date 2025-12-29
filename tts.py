@@ -1,23 +1,7 @@
 import hashlib
 import os
-import pygame
-import pyttsx3
 import torch
 from TTS.api import TTS
-
-
-def _play_audio(output_file: str):
-    """
-    Play the generated or existing audio file using pygame.
-    """
-    print(f"Current working directory: {os.getcwd()}")
-    pygame.mixer.init()  # Initialize pygame mixer
-    pygame.mixer.music.load(output_file)  # Load the sound file
-    pygame.mixer.music.play()  # Play the sound
-
-    while pygame.mixer.music.get_busy():  # Wait for the sound to finish
-        pygame.time.Clock().tick(10)  # Check every 10 ms
-
 
 def _file_exists(file_path: str) -> bool:
     """

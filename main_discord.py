@@ -34,7 +34,11 @@ async def ask(ctx, *, message):
     author = ctx.author.name
     original_response = ask_stuff(message, MessageSource.DISCORD_VOICE, author)["text"]
     output_file = sayer.say_stuff_advanced(original_response)
-    await ctx.voice_client.play(discord.FFmpegPCMAudio(source=output_file))
+
+    try:
+        await ctx.voice_client.play(discord.FFmpegPCMAudio(source=output_file))
+    except AttributeError as e:
+        await ctx.send("You are not connected to a voice channel, buddy!")
 
 
 @client.command()
