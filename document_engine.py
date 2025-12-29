@@ -18,6 +18,9 @@ from langchain_community.document_loaders import (
     CSVLoader,
     TextLoader
 )
+# Import utility to filter complex metadata (fixes list errors in ChromaDB)
+from langchain_community.vectorstores.utils import filter_complex_metadata
+
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
@@ -208,6 +211,10 @@ def get_vectorstore_retriever(k=2):
                     print(f"   - Splitting: {content_preview}...")
 
                 splits = text_splitter.split_documents(docs)
+
+                # Filter complex metadata (fixes the ['eng'] list error from XLSX files)
+                splits = filter_complex_metadata(splits)
+
                 vectorstore.add_documents(splits)
 
                 # Update indexed files list
@@ -252,6 +259,9 @@ def get_vectorstore_retriever(k=2):
             add_start_index=True
         )
         splits = text_splitter.split_documents(docs)
+
+        # Filter complex metadata (fixes the ['eng'] list error from XLSX files)
+        splits = filter_complex_metadata(splits)
 
         # 3. Index
         vectorstore = Chroma.from_documents(
@@ -441,7 +451,3 @@ def query_documents(user_input):
     print(f"Agent: {final_generation}")
     # Return the generation captured during streaming to avoid running the graph twice
     return final_generation
-
-#query_documents("Who is Senialis?")
-#query_documents("What was Bhata's dream?")
-query_documents("What gender and race is Inawynn Sylroris?")
