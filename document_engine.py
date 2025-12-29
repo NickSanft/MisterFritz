@@ -2,12 +2,22 @@ import os
 import sys
 from typing import List
 import io
+import msoffcrypto
+import openpyxl
 
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
-from langchain_community.document_loaders import DirectoryLoader, UnstructuredWordDocumentLoader, PyPDFLoader
+# Updated imports for additional file types
+from langchain_community.document_loaders import (
+    DirectoryLoader,
+    UnstructuredWordDocumentLoader,
+    PyPDFLoader,
+    UnstructuredExcelLoader,
+    CSVLoader,
+    TextLoader
+)
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
@@ -18,9 +28,13 @@ from langgraph.graph import END, StateGraph, START
 from fritz_utils import CHROMA_DB_PATH, INDEXED_FILES_PATH, CHROMA_COLLECTION_NAME, DOC_FOLDER, FAST_OLLAMA_MODEL, \
     THINKING_OLLAMA_MODEL
 
+# Define supported file extensions
+SUPPORTED_EXTENSIONS = ('.docx', '.pdf', '.xlsx', '.csv', '.txt', '.md')
+
 try:
     from PIL import Image
     import easyocr
+
     OCR_AVAILABLE = True
     # Initialize EasyOCR reader (done once)
     reader = easyocr.Reader(['en'], gpu=False)
@@ -31,18 +45,17 @@ except ImportError:
 
 try:
     import fitz  # PyMuPDF
+
     PYMUPDF_AVAILABLE = True
 except ImportError:
     PYMUPDF_AVAILABLE = False
     print("Warning: PyMuPDF not installed. Cannot render PDF pages for OCR.")
 
 
-
-
 def load_pdf_with_ocr_fallback(file_path: str) -> List[Document]:
     """
     Loads a PDF file. First tries PyPDFLoader for embedded text.
-    If text is empty or too short, falls back to OCR using EasyOCR (no Tesseract required).
+    If text is empty or too short, falls back to OCR using EasyOCR.
     """
     # Try standard PDF loading first
     loader = PyPDFLoader(file_path)
@@ -81,7 +94,7 @@ def load_pdf_with_ocr_fallback(file_path: str) -> List[Document]:
             img.save(img_byte_arr, format='PNG')
             img_byte_arr = img_byte_arr.getvalue()
 
-            # Extract text using EasyOCR (no Tesseract needed!)
+            # Extract text using EasyOCR
             result = reader.readtext(img_byte_arr, detail=0)
             text = "\n".join(result)
 
@@ -103,6 +116,36 @@ def load_pdf_with_ocr_fallback(file_path: str) -> List[Document]:
     except Exception as e:
         print(f"   - OCR failed: {e}")
         return docs  # Return original docs as fallback
+
+
+def load_document_by_extension(file_path: str) -> List[Document]:
+    """
+    Selects the appropriate loader based on file extension.
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+
+    try:
+        if ext == '.pdf':
+            return load_pdf_with_ocr_fallback(file_path)
+        elif ext == '.docx':
+            loader = UnstructuredWordDocumentLoader(file_path)
+            return loader.load()
+        elif ext == '.xlsx':
+            # Requires `openpyxl` installed
+            loader = UnstructuredExcelLoader(file_path, mode="elements")
+            return loader.load()
+        elif ext == '.csv':
+            loader = CSVLoader(file_path)
+            return loader.load()
+        elif ext in ['.txt', '.md']:
+            loader = TextLoader(file_path, encoding='utf-8', autodetect_encoding=True)
+            return loader.load()
+        else:
+            print(f"   - Warning: Unsupported file type: {ext}")
+            return []
+    except Exception as e:
+        print(f"   - Error loading {file_path}: {e}")
+        return []
 
 
 # --- PART 1: INGESTION ENGINE ---
@@ -132,12 +175,15 @@ def get_vectorstore_retriever(k=2):
             with open(INDEXED_FILES_PATH, 'r') as f:
                 indexed_files = set(line.strip() for line in f)
 
-        # Find all current .docx and .pdf files
+        # Find all current supported files
         current_files = set()
         if os.path.exists(DOC_FOLDER):
             for root, dirs, files in os.walk(DOC_FOLDER):
                 for file in files:
-                    if file.endswith(('.docx', '.pdf')):
+                    # Skip temporary office files (start with ~$)
+                    if file.startswith("~$"):
+                        continue
+                    if file.lower().endswith(SUPPORTED_EXTENSIONS):
                         current_files.add(os.path.join(root, file))
 
         new_files = current_files - indexed_files
@@ -148,11 +194,7 @@ def get_vectorstore_retriever(k=2):
             docs = []
             for file_path in new_files:
                 print(f"   - Loading: {file_path}")
-                if file_path.endswith('.pdf'):
-                    docs.extend(load_pdf_with_ocr_fallback(file_path))
-                else:
-                    loader = UnstructuredWordDocumentLoader(file_path)
-                    docs.extend(loader.load())
+                docs.extend(load_document_by_extension(file_path))
 
             if docs:
                 text_splitter = RecursiveCharacterTextSplitter(
@@ -161,7 +203,10 @@ def get_vectorstore_retriever(k=2):
                     add_start_index=True
                 )
                 for doc in docs:
-                    print(f"   - Splitting: {doc.page_content[:100]}...")
+                    # Basic logging of content preview
+                    content_preview = doc.page_content[:100].replace('\n', ' ')
+                    print(f"   - Splitting: {content_preview}...")
+
                 splits = text_splitter.split_documents(docs)
                 vectorstore.add_documents(splits)
 
@@ -177,32 +222,26 @@ def get_vectorstore_retriever(k=2):
         print("--- CREATING NEW VECTOR STORE FROM DOCUMENTS ---")
         if not os.path.exists(DOC_FOLDER):
             os.makedirs(DOC_FOLDER)
-            print(f"Created folder {DOC_FOLDER}. Please add .docx files and restart.")
+            print(f"Created folder {DOC_FOLDER}. Please add documents ({', '.join(SUPPORTED_EXTENSIONS)}) and restart.")
             sys.exit()
 
-        # 1. Load Word Documents and PDFs
+        # 1. Load Documents
         docs = []
 
-        #Load .docx files
-        docx_loader = DirectoryLoader(
-            DOC_FOLDER,
-            glob="**/*.docx",
-            loader_cls=UnstructuredWordDocumentLoader,
-            show_progress=True,
-            use_multithreading=True
-        )
-        docs.extend(docx_loader.load())
-
-        # Load .pdf files with OCR fallback
+        # Iterate through folder and load all supported types
         for root, dirs, files in os.walk(DOC_FOLDER):
             for file in files:
-                if file.endswith('.pdf'):
+                # Skip temporary office files
+                if file.startswith("~$"):
+                    continue
+
+                if file.lower().endswith(SUPPORTED_EXTENSIONS):
                     file_path = os.path.join(root, file)
-                    print(f"Loading PDF: {file_path}")
-                    docs.extend(load_pdf_with_ocr_fallback(file_path))
+                    print(f"Loading: {file_path}")
+                    docs.extend(load_document_by_extension(file_path))
 
         if not docs:
-            print("No documents found. Please add .docx or .pdf files to the folder.")
+            print(f"No documents found. Please add {SUPPORTED_EXTENSIONS} files to the folder.")
             sys.exit()
 
         # 2. Split Text
@@ -229,7 +268,10 @@ def get_vectorstore_retriever(k=2):
         with open(INDEXED_FILES_PATH, 'w') as f:
             for root, dirs, files in os.walk(DOC_FOLDER):
                 for file in files:
-                    if file.endswith(('.docx', '.pdf')):
+                    # Skip temporary files here too
+                    if file.startswith("~$"):
+                        continue
+                    if file.lower().endswith(SUPPORTED_EXTENSIONS):
                         f.write(f"{os.path.join(root, file)}\n")
 
     return vectorstore.as_retriever(search_kwargs={"k": k})
@@ -363,7 +405,7 @@ workflow.add_node("grade_documents", grade_documents)
 workflow.add_node("generate_rag", generate_rag)
 workflow.add_node("transform_query", transform_query)
 
-workflow.add_edge(START,"retrieve")
+workflow.add_edge(START, "retrieve")
 workflow.add_edge("retrieve", "grade_documents")
 
 workflow.add_conditional_edges(
@@ -380,6 +422,7 @@ workflow.add_edge("generate_rag", END)
 
 # Compile
 app = workflow.compile()
+
 
 def query_documents(user_input):
     # Run the graph
@@ -398,3 +441,7 @@ def query_documents(user_input):
     print(f"Agent: {final_generation}")
     # Return the generation captured during streaming to avoid running the graph twice
     return final_generation
+
+#query_documents("Who is Senialis?")
+#query_documents("What was Bhata's dream?")
+query_documents("What gender and race is Inawynn Sylroris?")
