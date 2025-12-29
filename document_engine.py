@@ -322,7 +322,7 @@ grader_chain = grader_prompt | structured_llm_grader
 rag_prompt = ChatPromptTemplate.from_messages(
     [
         ("system",
-         "You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question. If you don't know the answer, just say that you don't know."),
+         "You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question and cite which source(s) you used if at all possible. If you don't know the answer, just say that you don't know."),
         ("human", "Question: {question} \n\n Context: {context} \n\n Answer:"),
     ]
 )
@@ -373,7 +373,26 @@ def generate_rag(state):
     question = state["question"]
     documents = state["documents"]
 
-    generation = rag_chain.invoke({"context": documents, "question": question})
+    formatted_context_list = []
+
+    for doc in documents:
+        source_name = doc.metadata.get("source", "Unknown Source")
+        print(source_name)
+        page = doc.metadata.get("page")
+
+        source_label = f"[Source: {source_name}"
+        if page:
+            source_label += f", Page {page}"
+        source_label += "]"
+
+        # Combine label and content so the LLM sees exactly where this text came from
+        formatted_chunk = f"{source_label}\n{doc.page_content}"
+        formatted_context_list.append(formatted_chunk)
+
+    full_context_string = "\n\n---\n\n".join(formatted_context_list)
+    #print(f"   - Full context string: {full_context_string}")
+
+    generation = rag_chain.invoke({"context": full_context_string, "question": question})
     return {"generation": generation}
 
 
