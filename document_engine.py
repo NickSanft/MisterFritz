@@ -29,7 +29,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import END, StateGraph, START
 
 from fritz_utils import CHROMA_DB_PATH, INDEXED_FILES_PATH, CHROMA_COLLECTION_NAME, DOC_FOLDER, FAST_OLLAMA_MODEL, \
-    THINKING_OLLAMA_MODEL
+    THINKING_OLLAMA_MODEL, EMBEDDING_MODEL
 
 # Define supported file extensions
 SUPPORTED_EXTENSIONS = ('.docx', '.pdf', '.xlsx', '.csv', '.txt', '.md')
@@ -152,7 +152,7 @@ def load_document_by_extension(file_path: str) -> List[Document]:
 
 
 # --- PART 1: INGESTION ENGINE ---
-def get_vectorstore_retriever(k=2):
+def get_vectorstore_retriever(k=4):
     """
     Checks if a local vector store exists. If not, ingests documents from DOCS_FOLDER.
     If vector store exists, checks for new documents and adds them.
@@ -161,7 +161,7 @@ def get_vectorstore_retriever(k=2):
     Args:
         k: Number of top results to return (default: 2 for faster performance)
     """
-    embeddings = OllamaEmbeddings(model="mxbai-embed-large")
+    embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
 
     # Check if DB exists
     if os.path.exists(CHROMA_DB_PATH) and os.listdir(CHROMA_DB_PATH):
@@ -434,20 +434,37 @@ workflow.add_edge("generate_rag", END)
 app = workflow.compile()
 
 
-def query_documents(user_input):
+def query_documents(user_input: str) -> str:
+    """
+    Executes the RAG workflow for a given user question.
+
+    Args:
+        user_input (str): The user's question.
+
+    Returns:
+        str: The generated answer from the agent.
+    """
     # Run the graph
     inputs = {
         "question": user_input,
         "loop_step": 0
     }
-    final_generation = ""
-    for output in app.stream(inputs):
-        print("TYPE: " + str(type(output)))
-        for key, value in output.items():
-            # print(f"Finished running: {key}")
-            if "generation" in value:
-                final_generation = value["generation"]
+
+    final_generation = "No response generated."
+
+    try:
+        # Use a recursion limit to prevent infinite loops if logic fails
+        config = {"recursion_limit": 25}
+
+        for output in app.stream(inputs, config=config):
+            for key, value in output.items():
+                print(f"--- Finished Step: {key} ---")
+                if "generation" in value:
+                    final_generation = value["generation"]
+
+    except Exception as e:
+        print(f"An error occurred during query execution: {e}")
+        return f"Error: {str(e)}"
 
     print(f"Agent: {final_generation}")
-    # Return the generation captured during streaming to avoid running the graph twice
     return final_generation
