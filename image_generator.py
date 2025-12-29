@@ -168,7 +168,7 @@ def encode_prompt_xl(pipeline, prompt, negative_prompt=""):
 
     return prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds
 
-def generate_image(prompt, negative_prompt="", num_inference_steps=25, guidance_scale=7.5):
+def generate_image(prompt, negative_prompt="", num_inference_steps=25, guidance_scale=12):
     """
     Generate an image from a text prompt using SDXL.
 
@@ -198,6 +198,7 @@ def generate_image(prompt, negative_prompt="", num_inference_steps=25, guidance_
         num_inference_steps=num_inference_steps,
         guidance_scale=guidance_scale
     ).images[0]
+    print("Image generation completed!")
     # Save or display the image
     os.makedirs(output_directory, exist_ok=True)
 
