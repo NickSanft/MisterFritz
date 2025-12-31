@@ -9,6 +9,7 @@ from image_generator import generate_image
 from mister_fritz import ask_stuff
 from tts import StuffSayer
 
+
 discord_key = "discord_bot_token"
 command_prefix = "$"
 intents = discord.Intents.default()
@@ -30,15 +31,19 @@ async def hello(ctx):
     await ctx.send(f"Hello, {author}!")
 
 @client.command()
-async def ask(ctx, *, message):
+async def voice(ctx, *, message):
     author = ctx.author.name
     original_response = ask_stuff(message, MessageSource.DISCORD_VOICE, author)["text"]
     output_file = sayer.say_stuff_advanced(original_response)
 
     try:
-        await ctx.voice_client.play(discord.FFmpegPCMAudio(source=output_file))
+        if ctx.voice_client:
+            await ctx.voice_client.play(discord.FFmpegPCMAudio(source=output_file))
+        else:
+            files = [discord.File(output_file)]
+            await ctx.send("You are not connected to a voice channel, uploading as a file...", files=files)
     except AttributeError as e:
-        await ctx.send("You are not connected to a voice channel, buddy!")
+        await ctx.send("Something crazy happened!")
 
 
 @client.command()
