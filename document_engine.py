@@ -34,6 +34,7 @@ from fritz_utils import CHROMA_DB_PATH, INDEXED_FILES_PATH, CHROMA_COLLECTION_NA
 # Define supported file extensions
 SUPPORTED_EXTENSIONS = ('.docx', '.pdf', '.xlsx', '.csv', '.txt', '.md')
 
+# --- GLOBAL VARS ---
 # We will store the initialized retriever here so we don't rebuild it per query
 GLOBAL_RETRIEVER = None
 
@@ -43,7 +44,6 @@ try:
     import easyocr
 
     OCR_AVAILABLE = True
-    # Initialize EasyOCR reader (done once)
     # Note: In multiprocessing, the reader needs to be initialized per process or handled carefully.
     # We will initialize it lazily in the function to be safe across OS types.
 except ImportError:
@@ -335,9 +335,19 @@ def generate_rag(state):
         formatted_context_list.append(f"[Source: {source_name}]\n{doc.page_content}")
 
     full_context_string = "\n\n---\n\n".join(formatted_context_list)
-    #print(f"   - Full context string: {full_context_string}")
 
-    generation = rag_chain.invoke({"context": full_context_string, "question": question})
+    # PERFORMANCE IMPROVEMENT: Streaming
+    # Instead of waiting for the full string, we stream tokens to stdout immediately.
+    print(f"   - Streaming response from {THINKING_OLLAMA_MODEL}...")
+    generation = ""
+
+    # .stream() returns an iterator of string chunks
+    for chunk in rag_chain.stream({"context": full_context_string, "question": question}):
+        print(chunk, end="", flush=True)  # Print immediately to console
+        generation += chunk
+
+    print("\n")  # Ensure a clean newline after streaming finishes
+
     return {"generation": generation}
 
 
