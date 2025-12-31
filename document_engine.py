@@ -290,11 +290,14 @@ class GraphState(TypedDict):
 
 
 def retrieve(state):
+    global GLOBAL_RETRIEVER # Access the global variable
     print("---RETRIEVE---")
     question = state["question"]
 
+    # Lazy Initialization to support Import-Safe Multiprocessing
     if GLOBAL_RETRIEVER is None:
-        raise ValueError("Retriever not initialized. Run initialize_retriever() first.")
+        print("Initializing Retriever lazily...")
+        GLOBAL_RETRIEVER = initialize_retriever(k=2)
 
     documents = GLOBAL_RETRIEVER.invoke(question)
     return {"documents": documents, "question": question}
@@ -408,7 +411,3 @@ def query_documents(user_input: str):
     except Exception as e:
         return f"Error: {e}"
     return final_generation
-
-
-print("Initializing RAG System...")
-GLOBAL_RETRIEVER = initialize_retriever(k=2)
