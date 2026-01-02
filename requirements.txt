@@ -210,7 +210,6 @@ python-magic==0.4.27
 python-oxmsg==0.0.2
 pyttsx3==2.99
 pytz==2025.2
-pywin32==311
 pyxnat==1.6.4
 PyYAML==6.0.3
 RapidFuzz==3.14.3
@@ -248,13 +247,12 @@ tensorboard-data-server==0.7.2
 threadpoolctl==3.6.0
 tifffile==2025.12.20
 tokenizers==0.22.1
-torch==2.9.1+cu126
+torch==2.9.1
 torchaudio==2.9.1
 torchvision==0.24.1
 tqdm==4.67.1
 traits==7.1.0
 transformers==4.57.3
-triton-windows==3.5.1.post22
 typeguard==4.4.4
 typer==0.20.0
 typer-slim==0.20.0
@@ -279,4 +277,3 @@ xformers==0.0.33.post2
 xxhash==3.6.0
 yarl==1.22.0
 zipp==3.23.0
-zstandard==0.25.0
