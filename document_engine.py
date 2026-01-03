@@ -2,8 +2,8 @@ import os
 import sys
 from typing import List
 import io
-import msoffcrypto # Uncomment if needed for encrypted docs
-import openpyxl # Uncomment if needed explicitly, though used by pandas/loaders usually
+import msoffcrypto
+import openpyxl
 
 # Concurrency imports
 import concurrent.futures
@@ -262,11 +262,20 @@ grader_prompt = ChatPromptTemplate.from_messages(
 )
 grader_chain = grader_prompt | structured_llm_grader
 
+rag_system_prompt = """You are a helpful assistant. Answer the user's question based ONLY on the context provided below.
+The context is formatted as: 
+[Source: filename | Location: page or line number]
+Content...
+
+When answering:
+1. Cite your sources in the text using the format [Source Name, Page/Line].
+2. If the context does not contain the answer, say "I don't know."
+"""
+
 # RAG Generator
 rag_prompt = ChatPromptTemplate.from_messages(
     [
-        ("system",
-         "You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question. If you don't know the answer, just say that you don't know."),
+        ("system", rag_system_prompt),
         ("human", "Question: {question} \n\n Context: {context} \n\n Answer:"),
     ]
 )
@@ -333,25 +342,41 @@ def generate_rag(state):
     documents = state["documents"]
 
     formatted_context_list = []
+
     for doc in documents:
+        # 1. Extract Source Name
         source_name = os.path.basename(doc.metadata.get("source", "Unknown"))
-        formatted_context_list.append(f"[Source: {source_name}]\n{doc.page_content}")
+
+        # 2. Extract Location (Page for PDF, Start Index/Line approx for Text)
+        location = ""
+        if "page" in doc.metadata:
+            # PyPDFLoader is 0-indexed
+            location = f"Page {doc.metadata['page'] + 1}"
+        elif "start_index" in doc.metadata:
+            # Estimate line number (approximate) if specific line metadata isn't available
+            # 100 chars per line is a rough estimate, or just use the raw index
+            location = f"Char Index {doc.metadata['start_index']}"
+        else:
+            location = "Unknown Location"
+
+        # 3. Format the context for the LLM
+        formatted_entry = f"[Source: {source_name} | Location: {location}]\n{doc.page_content}"
+        formatted_context_list.append(formatted_entry)
 
     full_context_string = "\n\n---\n\n".join(formatted_context_list)
 
-    # PERFORMANCE IMPROVEMENT: Streaming
-    # Instead of waiting for the full string, we stream tokens to stdout immediately.
     print(f"   - Streaming response from {THINKING_OLLAMA_MODEL}...")
     generation = ""
 
-    # .stream() returns an iterator of string chunks
+    # Stream the answer
     for chunk in rag_chain.stream({"context": full_context_string, "question": question}):
-        print(chunk, end="", flush=True)  # Print immediately to console
+        print(chunk, end="", flush=True)
         generation += chunk
 
-    print("\n")  # Ensure a clean newline after streaming finishes
+    print("\n")
 
-    return {"generation": generation}
+    # Return generation AND pass the documents through
+    return {"generation": generation, "documents": documents}
 
 
 def transform_query(state):
@@ -399,15 +424,46 @@ app = workflow.compile()
 # --- ENTRY POINT ---
 
 def query_documents(user_input: str):
-    """Execution wrapper."""
+    """Execution wrapper returning Answer + Sources."""
     inputs = {"question": user_input, "loop_step": 0}
-    final_generation = "No response."
+
+    final_state = None
+
+    # Run the graph
+    config = {"recursion_limit": 25}
     try:
-        config = {"recursion_limit": 25}
+        # We iterate through the stream to print progress, but we need the final state
         for output in app.stream(inputs, config=config):
             for key, value in output.items():
-                if "generation" in value:
-                    final_generation = value["generation"]
+                final_state = value
     except Exception as e:
-        return f"Error: {e}"
-    return final_generation
+        return {"error": str(e)}
+
+    # Extract final generation
+    final_answer = final_state.get("generation", "No answer generated.")
+    used_docs = final_state.get("documents", [])
+
+    # Format the sources list programmatically
+    sources_data = []
+    for doc in used_docs:
+        meta = doc.metadata
+        filename = os.path.basename(meta.get("source", "Unknown"))
+
+        # logic to determine location
+        location = "N/A"
+        if "page" in meta:
+            location = f"Page {meta['page'] + 1}"
+        elif "start_index" in meta:
+            location = f"Start Char {meta['start_index']}"
+
+        sources_data.append({
+            "file": filename,
+            "location": location,
+            "snippet": doc.page_content[:50] + "..."  # First 50 chars as preview
+        })
+
+    # Return a dictionary containing both Answer and Structured Sources
+    return {
+        "answer": final_answer,
+        "citations": sources_data
+    }
