@@ -102,7 +102,9 @@ cd MisterFritz
 python -m venv .venv
 ```
 
-3. **Activate the virtual environment:**
+3. **Activate the virtual environment OR install with pip:**
+
+Virtual environment:
 
 Windows:
 ```bash
@@ -114,12 +116,13 @@ macOS/Linux:
 source .venv/bin/activate
 ```
 
-4. **Install dependencies:**
+Pip installation:
+
 ```bash
-pip install discord.py langchain langchain-ollama langchain-chroma langgraph duckduckgo-search beautifulsoup4 requests pytz chromadb unstructured python-docx pypdf pillow easyocr PyMuPDF diffusers transformers accelerate xformers safetensors
+pip install -r requirements.txt
 ```
 
-5. **Configure the bot:**
+4**Configure the bot:**
 
 Create a `config.json` file in the project root with the following structure:
 ```json
@@ -139,7 +142,7 @@ To get a Discord bot token:
 
 6. **Set up document folder (optional):**
 
-Create an `input/` directory and add `.docx` or `.pdf` files for the RAG system:
+Create an `input/` directory and add files for the RAG system:
 ```bash
 mkdir input
 # Add your documents to this folder
