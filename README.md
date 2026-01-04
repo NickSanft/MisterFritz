@@ -13,7 +13,8 @@ Mister Fritz is an AI-powered Discord bot with a sophisticated, sardonic persona
   - `$hello` - Greet the bot
   - `$lore <query>` - Search local documents
   - `$gen <prompt>` - Generate images from text descriptions
-  - `$join` / `$leave` - Voice channel management
+  - `$join` / `$leave` - Joins the current voice channel the user is in
+  - `$voice <query>` - Triggers conversational responses. If the bot is in a voice channel, it will speak the message, otherwise it will attach an audio file.
   - Direct messages or mentions trigger conversational responses
 - **Tools**: Dice rolling, current time lookup, web search, document search, memory retrieval, and image generation
 
@@ -70,6 +71,12 @@ curl -fsSL https://ollama.com/install.sh | sh
 
 After installing Ollama, pull the models used by Mister Fritz:
 
+Windows:
+
+Run ./modelfiles/run.bat
+
+Linux/macOS:
+
 ```bash
 # Main conversation model (custom model - see modelfiles/ directory)
 ollama pull gpt-oss
@@ -81,10 +88,6 @@ ollama pull llama3.2
 ollama pull mxbai-embed-large
 ```
 
-**Note:** The `gpt-oss` model appears to be a custom modelfile. Check the `modelfiles/` directory for the model definition and create it with:
-```bash
-ollama create gpt-oss -f modelfiles/gpt-oss.modelfile
-```
 
 ## Installation
 
@@ -122,8 +125,7 @@ Create a `config.json` file in the project root with the following structure:
 ```json
 {
   "discord_bot_token": "YOUR_DISCORD_BOT_TOKEN",
-  "doc_storage_description": "Description of what documents contain (e.g., 'The world of Sennen or Dungeons and Dragons')",
-  "root_user_id": "your_username"
+  "doc_storage_description": "Description of what documents contain (e.g., 'The world of Sennen or Dungeons and Dragons')"
 }
 ```
 
