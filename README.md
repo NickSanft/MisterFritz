@@ -130,7 +130,7 @@ Pip installation:
 pip install -r requirements.txt
 ```
 
-4**Configure the bot:**
+4. **Configure the bot:**
 
 Create a `config.json` file in the project root with the following structure:
 ```json
