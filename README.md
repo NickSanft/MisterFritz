@@ -27,7 +27,11 @@ The bot uses a LangGraph-based agent system with:
 - **ChromaDB**: Stores user memories and document embeddings
 - **Image Generation Pipeline**: Uses Stable Diffusion XL with custom prompt encoding to bypass the 77 token limit, supporting very long and detailed prompts
 
+Basic Conversation Diagram:
+
 ![Mister Fritz Diagram](mister_fritz_diagram.png)
+
+Document Engine Diagram:
 
 ![Document Engine Diagram](document_engine_diagram.png)
 
