@@ -467,3 +467,6 @@ def query_documents(user_input: str):
         "answer": final_answer,
         "citations": sources_data
     }
+
+with open("document_engine_diagram.png", "wb") as binary_file:
+    binary_file.write(app.get_graph().draw_mermaid_png())
