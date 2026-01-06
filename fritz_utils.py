@@ -11,6 +11,7 @@ INDEXED_FILES_PATH = os.path.join(CHROMA_DB_PATH, "indexed_files.txt")
 THINKING_OLLAMA_MODEL = "gpt-oss"
 FAST_OLLAMA_MODEL = "llama3.2"
 EMBEDDING_MODEL = "mxbai-embed-large"
+DISCORD_KEY = "discord_bot_token"
 
 class MessageSource(Enum):
     DISCORD_TEXT = 0,

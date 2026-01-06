@@ -4,13 +4,11 @@ import discord
 from discord.ext import commands
 
 from document_engine import query_documents
-from fritz_utils import get_key_from_json_config_file, MessageSource
+from fritz_utils import get_key_from_json_config_file, MessageSource, DISCORD_KEY
 from image_generator import generate_image
 from mister_fritz import ask_stuff
 from tts import StuffSayer
 
-
-discord_key = "discord_bot_token"
 command_prefix = "$"
 intents = discord.Intents.default()
 intents.message_content = True
@@ -185,5 +183,5 @@ def split_into_chunks(s, chunk_size=2000):
 
 
 if __name__ == '__main__':
-    discord_secret = get_key_from_json_config_file(discord_key)
+    discord_secret = get_key_from_json_config_file(DISCORD_KEY)
     client.run(discord_secret)
