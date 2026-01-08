@@ -11,12 +11,14 @@ INDEXED_FILES_PATH = os.path.join(CHROMA_DB_PATH, "indexed_files.txt")
 THINKING_OLLAMA_MODEL = "gpt-oss"
 FAST_OLLAMA_MODEL = "llama3.2"
 EMBEDDING_MODEL = "mxbai-embed-large"
+VISION_MODEL = "llava"
 DISCORD_KEY = "discord_bot_token"
 
 class MessageSource(Enum):
     DISCORD_TEXT = 0,
-    DISCORD_VOICE = 1,
-    LOCAL = 2
+    DISCORD_TEXT_AND_IMAGE = 1,
+    DISCORD_VOICE = 2,
+    LOCAL = 3
 
 def get_key_from_json_config_file(key_name: str) -> str | None:
     file_path = "config.json"

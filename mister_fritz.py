@@ -22,7 +22,7 @@ from langchain.agents import create_agent
 import document_engine
 import image_generator
 from chroma_store import ChromaStore
-from fritz_utils import MessageSource, DOC_STORAGE_DESCRIPTION, CHAT_DB_NAME, THINKING_OLLAMA_MODEL
+from fritz_utils import MessageSource, DOC_STORAGE_DESCRIPTION, CHAT_DB_NAME, THINKING_OLLAMA_MODEL, VISION_MODEL
 from sqlite_store import SQLiteStore
 
 CONVERSATION_NODE = "conversation"
@@ -32,7 +32,8 @@ SUMMARIZE_CONVERSATION_NODE = "summarize_conversation"
 # Define extended state for tracking attachments
 class EnhancedState(TypedDict):
     messages: Annotated[list, add_messages]
-    image_paths: list[str]
+    image_paths: list[str]  # For generated images (output)
+    user_image_paths: list[str]  # For user-provided images (input)
 
 
 def get_conversation_tools_description():
@@ -46,7 +47,8 @@ def get_conversation_tools_description():
         "roll_dice": (roll_dice, "Roll different types of dice."),
         "search_memories": (search_memories, "Returns a JSON payload of stored memories you have had with a user based on a search term."),
         "search_documents": (search_documents, f"Search local documents. Use this for questions about: {DOC_STORAGE_DESCRIPTION}"),
-        "generate_image": (generate_image, "Generates an image based on a given prompt.")
+        "generate_image": (generate_image, "Generates an image based on a given prompt."),
+        "analyze_image": (analyze_image, "Analyzes an image. If the user asks about an image, assume that the tool knows its location.")
     }
     return conversation_tool_dict
 
@@ -73,12 +75,14 @@ def get_source_info(source: MessageSource, user_id: str) -> str:
     """Generate source information based on the messaging platform."""
     if source == MessageSource.DISCORD_TEXT:
         return f"User is texting from Discord (User ID: {user_id})"
+    elif source == MessageSource.DISCORD_TEXT_AND_IMAGE:
+        return f"User is texting from Discord with and has an image that the analyze_image tool has the path for already. (User ID: {user_id})"
     elif source == MessageSource.DISCORD_VOICE:
         return f"User is speaking from Discord (User ID: {user_id}). Please answer in 30 words or less."
     return f"User is interacting via CLI (User ID: {user_id})"
 
 
-def format_prompt(prompt: str, source: MessageSource, user_id: str) -> str:
+def format_prompt(prompt: str, source: MessageSource, user_id: str, additional_info="") -> str:
     """Format the final prompt for the chatbot."""
     return f"""
     Context:
@@ -237,6 +241,63 @@ def search_memories(config: RunnableConfig, query: str):
     return search_memories_internal(config, query)
 
 
+@tool(parse_docstring=True)
+def analyze_image(config: RunnableConfig, question: str = "What is in this image?"):
+    """
+    Analyzes images using a vision model which has already been downloaded.
+
+    Args:
+        config: The RunnableConfig containing user_image_paths in metadata.
+        question: The specific question to ask about the image(s). Default: "What is in this image?"
+
+    Returns:
+        string: A description of what's in the image(s).
+    """
+    import base64
+    import ollama
+
+    # Get user images from config
+    metadata = config.get("metadata", {})
+    user_images = metadata.get("user_image_paths", [])
+    print(f"User images: {user_images}")
+
+    if not user_images:
+        return "No images were attached to analyze. Please ask the user to attach an image."
+
+    try:
+        # Prepare images for vision model (read and encode)
+        encoded_images = []
+        for img_path in user_images:
+            try:
+                with open(img_path, 'rb') as image_file:
+                    encoded_images.append(base64.b64encode(image_file.read()).decode('utf-8'))
+            except Exception as e:
+                print(f"Error reading image {img_path}: {e}")
+
+        if not encoded_images:
+            return "Could not read the attached images. Please try again."
+
+        # Call vision model
+        print(f"Analyzing {len(encoded_images)} image(s) with {VISION_MODEL}")
+        response = ollama.chat(
+            model=VISION_MODEL,
+            messages=[{
+                'role': 'user',
+                'content': question,
+                'images': encoded_images
+            }]
+        )
+
+        analysis = response['message']['content']
+        print(f"Vision analysis complete: {len(analysis)} chars")
+        return analysis
+
+    except Exception as e:
+        error_msg = f"Error analyzing image: {str(e)}"
+        print(error_msg)
+        return error_msg
+
+
 def add_memory(user_id: str, memory_key: str, memory_to_store: str):
     """ This function stores a memory. Only use this if the user has asked you to.
 
@@ -251,7 +312,7 @@ def add_memory(user_id: str, memory_key: str, memory_to_store: str):
 
 
 # ===== MAIN FUNCTION =====
-def ask_stuff(base_prompt: str, source: MessageSource, user_id: str, progress_callback=None, streaming_callback=None) -> dict:
+def ask_stuff(base_prompt: str, source: MessageSource, user_id: str, progress_callback=None, streaming_callback=None, user_image_paths: list[str] = None) -> dict:
     """Process user input and return structured output with text and attachments.
 
     Args:
@@ -262,19 +323,33 @@ def ask_stuff(base_prompt: str, source: MessageSource, user_id: str, progress_ca
                           Should accept a single string argument.
         streaming_callback: Optional function to call with partial text as it streams.
                            Should accept a single string argument with accumulated text.
+        user_image_paths: Optional list of file paths to images the user has attached.
     """
     user_id_clean = re.sub(r'[^a-zA-Z0-9]', '', user_id)  # Clean special characters
-    full_prompt = format_prompt(base_prompt, source, user_id_clean)
+    # Add user images to metadata if provided
+    if user_image_paths:
+        full_prompt = format_prompt(base_prompt, source, user_id_clean, f" User has attached images: {user_image_paths}")
+    else:
+        user_image_paths = []
+        full_prompt = format_prompt(base_prompt, source, user_id_clean)
 
     system_prompt = get_system_description(get_conversation_tools_description())
     print(f"Role description: {system_prompt}")
     print(f"Prompt to ask: {full_prompt}")
 
+
+
     config = {
         "configurable": {"user_id": user_id_clean, "thread_id": user_id_clean},
-        "metadata": {"user_id": user_id_clean, "thread_id": user_id_clean, "progress_callback": progress_callback, "streaming_callback": streaming_callback}
+        "metadata": {
+            "user_id": user_id_clean,
+            "thread_id": user_id_clean,
+            "progress_callback": progress_callback,
+            "streaming_callback": streaming_callback,
+            "user_image_paths": user_image_paths
+        }
     }
-    inputs = {"messages": [("user", full_prompt)], "image_paths": []}
+    inputs = {"messages": [("user", full_prompt)], "image_paths": [], "user_image_paths": user_image_paths}
 
     # Collect final state from stream
     final_state = None
@@ -385,6 +460,7 @@ def conversation(state: EnhancedState, config: RunnableConfig):
         "search_web": "Searching the web...",
         "scrape_website": "Scraping website content...",
         "search_memories": "Looking through my memories...",
+        "analyze_image": "🔍 Analyzing your image(s) with vision AI...",
     }
 
     # Track which tools we've already notified about

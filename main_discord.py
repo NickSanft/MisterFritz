@@ -178,8 +178,34 @@ async def on_message(ctx):
     # Get the event loop
     loop = asyncio.get_running_loop()
 
+    # Download and save any image attachments
+    user_image_paths = []
+    source = MessageSource.DISCORD_TEXT
+    if ctx.attachments:
+        source = MessageSource.DISCORD_TEXT_AND_IMAGE
+        print(f"Processing {len(ctx.attachments)} attachment(s)")
+        for attachment in ctx.attachments:
+            # Check if it's an image
+            if attachment.content_type and attachment.content_type.startswith('image/'):
+                try:
+                    # Create temp directory if it doesn't exist
+                    import os
+                    temp_dir = "temp_images"
+                    os.makedirs(temp_dir, exist_ok=True)
+
+                    # Save the image
+                    file_path = os.path.join(temp_dir, f"{author}_{attachment.id}_{attachment.filename}")
+                    await attachment.save(file_path)
+                    user_image_paths.append(file_path)
+                    print(f"Saved image: {file_path}")
+                except Exception as e:
+                    print(f"Error saving image attachment: {e}")
+
     # Send initial status message immediately
-    status_msg = await ctx.channel.send("✍️ *Mister Fritz is thinking...*")
+    if user_image_paths:
+        status_msg = await ctx.channel.send(f"✍️ *Analyzing {len(user_image_paths)} image(s)...*")
+    else:
+        status_msg = await ctx.channel.send("✍️ *Mister Fritz is thinking...*")
 
     # Create streaming handler for updating the message
     streaming_handler = StreamingMessageHandler(status_msg, loop)
@@ -206,11 +232,20 @@ async def on_message(ctx):
     try:
         response_data = await loop.run_in_executor(
             None,
-            lambda: ask_stuff(ctx.clean_content, MessageSource.DISCORD_TEXT, author, None, streaming_callback)
+            lambda: ask_stuff(ctx.clean_content, source, author, None, streaming_callback, user_image_paths)
         )
     except Exception as e:
         print(f"Error during ask_stuff: {e}")
         await status_msg.edit(content=f"❌ An error occurred: {str(e)}")
+        # Clean up temporary images
+        for img_path in user_image_paths:
+            try:
+                import os
+                if os.path.exists(img_path):
+                    os.remove(img_path)
+                    print(f"Cleaned up: {img_path}")
+            except Exception as cleanup_error:
+                print(f"Error cleaning up {img_path}: {cleanup_error}")
         return
 
     print(response_data)
@@ -249,6 +284,16 @@ async def on_message(ctx):
     else:
         # Use the streaming handler's final update for the complete response
         await streaming_handler.final_update(original_response, files)
+
+    # Clean up temporary user images after processing
+    for img_path in user_image_paths:
+        try:
+            import os
+            if os.path.exists(img_path):
+                os.remove(img_path)
+                print(f"Cleaned up: {img_path}")
+        except Exception as cleanup_error:
+            print(f"Error cleaning up {img_path}: {cleanup_error}")
 
 
 def split_into_chunks(s, chunk_size=2000):
