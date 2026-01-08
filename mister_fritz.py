@@ -415,12 +415,16 @@ def conversation(state: EnhancedState, config: RunnableConfig):
                     print("Progress callback is None, skipping notification")
 
             # Stream partial text content if available and streaming callback exists
+            # Only stream AI messages (not system, user, or tool messages)
             elif hasattr(latest, 'content') and isinstance(latest.content, str) and streaming_callback:
-                new_text = latest.content
-                if new_text and new_text != accumulated_text:
-                    accumulated_text = new_text
-                    print(f"Streaming partial content: {len(accumulated_text)} chars")
-                    streaming_callback(accumulated_text)
+                # Check if this is an AI message by checking the type
+                from langchain_core.messages import AIMessage
+                if isinstance(latest, AIMessage):
+                    new_text = latest.content
+                    if new_text and new_text != accumulated_text:
+                        accumulated_text = new_text
+                        print(f"Streaming partial content: {len(accumulated_text)} chars")
+                        streaming_callback(accumulated_text)
 
     # Extract text response
     resp = final_state["messages"][-1].content if final_state and "messages" in final_state else ""
