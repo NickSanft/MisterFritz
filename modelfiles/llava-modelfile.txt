@@ -1,0 +1,3 @@
+# Modelfile
+FROM llava
+PARAMETER num_ctx 32768
