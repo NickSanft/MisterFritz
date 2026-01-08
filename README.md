@@ -16,7 +16,7 @@ Mister Fritz is an AI-powered Discord bot with a sophisticated, sardonic persona
   - `$join` / `$leave` - Joins the current voice channel the user is in
   - `$voice <query>` - Triggers conversational responses. If the bot is in a voice channel, it will speak the message, otherwise it will attach an audio file.
   - Direct messages or mentions trigger conversational responses
-- **Tools**: Dice rolling, current time lookup, web search, document search, memory retrieval, and image generation
+- **Tools**: Dice rolling, current time lookup, web search, document search, memory retrieval, image generation, and image recognition
 
 ## Architecture
 
