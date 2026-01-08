@@ -206,7 +206,7 @@ async def on_message(ctx):
     try:
         response_data = await loop.run_in_executor(
             None,
-            lambda: ask_stuff(ctx.clean_content, MessageSource.DISCORD_TEXT, author, progress_callback, streaming_callback)
+            lambda: ask_stuff(ctx.clean_content, MessageSource.DISCORD_TEXT, author, None, streaming_callback)
         )
     except Exception as e:
         print(f"Error during ask_stuff: {e}")
