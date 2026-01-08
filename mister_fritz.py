@@ -251,7 +251,7 @@ def add_memory(user_id: str, memory_key: str, memory_to_store: str):
 
 
 # ===== MAIN FUNCTION =====
-def ask_stuff(base_prompt: str, source: MessageSource, user_id: str, progress_callback=None) -> dict:
+def ask_stuff(base_prompt: str, source: MessageSource, user_id: str, progress_callback=None, streaming_callback=None) -> dict:
     """Process user input and return structured output with text and attachments.
 
     Args:
@@ -260,6 +260,8 @@ def ask_stuff(base_prompt: str, source: MessageSource, user_id: str, progress_ca
         user_id: The user's identifier
         progress_callback: Optional function to call with progress updates.
                           Should accept a single string argument.
+        streaming_callback: Optional function to call with partial text as it streams.
+                           Should accept a single string argument with accumulated text.
     """
     user_id_clean = re.sub(r'[^a-zA-Z0-9]', '', user_id)  # Clean special characters
     full_prompt = format_prompt(base_prompt, source, user_id_clean)
@@ -270,7 +272,7 @@ def ask_stuff(base_prompt: str, source: MessageSource, user_id: str, progress_ca
 
     config = {
         "configurable": {"user_id": user_id_clean, "thread_id": user_id_clean},
-        "metadata": {"user_id": user_id_clean, "thread_id": user_id_clean, "progress_callback": progress_callback}
+        "metadata": {"user_id": user_id_clean, "thread_id": user_id_clean, "progress_callback": progress_callback, "streaming_callback": streaming_callback}
     }
     inputs = {"messages": [("user", full_prompt)], "image_paths": []}
 
@@ -369,10 +371,12 @@ def conversation(state: EnhancedState, config: RunnableConfig):
     inputs = {"messages": [("system", CACHED_SYSTEM_PROMPT),
                            ("user", latest_message)]}
 
-    # Get progress callback from config if available
+    # Get progress and streaming callbacks from config if available
     metadata = config.get("metadata", {})
     progress_callback = metadata.get("progress_callback")
+    streaming_callback = metadata.get("streaming_callback")
     print(f"Progress callback available: {progress_callback is not None}")
+    print(f"Streaming callback available: {streaming_callback is not None}")
 
     # Tool name to user-friendly message mapping
     tool_messages = {
@@ -388,6 +392,8 @@ def conversation(state: EnhancedState, config: RunnableConfig):
 
     # Stream and collect the response
     final_state = None
+    accumulated_text = ""
+
     for s in conversation_react_agent.stream(inputs, config=get_config_values(config), stream_mode="values"):
         final_state = s
 
@@ -407,6 +413,14 @@ def conversation(state: EnhancedState, config: RunnableConfig):
                             notified_tools.add(tool_name)
                 else:
                     print("Progress callback is None, skipping notification")
+
+            # Stream partial text content if available and streaming callback exists
+            elif hasattr(latest, 'content') and isinstance(latest.content, str) and streaming_callback:
+                new_text = latest.content
+                if new_text and new_text != accumulated_text:
+                    accumulated_text = new_text
+                    print(f"Streaming partial content: {len(accumulated_text)} chars")
+                    streaming_callback(accumulated_text)
 
     # Extract text response
     resp = final_state["messages"][-1].content if final_state and "messages" in final_state else ""
