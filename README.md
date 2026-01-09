@@ -86,13 +86,14 @@ Run ./modelfiles/run.bat
 Linux/macOS:
 
 ```bash
-# Main conversation model (custom model - see modelfiles/ directory)
-ollama pull gpt-oss
+ollama create -f .\gpt-oss-20b-modelfile.txt gpt-oss
+ollama create -f .\llama3.2-modelfile.txt llama3.2
+ollama create -f .\llava-modelfile.txt llava
 
-# Fast model for quick operations
-ollama pull llama3.2
+ollama run gpt-oss /bye
+ollama run llama3.2 /bye
+ollama run llava /bye
 
-# Embedding model for document search
 ollama pull mxbai-embed-large
 ```
 
