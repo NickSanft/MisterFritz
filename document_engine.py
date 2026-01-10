@@ -1,6 +1,9 @@
 import os
 import sys
-from typing import List
+import time
+import queue
+import threading
+from typing import List, Optional
 import io
 import msoffcrypto
 import openpyxl
@@ -8,6 +11,10 @@ import openpyxl
 # Concurrency imports
 import concurrent.futures
 import multiprocessing
+
+# Watchdog for Live Sync
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from pydantic import BaseModel, Field
@@ -35,8 +42,9 @@ from fritz_utils import CHROMA_DB_PATH, INDEXED_FILES_PATH, CHROMA_COLLECTION_NA
 SUPPORTED_EXTENSIONS = ('.docx', '.pdf', '.xlsx', '.csv', '.txt', '.md')
 
 # --- GLOBAL VARS ---
-# We will store the initialized retriever here so we don't rebuild it per query
-GLOBAL_RETRIEVER = None
+# Changed from GLOBAL_RETRIEVER to GLOBAL_VECTORSTORE to allow add/delete operations
+GLOBAL_VECTORSTORE: Optional[Chroma] = None
+INGESTION_QUEUE = queue.Queue()
 
 # --- OCR SETUP ---
 try:
@@ -44,8 +52,6 @@ try:
     import easyocr
 
     OCR_AVAILABLE = True
-    # Note: In multiprocessing, the reader needs to be initialized per process or handled carefully.
-    # We will initialize it lazily in the function to be safe across OS types.
 except ImportError:
     OCR_AVAILABLE = False
     print("Warning: EasyOCR not installed. OCR fallback will not be available.")
@@ -132,6 +138,10 @@ def load_document_by_extension(file_path: str) -> List[Document]:
     Selects the appropriate loader based on file extension.
     Top-level function for pickling support in multiprocessing.
     """
+    # Safety check for watcher race conditions
+    if not os.path.exists(file_path):
+        return []
+
     ext = os.path.splitext(file_path)[1].lower()
     try:
         if ext == '.pdf':
@@ -154,12 +164,108 @@ def load_document_by_extension(file_path: str) -> List[Document]:
         return []
 
 
+# --- LIVE SYNC INFRASTRUCTURE ---
+
+class DocumentEventHandler(FileSystemEventHandler):
+    """
+    Watchdog Event Handler.
+    Pushes events to a thread-safe queue to be processed by the worker.
+    """
+
+    def on_created(self, event):
+        if not event.is_directory and event.src_path.lower().endswith(SUPPORTED_EXTENSIONS):
+            print(f"[WATCHER] File Created: {event.src_path}")
+            INGESTION_QUEUE.put(("add", event.src_path))
+
+    def on_modified(self, event):
+        if not event.is_directory and event.src_path.lower().endswith(SUPPORTED_EXTENSIONS):
+            print(f"[WATCHER] File Modified: {event.src_path}")
+            INGESTION_QUEUE.put(("update", event.src_path))
+
+    def on_deleted(self, event):
+        if not event.is_directory and event.src_path.lower().endswith(SUPPORTED_EXTENSIONS):
+            print(f"[WATCHER] File Deleted: {event.src_path}")
+            INGESTION_QUEUE.put(("delete", event.src_path))
+
+    def on_moved(self, event):
+        if not event.is_directory:
+            if event.src_path.lower().endswith(SUPPORTED_EXTENSIONS):
+                print(f"[WATCHER] File Moved (Delete old): {event.src_path}")
+                INGESTION_QUEUE.put(("delete", event.src_path))
+            if event.dest_path.lower().endswith(SUPPORTED_EXTENSIONS):
+                print(f"[WATCHER] File Moved (Add new): {event.dest_path}")
+                INGESTION_QUEUE.put(("add", event.dest_path))
+
+
+def ingestion_worker():
+    """
+    Background daemon that consumes the queue.
+    Handles 'add', 'update', and 'delete' operations on the global VectorStore.
+    """
+    global GLOBAL_VECTORSTORE
+
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200,
+        add_start_index=True
+    )
+
+    while True:
+        try:
+            # Block until an item is available
+            action, file_path = INGESTION_QUEUE.get()
+
+            # Wait briefly to let file writes settle (debounce)
+            time.sleep(1.0)
+
+            if GLOBAL_VECTORSTORE is None:
+                INGESTION_QUEUE.task_done()
+                continue
+
+            print(f"--- SYNC WORKER: Processing {action} for {os.path.basename(file_path)} ---")
+
+            if action == "delete":
+                try:
+                    GLOBAL_VECTORSTORE.delete(where={"source": file_path})
+                    print(f"   - Removed chunks for {os.path.basename(file_path)}")
+                except Exception as e:
+                    print(f"   - Error deleting {file_path}: {e}")
+
+            elif action in ["add", "update"]:
+                # For update, we delete first to avoid duplicates
+                if action == "update":
+                    try:
+                        GLOBAL_VECTORSTORE.delete(where={"source": file_path})
+                    except:
+                        pass  # Might not exist yet
+
+                # Load and Ingest
+                try:
+                    docs = load_document_by_extension(file_path)
+                    if docs:
+                        splits = text_splitter.split_documents(docs)
+                        splits = filter_complex_metadata(splits)
+                        if splits:
+                            GLOBAL_VECTORSTORE.add_documents(splits)
+                            print(f"   - Added {len(splits)} chunks for {os.path.basename(file_path)}")
+                except Exception as e:
+                    print(f"   - Error ingesting {file_path}: {e}")
+
+            INGESTION_QUEUE.task_done()
+
+        except Exception as e:
+            print(f"Worker Error: {e}")
+
+
 # --- PART 1: OPTIMIZED INGESTION ENGINE ---
 
-def initialize_retriever(k=2):
+def initialize_vectorstore():
     """
-    Ingests documents using Multiprocessing and returns a Retriever.
+    Ingests documents using Multiprocessing and returns the VectorStore.
+    Also starts the background Watchdog observer.
     """
+    global GLOBAL_VECTORSTORE
+
     embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
 
     # Ensure directories exist
@@ -168,7 +274,15 @@ def initialize_retriever(k=2):
     if not os.path.exists(CHROMA_DB_PATH):
         os.makedirs(CHROMA_DB_PATH)
 
-    # 1. Identify New Files
+    # 1. Connect to VectorStore
+    vectorstore = Chroma(
+        persist_directory=CHROMA_DB_PATH,
+        embedding_function=embeddings,
+        collection_name=CHROMA_COLLECTION_NAME
+    )
+    GLOBAL_VECTORSTORE = vectorstore
+
+    # 2. Identify New Files
     indexed_files = set()
     if os.path.exists(INDEXED_FILES_PATH):
         with open(INDEXED_FILES_PATH, 'r') as f:
@@ -183,23 +297,13 @@ def initialize_retriever(k=2):
 
     new_files = list(current_files - indexed_files)
 
-    # 2. Connect to VectorStore
-    vectorstore = Chroma(
-        persist_directory=CHROMA_DB_PATH,
-        embedding_function=embeddings,
-        collection_name=CHROMA_COLLECTION_NAME
-    )
-
     # 3. Parallel Loading & Ingestion
     if new_files:
         print(f"--- DETECTED {len(new_files)} NEW DOCUMENTS ---")
         docs = []
 
         # Optimization: Multiprocessing
-        # Using ProcessPoolExecutor to load files in parallel
-        # max_workers defaults to number of processors
         with concurrent.futures.ProcessPoolExecutor() as executor:
-            # Map file paths to the loader function
             future_to_file = {executor.submit(load_document_by_extension, fp): fp for fp in new_files}
 
             for i, future in enumerate(concurrent.futures.as_completed(future_to_file)):
@@ -221,7 +325,6 @@ def initialize_retriever(k=2):
             splits = text_splitter.split_documents(docs)
             splits = filter_complex_metadata(splits)
 
-            # Batch add to Chroma (Chroma handles batching internally, but we pass all at once)
             vectorstore.add_documents(splits)
 
             # Update index tracking
@@ -232,9 +335,29 @@ def initialize_retriever(k=2):
     else:
         print("--- NO NEW DOCUMENTS TO INGEST ---")
 
-    # Optimization: MMR (Maximal Marginal Relevance) for diversity
-    # fetch_k is how many to gather before filtering for diversity
-    return vectorstore.as_retriever(
+    # 4. Start Background Sync (Watchdog)
+    print("--- STARTING LIVE DOC WATCHER ---")
+
+    # Start Worker Thread
+    worker_thread = threading.Thread(target=ingestion_worker, daemon=True)
+    worker_thread.start()
+
+    # Start Observer
+    event_handler = DocumentEventHandler()
+    observer = Observer()
+    observer.schedule(event_handler, DOC_FOLDER, recursive=True)
+    observer.start()
+
+    return vectorstore
+
+
+def get_retriever(k=2):
+    """Returns a retriever interface from the current global vectorstore."""
+    global GLOBAL_VECTORSTORE
+    if GLOBAL_VECTORSTORE is None:
+        initialize_vectorstore()
+
+    return GLOBAL_VECTORSTORE.as_retriever(
         search_type="mmr",
         search_kwargs={"k": k, "fetch_k": 20, "lambda_mult": 0.5}
     )
@@ -299,16 +422,13 @@ class GraphState(TypedDict):
 
 
 def retrieve(state):
-    global GLOBAL_RETRIEVER # Access the global variable
     print("---RETRIEVE---")
     question = state["question"]
 
-    # Lazy Initialization to support Import-Safe Multiprocessing
-    if GLOBAL_RETRIEVER is None:
-        print("Initializing Retriever lazily...")
-        GLOBAL_RETRIEVER = initialize_retriever(k=2)
+    # Always fetch a fresh retriever instance to ensure it sees latest DB updates
+    retriever = get_retriever(k=2)
 
-    documents = GLOBAL_RETRIEVER.invoke(question)
+    documents = retriever.invoke(question)
     return {"documents": documents, "question": question}
 
 
@@ -317,12 +437,13 @@ def grade_documents(state):
     question = state["question"]
     documents = state["documents"]
 
+    if not documents:
+        return {"documents": [], "question": question}
+
     # Optimization: Batching
-    # Prepare inputs for all documents
     batch_inputs = [{"question": question, "document": d.page_content} for d in documents]
 
     # Run LLM on all docs in parallel/batch
-    # This prevents waiting for Doc 1 to finish before starting Doc 2
     scores = grader_chain.batch(batch_inputs)
 
     filtered_docs = []
@@ -353,8 +474,6 @@ def generate_rag(state):
             # PyPDFLoader is 0-indexed
             location = f"Page {doc.metadata['page'] + 1}"
         elif "start_index" in doc.metadata:
-            # Estimate line number (approximate) if specific line metadata isn't available
-            # 100 chars per line is a rough estimate, or just use the raw index
             location = f"Char Index {doc.metadata['start_index']}"
         else:
             location = "Unknown Location"
@@ -431,6 +550,10 @@ def query_documents(user_input: str):
 
     # Run the graph
     config = {"recursion_limit": 25}
+    # Ensure DB is initialized before first query
+    if GLOBAL_VECTORSTORE is None:
+        initialize_vectorstore()
+
     try:
         # We iterate through the stream to print progress, but we need the final state
         for output in app.stream(inputs, config=config):
