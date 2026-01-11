@@ -277,3 +277,4 @@ xformers==0.0.33.post2
 xxhash==3.6.0
 yarl==1.22.0
 zipp==3.23.0
+watchdog
