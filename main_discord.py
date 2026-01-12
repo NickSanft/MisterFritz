@@ -8,7 +8,7 @@ from document_engine import query_documents
 from fritz_utils import get_key_from_json_config_file, MessageSource, DISCORD_KEY
 from image_generator import generate_image
 from mister_fritz import ask_stuff
-from tts import StuffSayer
+from tts import TTSEngine
 
 
 class StreamingMessageHandler:
@@ -90,7 +90,7 @@ intents.message_content = True
 client = commands.Bot(command_prefix=command_prefix, intents=intents)
 
 connection = None
-sayer = StuffSayer()
+sayer = TTSEngine()
 
 
 @client.event
@@ -107,7 +107,7 @@ async def hello(ctx):
 async def voice(ctx, *, message):
     author = ctx.author.name
     original_response = ask_stuff(message, MessageSource.DISCORD_VOICE, author)["text"]
-    output_file = sayer.say_stuff_advanced(original_response)
+    output_file = sayer.generate_speech(original_response)
 
     try:
         if ctx.voice_client:

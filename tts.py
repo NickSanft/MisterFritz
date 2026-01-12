@@ -1,78 +1,155 @@
 import hashlib
-import os
+import sys
+import logging
+import argparse
 import torch
+from pathlib import Path
+from typing import Optional, List
 from TTS.api import TTS
 
-def _file_exists(file_path: str) -> bool:
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+class TTSEngine:
     """
-    Check if the file exists at the given path.
+    A wrapper class for Coqui TTS to handle text-to-speech generation
+    with caching, dynamic speaker selection, and GPU acceleration.
     """
-    return os.path.exists(file_path)
 
+    # Default constants
+    DEFAULT_MODEL = "tts_models/multilingual/multi-dataset/xtts_v2"
+    DEFAULT_OUTPUT_DIR = Path("output")
 
-def get_hex_hash(string_to_hash: str) -> str:
-    """
-    Generate a hexadecimal hash of the input string.
-    """
-    return hashlib.md5(string_to_hash.encode('utf-8')).hexdigest()
-
-
-def get_output_file(message: str) -> str:
-    """
-    Generate a hashed filename for the message's audio file.
-    """
-    file_hash = get_hex_hash(message)
-    return f"output/output_{file_hash}.wav"
-
-
-class StuffSayer:
-    # Constants for model and render device
-    MODEL_TO_USE = "tts_models/multilingual/multi-dataset/xtts_v2"
-    RENDER_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # Initialize TTS model on the appropriate device
-    tts = TTS(MODEL_TO_USE).to(RENDER_DEVICE)
-
-    def say_stuff_advanced(self, message: str):
+    def __init__(self, model_name: str = DEFAULT_MODEL, device: Optional[str] = None):
         """
-        Generate and play speech from the given message.
-        First checks if the audio file already exists. If not, it generates the file.
-        Then, it plays the audio using pygame.
-        """
-        print(f"Message to say: {message}")
-        output_file = get_output_file(message)
+        Initialize the TTS engine.
 
-        if not _file_exists(output_file):
-            print(f"Generating file: {output_file}")
-            self._generate_audio_file(message, output_file)
-        else:
-            print(f"File already exists! Playing: {output_file}")
+        Args:
+            model_name (str): The specific TTS model to load.
+            device (str): 'cuda' or 'cpu'. Auto-detects if None.
+        """
+        self.model_name = model_name
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.output_dir = self.DEFAULT_OUTPUT_DIR
 
-        return output_file
+        # Ensure output directory exists
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def get_available_speakers(self):
-        """
-        Print available speakers for the TTS model.
-        """
-        for speaker in self.tts.speakers:
-            print(speaker)
+        logger.info(f"Initializing TTS on device: {self.device}")
+        try:
+            self.tts = TTS(self.model_name).to(self.device)
+        except Exception as e:
+            logger.error(f"Failed to load model {model_name}: {e}")
+            raise
 
-    def print_staff_saying_config(self):
+    def _get_hex_hash(self, text: str, speaker_id: str) -> str:
         """
-        Print the TTS model list and initialization status.
+        Generate a unique hash based on text AND speaker.
+        This prevents overwriting if the same text is said by different voices.
         """
-        print(self.tts.list_models())
-        print("Initializing")
-        print("Initialization Complete")
+        unique_string = f"{text}_{speaker_id}"
+        return hashlib.md5(unique_string.encode('utf-8')).hexdigest()
 
-    def _generate_audio_file(self, message: str, output_file: str):
+    def get_available_speakers(self) -> List[str]:
+        """Return a list of available speakers depending on the model loaded."""
+        if hasattr(self.tts, 'speakers') and self.tts.speakers:
+            return self.tts.speakers
+        return []
+
+    def generate_speech(self,
+                        message: str,
+                        speaker: str = "Baldur Sanjin",
+                        language: str = "en",
+                        reference_wav: Optional[str] = None,
+                        force_regenerate: bool = False) -> str:
         """
-        Generate an audio file from the message and save it to the specified output file.
+        Generate audio from text.
+
+        Args:
+            message (str): Text to speak.
+            speaker (str): Name of the speaker (if using multi-speaker model).
+            language (str): Language code (en, es, fr, etc.).
+            reference_wav (str): Path to a wav file for voice cloning (overrides speaker param).
+            force_regenerate (bool): If True, ignores cache and creates new file.
+
+        Returns:
+            str: Path to the generated .wav file.
         """
-        self.tts.tts_to_file(
-            text=message,
-            file_path=output_file,
-            speaker="Baldur Sanjin",
-            language="en",
-            split_sentences=True
+        # Create a clean filename
+        file_hash = self._get_hex_hash(message, reference_wav if reference_wav else speaker)
+        output_path = self.output_dir / f"speech_{file_hash}.wav"
+
+        # Check Cache
+        if output_path.exists() and not force_regenerate:
+            logger.info(f"Cached file found: {output_path}")
+            return str(output_path)
+
+        logger.info(f"Generating audio for: '{message[:30]}...'")
+
+        try:
+            # XTTS specific logic for voice cloning vs standard speaker
+            if reference_wav:
+                logger.info(f"Cloning voice from: {reference_wav}")
+                self.tts.tts_to_file(
+                    text=message,
+                    file_path=str(output_path),
+                    speaker_wav=reference_wav,
+                    language=language,
+                    split_sentences=True
+                )
+            else:
+                logger.info(f"Using speaker: {speaker}")
+                self.tts.tts_to_file(
+                    text=message,
+                    file_path=str(output_path),
+                    speaker=speaker,
+                    language=language,
+                    split_sentences=True
+                )
+
+            logger.info(f"Generation successful: {output_path}")
+            return str(output_path)
+
+        except Exception as e:
+            logger.error(f"Error generating speech: {e}")
+            raise
+
+
+def main():
+    """CLI Entry point for quick testing."""
+    parser = argparse.ArgumentParser(description="Generate Speech from Text")
+    parser.add_argument("text", type=str, help="The text to convert to speech")
+    parser.add_argument("--speaker", type=str, default="Baldur Sanjin", help="Speaker name")
+    parser.add_argument("--ref", type=str, help="Path to reference WAV for cloning")
+    parser.add_argument("--lang", type=str, default="en", help="Language code")
+    parser.add_argument("--list-speakers", action="store_true", help="List available speakers and exit")
+
+    args = parser.parse_args()
+
+    # Initialize Engine
+    engine = TTSEngine()
+
+    if args.list_speakers:
+        print("Available Speakers:", engine.get_available_speakers())
+        sys.exit(0)
+
+    # Generate
+    try:
+        output = engine.generate_speech(
+            message=args.text,
+            speaker=args.speaker,
+            language=args.lang,
+            reference_wav=args.ref
         )
+        print(f"File generated at: {output}")
+    except Exception as e:
+        print(f"Failed: {e}")
+
+
+if __name__ == "__main__":
+    main()
