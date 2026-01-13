@@ -351,7 +351,7 @@ def ask_stuff(base_prompt: str, source: MessageSource, user_id: str, progress_ca
     }
     inputs = {"messages": [("user", full_prompt)], "image_paths": [], "user_image_paths": user_image_paths}
 
-    # Collect final state from stream
+    # Collect final state from the stream
     final_state = None
     for s in app.stream(inputs, config=config, stream_mode="values"):
         final_state = s
