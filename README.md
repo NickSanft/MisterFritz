@@ -15,7 +15,7 @@ Mister Fritz is an AI-powered Discord bot with a sophisticated, sardonic persona
   - `$gen <prompt>` - Generate images from text descriptions
   - `$join` / `$leave` - Joins the current voice channel the user is in
   - `$voice <query>` - Triggers conversational responses. If the bot is in a voice channel, it will speak the message, otherwise it will attach an audio file.
-  - Direct messages or mentions trigger conversational responses that can use any of the below tools.
+  - Direct messages or mentions trigger conversational responses that can use any of the below tools. You can also upload a voice message using Discord mobile as well.
 - **Tools**: Dice rolling, current time lookup, web search, document search, memory retrieval, image generation, and image recognition (limited to one attachment per message)
 
 ## Architecture
