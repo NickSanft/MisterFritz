@@ -1,14 +1,29 @@
 import asyncio
+import os
 import time
+import speech_recognition as sr
 
 import discord
 from discord.ext import commands
+from pydub import AudioSegment
 
 from document_engine import query_documents
-from fritz_utils import get_key_from_json_config_file, MessageSource, DISCORD_KEY
+from fritz_utils import get_key_from_json_config_file, MessageSource, DISCORD_KEY, FFMPEG_PATH, FFPROBE_PATH
 from image_generator import generate_image
 from mister_fritz import ask_stuff
 from tts import TTSEngine
+
+r = sr.Recognizer()
+
+AudioSegment.converter = FFMPEG_PATH
+AudioSegment.ffmpeg = FFMPEG_PATH
+AudioSegment.ffprobe = FFPROBE_PATH
+
+if not os.path.exists(FFMPEG_PATH):
+    print(f"CRITICAL WARNING: ffmpeg.exe not found at {FFMPEG_PATH}")
+if not os.path.exists(FFPROBE_PATH):
+    print(f"CRITICAL WARNING: ffprobe.exe not found at {FFPROBE_PATH} - pydub needs this to read OGG files!")
+
 
 
 class StreamingMessageHandler:
@@ -165,6 +180,7 @@ async def leave(ctx):
 async def on_message(ctx):
     author = ctx.author.name
     channel_type = ctx.channel
+    message_clean = ctx.clean_content
     if ctx.author == client.user:
         return
     elif ctx.content.startswith(command_prefix):
@@ -182,11 +198,11 @@ async def on_message(ctx):
     user_image_paths = []
     source = MessageSource.DISCORD_TEXT
     if ctx.attachments:
-        source = MessageSource.DISCORD_TEXT_AND_IMAGE
         print(f"Processing {len(ctx.attachments)} attachment(s)")
         for attachment in ctx.attachments:
             # Check if it's an image
             if attachment.content_type and attachment.content_type.startswith('image/'):
+                source = MessageSource.DISCORD_TEXT_AND_IMAGE
                 try:
                     # Create temp directory if it doesn't exist
                     import os
@@ -200,6 +216,24 @@ async def on_message(ctx):
                     print(f"Saved image: {file_path}")
                 except Exception as e:
                     print(f"Error saving image attachment: {e}")
+            elif attachment.content_type and attachment.content_type.startswith('audio/'):
+                # Create temp directory if it doesn't exist
+                import os
+                temp_dir = "temp_audio"
+                os.makedirs(temp_dir, exist_ok=True)
+
+                # Save the image
+                file_path = os.path.join(temp_dir, f"{author}_{attachment.id}_{attachment.filename}")
+                await attachment.save(file_path)
+                print(f"Saved {file_path}")
+                voice_text = await speech_to_text(file_path)
+                if not message_clean :
+                    message_clean = voice_text
+                else:
+                    print(type(voice_text))
+                print("Text: " + voice_text)
+
+
 
     # Send initial status message immediately
     if user_image_paths:
@@ -232,7 +266,7 @@ async def on_message(ctx):
     try:
         response_data = await loop.run_in_executor(
             None,
-            lambda: ask_stuff(ctx.clean_content, source, author, None, streaming_callback, user_image_paths)
+            lambda: ask_stuff(message_clean, source, author, None, streaming_callback, user_image_paths)
         )
     except Exception as e:
         print(f"Error during ask_stuff: {e}")
@@ -299,6 +333,18 @@ async def on_message(ctx):
 def split_into_chunks(s, chunk_size=2000):
     return [s[i:i + chunk_size] for i in range(0, len(s), chunk_size)]
 
+async def speech_to_text(file_path: str):
+    wav_file = f"{file_path}.wav"
+    print(f"Saved audio: {file_path}")
+    AudioSegment.from_ogg(file_path).export(wav_file, format="wav")
+    print(f"Successfully converted {file_path} to {wav_file}")
+    voice_message = sr.AudioFile(wav_file)
+    with voice_message as source:
+        audio = r.record(source)
+    try:
+        return r.recognize_google(audio)
+    except Exception as e:
+        print("Exception: " + str(e))
 
 if __name__ == '__main__':
     discord_secret = get_key_from_json_config_file(DISCORD_KEY)

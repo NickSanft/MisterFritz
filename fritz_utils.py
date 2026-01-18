@@ -13,6 +13,8 @@ FAST_OLLAMA_MODEL = "llama3.2"
 EMBEDDING_MODEL = "mxbai-embed-large"
 VISION_MODEL = "llava"
 DISCORD_KEY = "discord_bot_token"
+FFMPEG_PATH = "./ffmpeg.exe"
+FFPROBE_PATH = "./ffprobe.exe"
 
 class MessageSource(Enum):
     DISCORD_TEXT = 0,
