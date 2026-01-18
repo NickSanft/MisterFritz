@@ -1,4 +1,6 @@
 config.json
+temp_audio/*
+temp_images/*
 output/*
 input/*
 chroma_store/*
