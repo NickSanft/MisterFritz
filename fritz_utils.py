@@ -19,7 +19,7 @@ FFPROBE_PATH = "./ffprobe.exe"
 # Multi-Agent System Configuration
 ENABLE_MULTI_AGENT = True  # Enable/disable multi-agent collaboration
 MULTI_AGENT_VERIFY_RESULTS = True  # Use fact-checker to verify outputs
-MULTI_AGENT_DEFAULT_STRATEGY = "pipeline"  # pipeline, parallel, or sequential
+MULTI_AGENT_DEFAULT_STRATEGY = "parallel"  # pipeline, parallel, or sequential
 
 class MessageSource(Enum):
     DISCORD_TEXT = 0,
