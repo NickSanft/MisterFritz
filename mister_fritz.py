@@ -1,4 +1,5 @@
 import json
+import logging
 import random
 import re
 import uuid
@@ -27,9 +28,13 @@ from fritz_utils import (
     ENABLE_MULTI_AGENT, MULTI_AGENT_VERIFY_RESULTS, MULTI_AGENT_DEFAULT_STRATEGY
 )
 from sqlite_store import SQLiteStore
+from observability import init_logging, METRICS
 
 CONVERSATION_NODE = "conversation"
 SUMMARIZE_CONVERSATION_NODE = "summarize_conversation"
+
+init_logging()
+logger = logging.getLogger(__name__)
 
 
 # Define extended state for tracking attachments
@@ -55,6 +60,10 @@ def get_conversation_tools_description():
         "collaborate_agents": (collaborate_agents, "Use multiple specialized AI agents (research, creative, fact-checker) to provide comprehensive, verified answers to complex questions.")
     }
     return conversation_tool_dict
+
+
+def _record_tool(name: str) -> None:
+    METRICS.increment(f"tool.{name}")
 
 # ===== UTILITY FUNCTIONS =====
 def get_system_description(tools: dict[str, tuple[BaseTool, str]]):
@@ -104,7 +113,7 @@ def search_memories_internal(config: RunnableConfig, query: str):
         for key, summary in summary_dict.items():
             summaries[key] = summary
     json_summaries = json.dumps(summaries)
-    print(json_summaries)
+    logger.debug("Memory search returned %d items for %s", len(summaries), user_id)
     return json_summaries
 
 
@@ -115,6 +124,7 @@ def get_current_time():
 
     Example - 2025-01-13T23:11:56.337644-06:00
     """
+    _record_tool("get_current_time")
     return get_current_time_internal()
 
 
@@ -129,7 +139,7 @@ def get_current_time_internal():
     # Format the timestamp in RFC3339 format
     rfc3339_timestamp = cst_now.isoformat()
 
-    print(rfc3339_timestamp)
+    logger.debug("Current time: %s", rfc3339_timestamp)
     return rfc3339_timestamp
 
 @tool(parse_docstring=True)
@@ -145,6 +155,7 @@ def scrape_web(url: str):
     """
     try:
         # 1. Fetch the content
+        _record_tool("scrape_web")
         response = requests.get(url)
         response.raise_for_status()
 
@@ -166,6 +177,8 @@ def scrape_web(url: str):
 
         return clean_text
     except Exception as e:
+        METRICS.record_error("scrape_web", e)
+        logger.warning("Scrape web error: %s", e)
         return f"Error: {e}"
 
 @tool(parse_docstring=True)
@@ -179,8 +192,9 @@ def search_web(text_to_search: str):
     Returns:
     list: A list of dictionaries, each containing string keys and string values representing the search results.
     """
+    _record_tool("search_web")
     results = DDGS().text(text_to_search, max_results=5)
-    print(results)
+    logger.debug("Search web results count: %s", len(results) if results else 0)
     return results
 
 
@@ -197,6 +211,7 @@ def roll_dice(num_dice: int, num_sides: int, config: RunnableConfig):
     Returns:
     list: A list containing the result of each die roll.
     """
+    _record_tool("roll_dice")
     user_id = config.get("metadata").get("user_id")
     if num_dice <= 0 or num_sides <= 0:
         raise ValueError("Both number of dice and number of sides must be positive integers.")
@@ -216,6 +231,7 @@ def generate_image(prompt: str):
     Returns:
     string: The path of the image.
     """
+    _record_tool("generate_image")
     return image_generator.generate_image(prompt)
 
 
@@ -231,6 +247,7 @@ def search_documents(query: str):
     Returns:
     string: The answer derived from the documents.
     """
+    _record_tool("search_documents")
     return document_engine.query_documents(query)
 
 
@@ -242,6 +259,7 @@ def search_memories(config: RunnableConfig, query: str):
         config: The RunnableConfig.
         query: The keywords do to a semantic search for.
     """
+    _record_tool("search_memories")
     return search_memories_internal(config, query)
 
 
@@ -263,7 +281,8 @@ def analyze_image(config: RunnableConfig, question: str = "What is in this image
     # Get user images from config
     metadata = config.get("metadata", {})
     user_images = metadata.get("user_image_paths", [])
-    print(f"User images: {user_images}")
+    _record_tool("analyze_image")
+    logger.debug("User images: %s", user_images)
 
     if not user_images:
         return "No images were attached to analyze. Please ask the user to attach an image."
@@ -276,13 +295,14 @@ def analyze_image(config: RunnableConfig, question: str = "What is in this image
                 with open(img_path, 'rb') as image_file:
                     encoded_images.append(base64.b64encode(image_file.read()).decode('utf-8'))
             except Exception as e:
-                print(f"Error reading image {img_path}: {e}")
+                METRICS.record_error("analyze_image.read", e)
+                logger.warning("Error reading image %s: %s", img_path, e)
 
         if not encoded_images:
             return "Could not read the attached images. Please try again."
 
         # Call vision model
-        print(f"Analyzing {len(encoded_images)} image(s) with {VISION_MODEL}")
+        logger.info("Analyzing %d image(s) with %s", len(encoded_images), VISION_MODEL)
         response = ollama.chat(
             model=VISION_MODEL,
             messages=[{
@@ -293,12 +313,13 @@ def analyze_image(config: RunnableConfig, question: str = "What is in this image
         )
 
         analysis = response['message']['content']
-        print(f"Vision analysis complete: {len(analysis)} chars")
+        logger.info("Vision analysis complete: %d chars", len(analysis))
         return analysis
 
     except Exception as e:
+        METRICS.record_error("analyze_image", e)
         error_msg = f"Error analyzing image: {str(e)}"
-        print(error_msg)
+        logger.warning(error_msg)
         return error_msg
 
 
@@ -321,14 +342,15 @@ def collaborate_agents(config: RunnableConfig, query: str = "Tell me a story abo
     Returns:
         string: Comprehensive response from multiple agents with verification.
     """
-    print(f"[DEBUG] collaborate_agents called with query: {query[:50] if len(query) > 50 else query}")
+    _record_tool("collaborate_agents")
+    logger.debug("collaborate_agents called with query: %s", query[:50] if len(query) > 50 else query)
 
     if not ENABLE_MULTI_AGENT:
         return "Multi-agent system is currently disabled."
 
     try:
         from agent_orchestrator import get_orchestrator, ExecutionStrategy
-        print("[DEBUG] Successfully imported orchestrator")
+        logger.debug("Successfully imported orchestrator")
 
         # Get user context
         metadata = config.get("metadata", {})
@@ -381,7 +403,8 @@ def collaborate_agents(config: RunnableConfig, query: str = "Tell me a story abo
         return "\n".join(response_parts)
 
     except Exception as e:
-        print(f"Error in collaborate_agents: {e}")
+        METRICS.record_error("collaborate_agents", e)
+        logger.warning("Error in collaborate_agents: %s", e)
         return f"Multi-agent collaboration encountered an error: {str(e)}"
 
 
@@ -421,8 +444,8 @@ def ask_stuff(base_prompt: str, source: MessageSource, user_id: str, progress_ca
         full_prompt = format_prompt(base_prompt, source, user_id_clean)
 
     system_prompt = get_system_description(get_conversation_tools_description())
-    print(f"Role description: {system_prompt}")
-    print(f"Prompt to ask: {full_prompt}")
+    logger.debug("Role description: %s", system_prompt)
+    logger.debug("Prompt to ask: %s", full_prompt)
 
 
 
@@ -446,7 +469,7 @@ def ask_stuff(base_prompt: str, source: MessageSource, user_id: str, progress_ca
         message = s["messages"][-1] if "messages" in s and s["messages"] else None
         if message:
             if isinstance(message, tuple):
-                print(message)
+                logger.debug("Message tuple: %s", message)
             elif hasattr(message, 'pretty_print'):
                 message.pretty_print()
 
@@ -471,7 +494,7 @@ def print_stream(stream):
     for s in stream:
         message = s["messages"][-1]
         if isinstance(message, tuple):
-            print(message)
+            logger.debug("Stream message tuple: %s", message)
         else:
             message.pretty_print()
     return message.content
@@ -479,7 +502,7 @@ def print_stream(stream):
 
 # ===== SETUP & INITIALIZATION =====
 conversation_tools = [tool_info[0] for tool_info in get_conversation_tools_description().values()]
-print(conversation_tools)
+logger.debug("Conversation tools: %s", conversation_tools)
 
 # Cache system prompt at initialization (one-time cost)
 CACHED_SYSTEM_PROMPT = get_system_description(get_conversation_tools_description())
@@ -501,7 +524,7 @@ def should_continue(state: EnhancedState) -> Literal["summarize_conversation", "
 
 
 def summarize_conversation(state: EnhancedState, config: RunnableConfig):
-    print("In: summarize_conversation")
+    logger.info("Summarizing conversation")
     metadata = config.get("metadata", {})
     user_id = metadata.get("user_id")
     summary_message_prompt = "Please summarize the conversation above:"
@@ -511,13 +534,13 @@ def summarize_conversation(state: EnhancedState, config: RunnableConfig):
     summary_response = ollama_instance.invoke(messages)
     timestamp = get_current_time_internal()
     summary = f"Summary made at {timestamp} \r\n {summary_response.content}"
-    print(f"Summary: {summary}")
+    logger.debug("Summary: %s", summary)
     response_key_inputs = [
         ("system",
          "Please provide a short sentence describing this memory starting with the word \"memory\". Example - memory_of_pie"),
         ("user", summary)]
     summary_response_key = ollama_instance.invoke(response_key_inputs, config=get_config_values(config))
-    print(f"Summary Key: {summary_response_key.content}")
+    logger.debug("Summary Key: %s", summary_response_key.content)
     add_memory(user_id, summary_response_key.content, summary)
     # Remove all but the last message
     delete_messages = [RemoveMessage(id=m.id) for m in state["messages"][:-1]]
@@ -528,7 +551,7 @@ def summarize_conversation(state: EnhancedState, config: RunnableConfig):
 def conversation(state: EnhancedState, config: RunnableConfig):
     messages = state["messages"]
     latest_message = messages[-1].content if messages else ""
-    print(f"Latest message: {latest_message}")
+    logger.debug("Latest message: %s", latest_message)
     # Use cached system prompt instead of rebuilding
     inputs = {"messages": [("system", CACHED_SYSTEM_PROMPT),
                            ("user", latest_message)]}
@@ -537,8 +560,8 @@ def conversation(state: EnhancedState, config: RunnableConfig):
     metadata = config.get("metadata", {})
     progress_callback = metadata.get("progress_callback")
     streaming_callback = metadata.get("streaming_callback")
-    print(f"Progress callback available: {progress_callback is not None}")
-    print(f"Streaming callback available: {streaming_callback is not None}")
+    logger.debug("Progress callback available: %s", progress_callback is not None)
+    logger.debug("Streaming callback available: %s", streaming_callback is not None)
 
     # Tool name to user-friendly message mapping
     tool_messages = {
@@ -565,17 +588,17 @@ def conversation(state: EnhancedState, config: RunnableConfig):
             latest = s["messages"][-1]
             # Check if this is an AI message with tool calls
             if hasattr(latest, 'tool_calls') and latest.tool_calls:
-                print(f"Detected tool calls: {[tc.get('name', '') for tc in latest.tool_calls]}")
+                logger.debug("Detected tool calls: %s", [tc.get('name', '') for tc in latest.tool_calls])
                 if progress_callback:
                     for tool_call in latest.tool_calls:
                         tool_name = tool_call.get('name', '')
                         # Only notify once per tool type
                         if tool_name in tool_messages and tool_name not in notified_tools:
-                            print(f"Calling progress callback for tool: {tool_name}")
+                            logger.debug("Calling progress callback for tool: %s", tool_name)
                             progress_callback(tool_messages[tool_name])
                             notified_tools.add(tool_name)
                 else:
-                    print("Progress callback is None, skipping notification")
+                    logger.debug("Progress callback is None, skipping notification")
 
             # Stream partial text content if available and streaming callback exists
             # Only stream AI messages (not system, user, or tool messages)
@@ -586,7 +609,7 @@ def conversation(state: EnhancedState, config: RunnableConfig):
                     new_text = latest.content
                     if new_text and new_text != accumulated_text:
                         accumulated_text = new_text
-                        print(f"Streaming partial content: {len(accumulated_text)} chars")
+                        logger.debug("Streaming partial content: %d chars", len(accumulated_text))
                         streaming_callback(accumulated_text)
 
     # Extract text response
@@ -626,7 +649,7 @@ workflow.add_edge(SUMMARIZE_CONVERSATION_NODE, END)
 
 app = workflow.compile(checkpointer=checkpointer, store=store)
 
-print(get_conversation_tools_description())
+logger.debug("Conversation tools description: %s", get_conversation_tools_description())
 
 with open("mister_fritz_diagram.png", "wb") as binary_file:
     binary_file.write(app.get_graph().draw_mermaid_png())

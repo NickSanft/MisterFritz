@@ -1,6 +1,8 @@
 import asyncio
+import logging
 import os
 import time
+import uuid
 import speech_recognition as sr
 
 import discord
@@ -12,17 +14,21 @@ from fritz_utils import get_key_from_json_config_file, MessageSource, DISCORD_KE
 from image_generator import generate_image
 from mister_fritz import ask_stuff
 from tts import TTSEngine
+from observability import init_logging, METRICS, get_health_snapshot, format_health_text
 
 r = sr.Recognizer()
+
+init_logging()
+logger = logging.getLogger(__name__)
 
 AudioSegment.converter = FFMPEG_PATH
 AudioSegment.ffmpeg = FFMPEG_PATH
 AudioSegment.ffprobe = FFPROBE_PATH
 
 if not os.path.exists(FFMPEG_PATH):
-    print(f"CRITICAL WARNING: ffmpeg.exe not found at {FFMPEG_PATH}")
+    logger.error("ffmpeg.exe not found at %s", FFMPEG_PATH)
 if not os.path.exists(FFPROBE_PATH):
-    print(f"CRITICAL WARNING: ffprobe.exe not found at {FFPROBE_PATH} - pydub needs this to read OGG files!")
+    logger.error("ffprobe.exe not found at %s - pydub needs this to read OGG files", FFPROBE_PATH)
 
 
 
@@ -73,7 +79,7 @@ class StreamingMessageHandler:
                     self.last_update_time = time.time()
                     self.pending_text = None
                 except discord.errors.HTTPException as e:
-                    print(f"Error editing message: {e}")
+                    logger.warning("Error editing message: %s", e)
                     await asyncio.sleep(2)  # Back off on error
             else:
                 # No pending updates, stop the update loop
@@ -97,7 +103,7 @@ class StreamingMessageHandler:
                 if files:
                     await self.message.channel.send(files=files)
         except discord.errors.HTTPException as e:
-            print(f"Error in final update: {e}")
+            logger.warning("Error in final update: %s", e)
 
 command_prefix = "$"
 intents = discord.Intents.default()
@@ -110,17 +116,19 @@ sayer = TTSEngine()
 
 @client.event
 async def on_ready():
-    print(f'We have logged in as {client.user}')
+    logger.info("Logged in as %s", client.user)
 
 
 @client.command()
 async def hello(ctx):
     author = ctx.author.name
+    METRICS.increment("discord_commands.hello")
     await ctx.send(f"Hello, {author}!")
 
 @client.command()
 async def voice(ctx, *, message):
     author = ctx.author.name
+    METRICS.increment("discord_commands.voice")
     original_response = ask_stuff(message, MessageSource.DISCORD_VOICE, author)["text"]
     output_file = sayer.generate_speech(original_response)
 
@@ -131,12 +139,14 @@ async def voice(ctx, *, message):
             files = [discord.File(output_file)]
             await ctx.send("You are not connected to a voice channel, uploading as a file...", files=files)
     except AttributeError as e:
+        METRICS.record_error("discord_commands.voice", e)
         await ctx.send("Something crazy happened!")
 
 
 @client.command()
 async def gen(ctx, *, message):
-    print(message)
+    METRICS.increment("discord_commands.gen")
+    logger.info("Image generation request: %s", message)
     output_file = generate_image(message)
     file = discord.File(output_file)
     # Send the file
@@ -146,14 +156,17 @@ async def gen(ctx, *, message):
 @client.command()
 async def join(ctx):
     try:
+        METRICS.increment("discord_commands.join")
         channel = ctx.author.voice.channel
         await channel.connect()
     except AttributeError as e:
+        METRICS.record_error("discord_commands.join", e)
         await ctx.send("You are not connected to a voice channel, buddy!")
 
 @client.command()
 async def lore(ctx, *, message):
-    print(message)
+    METRICS.increment("discord_commands.lore")
+    logger.info("Lore request: %s", message)
     original_message = await ctx.send("This may take a few seconds, please wait. This message will be updated with the result!")
     original_response = query_documents(message)
     resp_len = len(original_response)
@@ -171,9 +184,17 @@ async def lore(ctx, *, message):
 @client.command()
 async def leave(ctx):
     try:
+        METRICS.increment("discord_commands.leave")
         await ctx.voice_client.disconnect()
     except AttributeError as e:
+        METRICS.record_error("discord_commands.leave", e)
         await ctx.send("I am not connected to a voice channel, buddy!")
+
+@client.command()
+async def health(ctx):
+    METRICS.increment("discord_commands.health")
+    snapshot = get_health_snapshot()
+    await ctx.send(format_health_text(snapshot))
 
 
 @client.event
@@ -189,7 +210,9 @@ async def on_message(ctx):
     elif not isinstance(channel_type, discord.DMChannel) and not client.user.mentioned_in(ctx):
         return
 
-    print(f"Incoming message from: {author}")
+    METRICS.increment("discord_messages")
+    request_id = str(uuid.uuid4())[:8]
+    logger.info("Incoming message %s from %s", request_id, author)
 
     # Get the event loop
     loop = asyncio.get_running_loop()
@@ -198,7 +221,7 @@ async def on_message(ctx):
     user_image_paths = []
     source = MessageSource.DISCORD_TEXT
     if ctx.attachments:
-        print(f"Processing {len(ctx.attachments)} attachment(s)")
+        logger.info("Processing %d attachment(s) for %s", len(ctx.attachments), request_id)
         for attachment in ctx.attachments:
             # Check if it's an image
             if attachment.content_type and attachment.content_type.startswith('image/'):
@@ -213,9 +236,10 @@ async def on_message(ctx):
                     file_path = os.path.join(temp_dir, f"{author}_{attachment.id}_{attachment.filename}")
                     await attachment.save(file_path)
                     user_image_paths.append(file_path)
-                    print(f"Saved image: {file_path}")
+                    logger.info("Saved image %s for %s", file_path, request_id)
                 except Exception as e:
-                    print(f"Error saving image attachment: {e}")
+                    METRICS.record_error("attachment_save", e)
+                    logger.warning("Error saving image attachment: %s", e)
             elif attachment.content_type and attachment.content_type.startswith('audio/'):
                 # Create temp directory if it doesn't exist
                 import os
@@ -225,13 +249,13 @@ async def on_message(ctx):
                 # Save the image
                 file_path = os.path.join(temp_dir, f"{author}_{attachment.id}_{attachment.filename}")
                 await attachment.save(file_path)
-                print(f"Saved {file_path}")
+                logger.info("Saved audio %s for %s", file_path, request_id)
                 voice_text = await speech_to_text(file_path)
                 if not message_clean :
                     message_clean = voice_text
                 else:
-                    print(type(voice_text))
-                print("Text: " + voice_text)
+                    logger.debug("Voice text type: %s", type(voice_text))
+                logger.info("Voice text: %s", voice_text)
 
 
 
@@ -264,12 +288,15 @@ async def on_message(ctx):
 
     # Run the blocking ask_stuff function in a thread with streaming enabled
     try:
+        start_time = time.time()
         response_data = await loop.run_in_executor(
             None,
             lambda: ask_stuff(message_clean, source, author, None, streaming_callback, user_image_paths)
         )
+        METRICS.record_latency("ask_stuff", time.time() - start_time)
     except Exception as e:
-        print(f"Error during ask_stuff: {e}")
+        METRICS.record_error("ask_stuff", e)
+        logger.exception("Error during ask_stuff for %s", request_id)
         await status_msg.edit(content=f"❌ An error occurred: {str(e)}")
         # Clean up temporary images
         for img_path in user_image_paths:
@@ -277,12 +304,13 @@ async def on_message(ctx):
                 import os
                 if os.path.exists(img_path):
                     os.remove(img_path)
-                    print(f"Cleaned up: {img_path}")
+                    logger.info("Cleaned up %s after error", img_path)
             except Exception as cleanup_error:
-                print(f"Error cleaning up {img_path}: {cleanup_error}")
+                METRICS.record_error("cleanup_error", cleanup_error)
+                logger.warning("Error cleaning up %s: %s", img_path, cleanup_error)
         return
 
-    print(response_data)
+    logger.debug("Response data for %s: %s", request_id, response_data)
 
     if not response_data or not response_data.get("text"):
         original_response = "The bot got sad and doesn't want to talk to you at the moment :("
@@ -298,7 +326,8 @@ async def on_message(ctx):
             try:
                 files.append(discord.File(image_path))
             except Exception as e:
-                print(f"Error loading image file {image_path}: {e}")
+                METRICS.record_error("image_load", e)
+                logger.warning("Error loading image file %s: %s", image_path, e)
 
     # --- THE EDIT LOGIC ---
     resp_len = len(original_response)
@@ -325,9 +354,10 @@ async def on_message(ctx):
             import os
             if os.path.exists(img_path):
                 os.remove(img_path)
-                print(f"Cleaned up: {img_path}")
+                logger.info("Cleaned up %s for %s", img_path, request_id)
         except Exception as cleanup_error:
-            print(f"Error cleaning up {img_path}: {cleanup_error}")
+            METRICS.record_error("cleanup_error", cleanup_error)
+            logger.warning("Error cleaning up %s: %s", img_path, cleanup_error)
 
 
 def split_into_chunks(s, chunk_size=2000):
@@ -335,16 +365,17 @@ def split_into_chunks(s, chunk_size=2000):
 
 async def speech_to_text(file_path: str):
     wav_file = f"{file_path}.wav"
-    print(f"Saved audio: {file_path}")
+    logger.info("Saved audio: %s", file_path)
     AudioSegment.from_ogg(file_path).export(wav_file, format="wav")
-    print(f"Successfully converted {file_path} to {wav_file}")
+    logger.info("Converted %s to %s", file_path, wav_file)
     voice_message = sr.AudioFile(wav_file)
     with voice_message as source:
         audio = r.record(source)
     try:
         return r.recognize_google(audio)
     except Exception as e:
-        print("Exception: " + str(e))
+        METRICS.record_error("speech_to_text", e)
+        logger.warning("Speech to text error: %s", e)
 
 if __name__ == '__main__':
     discord_secret = get_key_from_json_config_file(DISCORD_KEY)
