@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   ollama:
     image: ollama/ollama:latest
@@ -7,6 +5,30 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
+      - ./modelfiles:/modelfiles:ro
+    environment:
+      - OLLAMA_HOST=http://127.0.0.1:11434
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        ollama serve &
+        pid=$$!
+        for i in $$(seq 1 60); do
+          ollama list >/dev/null 2>&1 && break
+          sleep 2
+        done
+        if [ ! -f /root/.ollama/.initialized ]; then
+          ollama create -f /modelfiles/gpt-oss-20b-modelfile.txt gpt-oss
+          ollama create -f /modelfiles/llama3.2-modelfile.txt llama3.2
+          ollama create -f /modelfiles/llava-modelfile.txt llava
+          ollama run gpt-oss /bye
+          ollama run llama3.2 /bye
+          ollama run llava /bye
+          ollama pull mxbai-embed-large
+          touch /root/.ollama/.initialized
+        fi
+        wait $$pid
     restart: unless-stopped
 
 volumes:

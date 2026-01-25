@@ -176,7 +176,7 @@ The bot will:
 
 ### Docker Compose (Ollama)
 
-You can optionally run Ollama via Docker Compose:
+You can optionally run Ollama via Docker Compose (auto-initializes models on first run):
 
 ```bash
 docker compose up -d
