@@ -56,9 +56,7 @@ def get_conversation_tools_description():
         "search_memories": (search_memories, "Returns a JSON payload of stored memories you have had with a user based on a search term."),
         "search_documents": (search_documents, f"Search local documents. Use this for questions about: {DOC_STORAGE_DESCRIPTION}"),
         "generate_image": (generate_image, "Generates an image based on a given prompt."),
-        "analyze_image": (analyze_image, "Analyzes an image. If the user asks about an image, assume that the tool knows its location."),
-        "collaborate_agents": (collaborate_agents, "Use multiple specialized AI agents (research, creative, fact-checker) to provide comprehensive, verified answers to complex questions.")
-    }
+        "analyze_image": (analyze_image, "Analyzes an image. If the user asks about an image, assume that the tool knows its location.")    }
     return conversation_tool_dict
 
 
@@ -321,92 +319,6 @@ def analyze_image(config: RunnableConfig, question: str = "What is in this image
         error_msg = f"Error analyzing image: {str(e)}"
         logger.warning(error_msg)
         return error_msg
-
-
-@tool(parse_docstring=True)
-def collaborate_agents(config: RunnableConfig, query: str = "Tell me a story about pizza."):
-    """
-    Use multiple specialized AI agents to answer complex questions comprehensively.
-
-    This activates a multi-agent system where:
-    - Research Agent: Gathers factual information from multiple sources
-    - Creative Agent: Presents information in an engaging, memorable way
-    - Fact-Checker Agent: Verifies accuracy and provides confidence scores
-
-    Use this for complex questions that benefit from thorough research and verification.
-
-    Args:
-        config: The RunnableConfig containing user context.
-        query: The complex question or task for the agents to handle.
-
-    Returns:
-        string: Comprehensive response from multiple agents with verification.
-    """
-    _record_tool("collaborate_agents")
-    logger.debug("collaborate_agents called with query: %s", query[:50] if len(query) > 50 else query)
-
-    if not ENABLE_MULTI_AGENT:
-        return "Multi-agent system is currently disabled."
-
-    try:
-        from agent_orchestrator import get_orchestrator, ExecutionStrategy
-        logger.debug("Successfully imported orchestrator")
-
-        # Get user context
-        metadata = config.get("metadata", {})
-        user_id = metadata.get("user_id")
-        progress_callback = metadata.get("progress_callback")
-
-        # Create context for agents
-        context = {
-            "user_id": user_id,
-            "source": "conversation_tool"
-        }
-
-        # Get orchestrator and execute
-        orchestrator = get_orchestrator()
-
-        # Map strategy name to enum
-        strategy_map = {
-            "pipeline": ExecutionStrategy.PIPELINE,
-            "parallel": ExecutionStrategy.PARALLEL,
-            "sequential": ExecutionStrategy.SEQUENTIAL
-        }
-        strategy = strategy_map.get(MULTI_AGENT_DEFAULT_STRATEGY, ExecutionStrategy.PIPELINE)
-
-        result = orchestrator.execute_multi_agent_task(
-            query=query,
-            context=context,
-            strategy=strategy,
-            verify_output=MULTI_AGENT_VERIFY_RESULTS,
-            progress_callback=progress_callback
-        )
-
-        # Format response
-        response_parts = []
-
-        if result.get("text"):
-            response_parts.append(result["text"])
-
-        # Add verification summary if available
-        if result.get("verification"):
-            verification = result["verification"]
-            if verification.get("confidence"):
-                confidence = verification["confidence"]
-                response_parts.append(f"\n\n**Verification**: Confidence score: {confidence:.2f}")
-
-        # Add sources if available
-        if result.get("sources"):
-            sources_text = ", ".join(result["sources"])
-            response_parts.append(f"\n\n**Sources**: {sources_text}")
-
-        return "\n".join(response_parts)
-
-    except Exception as e:
-        METRICS.record_error("collaborate_agents", e)
-        logger.warning("Error in collaborate_agents: %s", e)
-        return f"Multi-agent collaboration encountered an error: {str(e)}"
-
 
 def add_memory(user_id: str, memory_key: str, memory_to_store: str):
     """ This function stores a memory. Only use this if the user has asked you to.
