@@ -3,6 +3,8 @@ import sys
 import time
 import queue
 import threading
+import json
+import logging
 from typing import List, Optional
 import io
 import msoffcrypto
@@ -37,6 +39,7 @@ from langgraph.graph import END, StateGraph, START
 
 from fritz_utils import CHROMA_DB_PATH, INDEXED_FILES_PATH, CHROMA_COLLECTION_NAME, DOC_FOLDER, FAST_OLLAMA_MODEL, \
     THINKING_OLLAMA_MODEL, EMBEDDING_MODEL
+from observability import init_logging, METRICS
 
 # Define supported file extensions
 SUPPORTED_EXTENSIONS = ('.docx', '.pdf', '.xlsx', '.csv', '.txt', '.md')
@@ -45,6 +48,10 @@ SUPPORTED_EXTENSIONS = ('.docx', '.pdf', '.xlsx', '.csv', '.txt', '.md')
 # Changed from GLOBAL_RETRIEVER to GLOBAL_VECTORSTORE to allow add/delete operations
 GLOBAL_VECTORSTORE: Optional[Chroma] = None
 INGESTION_QUEUE = queue.Queue()
+MANIFEST_LOCK = threading.Lock()
+
+init_logging()
+logger = logging.getLogger(__name__)
 
 # --- OCR SETUP ---
 try:
@@ -54,7 +61,7 @@ try:
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
-    print("Warning: EasyOCR not installed. OCR fallback will not be available.")
+    logger.warning("EasyOCR not installed. OCR fallback unavailable.")
 
 try:
     import fitz  # PyMuPDF
@@ -62,7 +69,7 @@ try:
     PYMUPDF_AVAILABLE = True
 except ImportError:
     PYMUPDF_AVAILABLE = False
-    print("Warning: PyMuPDF not installed. Cannot render PDF pages for OCR.")
+    logger.warning("PyMuPDF not installed. Cannot render PDF pages for OCR.")
 
 
 def get_ocr_reader():
@@ -129,7 +136,8 @@ def load_pdf_with_ocr_fallback(file_path: str) -> List[Document]:
         return ocr_docs
 
     except Exception as e:
-        print(f"Error processing PDF {file_path}: {e}")
+        METRICS.record_error("document_engine.pdf", e)
+        logger.warning("Error processing PDF %s: %s", file_path, e)
         return []
 
 
@@ -160,7 +168,8 @@ def load_document_by_extension(file_path: str) -> List[Document]:
             return loader.load()
         return []
     except Exception as e:
-        print(f"Error loading {file_path}: {e}")
+        METRICS.record_error("document_engine.load", e)
+        logger.warning("Error loading %s: %s", file_path, e)
         return []
 
 
@@ -174,27 +183,73 @@ class DocumentEventHandler(FileSystemEventHandler):
 
     def on_created(self, event):
         if not event.is_directory and event.src_path.lower().endswith(SUPPORTED_EXTENSIONS):
-            print(f"[WATCHER] File Created: {event.src_path}")
+            logger.info("[WATCHER] File Created: %s", event.src_path)
             INGESTION_QUEUE.put(("add", event.src_path))
 
     def on_modified(self, event):
         if not event.is_directory and event.src_path.lower().endswith(SUPPORTED_EXTENSIONS):
-            print(f"[WATCHER] File Modified: {event.src_path}")
+            logger.info("[WATCHER] File Modified: %s", event.src_path)
             INGESTION_QUEUE.put(("update", event.src_path))
 
     def on_deleted(self, event):
         if not event.is_directory and event.src_path.lower().endswith(SUPPORTED_EXTENSIONS):
-            print(f"[WATCHER] File Deleted: {event.src_path}")
+            logger.info("[WATCHER] File Deleted: %s", event.src_path)
             INGESTION_QUEUE.put(("delete", event.src_path))
 
     def on_moved(self, event):
         if not event.is_directory:
             if event.src_path.lower().endswith(SUPPORTED_EXTENSIONS):
-                print(f"[WATCHER] File Moved (Delete old): {event.src_path}")
+                logger.info("[WATCHER] File Moved (Delete old): %s", event.src_path)
                 INGESTION_QUEUE.put(("delete", event.src_path))
             if event.dest_path.lower().endswith(SUPPORTED_EXTENSIONS):
-                print(f"[WATCHER] File Moved (Add new): {event.dest_path}")
+                logger.info("[WATCHER] File Moved (Add new): %s", event.dest_path)
                 INGESTION_QUEUE.put(("add", event.dest_path))
+
+
+def _get_file_signature(file_path: str) -> dict:
+    return {
+        "mtime": os.path.getmtime(file_path),
+        "size": os.path.getsize(file_path),
+    }
+
+
+def _load_index_manifest() -> dict:
+    if not os.path.exists(INDEXED_FILES_PATH):
+        return {}
+    try:
+        with open(INDEXED_FILES_PATH, "r", encoding="utf-8") as f:
+            raw = f.read().strip()
+        if not raw:
+            return {}
+        if raw.startswith("{"):
+            return json.loads(raw)
+        # Backward compatibility with legacy newline list
+        return {line.strip(): {} for line in raw.splitlines() if line.strip()}
+    except Exception as e:
+        METRICS.record_error("document_engine.manifest_read", e)
+        logger.warning("Error reading index manifest: %s", e)
+        return {}
+
+
+def _write_index_manifest(manifest: dict) -> None:
+    try:
+        with open(INDEXED_FILES_PATH, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+    except Exception as e:
+        METRICS.record_error("document_engine.manifest_write", e)
+        logger.warning("Error writing index manifest: %s", e)
+
+
+def _update_manifest(action: str, file_path: str) -> None:
+    with MANIFEST_LOCK:
+        manifest = _load_index_manifest()
+        if action == "delete":
+            manifest.pop(file_path, None)
+            _write_index_manifest(manifest)
+            return
+        if os.path.exists(file_path):
+            manifest[file_path] = _get_file_signature(file_path)
+            _write_index_manifest(manifest)
 
 
 def ingestion_worker():
@@ -222,14 +277,16 @@ def ingestion_worker():
                 INGESTION_QUEUE.task_done()
                 continue
 
-            print(f"--- SYNC WORKER: Processing {action} for {os.path.basename(file_path)} ---")
+            logger.info("--- SYNC WORKER: Processing %s for %s ---", action, os.path.basename(file_path))
 
             if action == "delete":
                 try:
                     GLOBAL_VECTORSTORE.delete(where={"source": file_path})
-                    print(f"   - Removed chunks for {os.path.basename(file_path)}")
+                    _update_manifest("delete", file_path)
+                    logger.info("   - Removed chunks for %s", os.path.basename(file_path))
                 except Exception as e:
-                    print(f"   - Error deleting {file_path}: {e}")
+                    METRICS.record_error("document_engine.delete", e)
+                    logger.warning("   - Error deleting %s: %s", file_path, e)
 
             elif action in ["add", "update"]:
                 # For update, we delete first to avoid duplicates
@@ -247,14 +304,17 @@ def ingestion_worker():
                         splits = filter_complex_metadata(splits)
                         if splits:
                             GLOBAL_VECTORSTORE.add_documents(splits)
-                            print(f"   - Added {len(splits)} chunks for {os.path.basename(file_path)}")
+                            _update_manifest("add", file_path)
+                            logger.info("   - Added %d chunks for %s", len(splits), os.path.basename(file_path))
                 except Exception as e:
-                    print(f"   - Error ingesting {file_path}: {e}")
+                    METRICS.record_error("document_engine.ingest", e)
+                    logger.warning("   - Error ingesting %s: %s", file_path, e)
 
             INGESTION_QUEUE.task_done()
 
         except Exception as e:
-            print(f"Worker Error: {e}")
+            METRICS.record_error("document_engine.worker", e)
+            logger.warning("Worker error: %s", e)
 
 
 # --- PART 1: OPTIMIZED INGESTION ENGINE ---
@@ -283,40 +343,73 @@ def initialize_vectorstore():
     GLOBAL_VECTORSTORE = vectorstore
 
     # 2. Identify New Files
-    indexed_files = set()
-    if os.path.exists(INDEXED_FILES_PATH):
-        with open(INDEXED_FILES_PATH, 'r') as f:
-            indexed_files = set(line.strip() for line in f)
-
-    current_files = set()
+    manifest = _load_index_manifest()
+    indexed_files = set(manifest.keys())
+    current_files = {}
     for root, dirs, files in os.walk(DOC_FOLDER):
         for file in files:
             if file.startswith("~$"): continue
             if file.lower().endswith(SUPPORTED_EXTENSIONS):
-                current_files.add(os.path.join(root, file))
+                path = os.path.join(root, file)
+                current_files[path] = _get_file_signature(path)
 
-    new_files = list(current_files - indexed_files)
+    current_paths = set(current_files.keys())
+    deleted_files = list(indexed_files - current_paths)
+    candidate_files = list(current_paths)
+
+    new_files = []
+    updated_files = []
+    for file_path in candidate_files:
+        if file_path not in manifest:
+            new_files.append(file_path)
+            continue
+        if manifest.get(file_path) != current_files[file_path]:
+            updated_files.append(file_path)
 
     # 3. Parallel Loading & Ingestion
-    if new_files:
-        print(f"--- DETECTED {len(new_files)} NEW DOCUMENTS ---")
+    if deleted_files:
+        logger.info("--- DETECTED %d DELETED DOCUMENTS ---", len(deleted_files))
+        for file_path in deleted_files:
+            try:
+                vectorstore.delete(where={"source": file_path})
+                _update_manifest("delete", file_path)
+                logger.info("   - Removed chunks for %s", os.path.basename(file_path))
+            except Exception as e:
+                METRICS.record_error("document_engine.delete", e)
+                logger.warning("   - Error deleting %s: %s", file_path, e)
+
+    files_to_ingest = new_files + updated_files
+
+    if files_to_ingest:
+        if new_files:
+            logger.info("--- DETECTED %d NEW DOCUMENTS ---", len(new_files))
+        if updated_files:
+            logger.info("--- DETECTED %d UPDATED DOCUMENTS ---", len(updated_files))
+
+        for file_path in updated_files:
+            try:
+                vectorstore.delete(where={"source": file_path})
+            except Exception:
+                pass
+
         docs = []
 
         # Optimization: Multiprocessing
         with concurrent.futures.ProcessPoolExecutor() as executor:
-            future_to_file = {executor.submit(load_document_by_extension, fp): fp for fp in new_files}
+            future_to_file = {executor.submit(load_document_by_extension, fp): fp for fp in files_to_ingest}
 
             for i, future in enumerate(concurrent.futures.as_completed(future_to_file)):
                 fp = future_to_file[future]
                 try:
                     loaded_docs = future.result()
                     docs.extend(loaded_docs)
-                    print(f"   [{i + 1}/{len(new_files)}] Loaded: {os.path.basename(fp)}")
+                    logger.info("   [%d/%d] Loaded: %s", i + 1, len(files_to_ingest), os.path.basename(fp))
                 except Exception as exc:
-                    print(f"   [{i + 1}/{len(new_files)}] Failed: {fp} generated {exc}")
+                    METRICS.record_error("document_engine.load", exc)
+                    logger.warning("   [%d/%d] Failed: %s generated %s", i + 1, len(files_to_ingest), fp, exc)
 
         if docs:
-            print(f"--- SPLITTING & EMBEDDING {len(docs)} DOCUMENT CHUNKS ---")
+            logger.info("--- SPLITTING & EMBEDDING %d DOCUMENT CHUNKS ---", len(docs))
             text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=1000,
                 chunk_overlap=200,
@@ -328,15 +421,14 @@ def initialize_vectorstore():
             vectorstore.add_documents(splits)
 
             # Update index tracking
-            with open(INDEXED_FILES_PATH, 'a') as f:
-                for file_path in new_files:
-                    f.write(f"{file_path}\n")
-            print("--- INGESTION COMPLETE ---")
+            for file_path in files_to_ingest:
+                _update_manifest("add", file_path)
+            logger.info("--- INGESTION COMPLETE ---")
     else:
-        print("--- NO NEW DOCUMENTS TO INGEST ---")
+        logger.info("--- NO DOCUMENT CHANGES TO INGEST ---")
 
     # 4. Start Background Sync (Watchdog)
-    print("--- STARTING LIVE DOC WATCHER ---")
+    logger.info("--- STARTING LIVE DOC WATCHER ---")
 
     # Start Worker Thread
     worker_thread = threading.Thread(target=ingestion_worker, daemon=True)
@@ -542,8 +634,8 @@ app = workflow.compile()
 
 # --- ENTRY POINT ---
 
-def query_documents(user_input: str):
-    """Execution wrapper returning Answer + Sources."""
+def query_documents(user_input: str, include_sources: bool = False):
+    """Execution wrapper returning Answer (and optional structured sources)."""
     inputs = {"question": user_input, "loop_step": 0}
 
     final_state = None
@@ -560,7 +652,9 @@ def query_documents(user_input: str):
             for key, value in output.items():
                 final_state = value
     except Exception as e:
-        return {"error": str(e)}
+        METRICS.record_error("document_engine.query", e)
+        logger.warning("Query error: %s", e)
+        return f"Error: {e}" if not include_sources else {"error": str(e)}
 
     # Extract final generation
     final_answer = final_state.get("generation", "No answer generated.")
@@ -586,10 +680,12 @@ def query_documents(user_input: str):
         })
 
     # Return a dictionary containing both Answer and Structured Sources
-    return {
-        "answer": final_answer,
-        "citations": sources_data
-    }
+    if include_sources:
+        return {
+            "answer": final_answer,
+            "citations": sources_data
+        }
+    return final_answer
 
 with open("document_engine_diagram.png", "wb") as binary_file:
     binary_file.write(app.get_graph().draw_mermaid_png())
