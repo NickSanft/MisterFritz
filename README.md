@@ -174,6 +174,16 @@ The bot will:
 - Initialize the vector store for document search
 - Begin responding to messages and commands
 
+### Docker Compose (Ollama)
+
+You can optionally run Ollama via Docker Compose:
+
+```bash
+docker compose up -d
+```
+
+Then run the bot locally with `python main_discord.py`.
+
 ## Usage Examples
 
 **Direct conversation:**
