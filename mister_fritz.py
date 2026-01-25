@@ -24,8 +24,7 @@ import document_engine
 import image_generator
 from chroma_store import ChromaStore
 from fritz_utils import (
-    MessageSource, DOC_STORAGE_DESCRIPTION, CHAT_DB_NAME, THINKING_OLLAMA_MODEL, VISION_MODEL,
-    ENABLE_MULTI_AGENT, MULTI_AGENT_VERIFY_RESULTS, MULTI_AGENT_DEFAULT_STRATEGY
+    MessageSource, DOC_STORAGE_DESCRIPTION, CHAT_DB_NAME, THINKING_OLLAMA_MODEL, VISION_MODEL
 )
 from sqlite_store import SQLiteStore
 from observability import init_logging, METRICS
