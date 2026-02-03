@@ -62,5 +62,4 @@ torchaudio.load = patched_load
 
 # Your TTS code here
 tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
-tts.tts_to_file(text="This is a test, I am testing now, huzzah", speaker_wav="./test.wav", language="en",
-                file_path="output.wav")
+tts.tts_to_file(text="This is a test, I am testing to see. Philology is the study of language.", speaker_wav="./test01_20s.wav", language="en",file_path="output.wav")
