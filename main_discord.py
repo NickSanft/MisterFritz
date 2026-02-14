@@ -6,9 +6,11 @@ import uuid
 import speech_recognition as sr
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 from pydub import AudioSegment
 
+from deck_of_cards_integration import draw_cards, get_remaining_card_number, reload_deck
 from document_engine import query_documents
 from fritz_utils import get_key_from_json_config_file, MessageSource, DISCORD_KEY, FFMPEG_PATH, FFPROBE_PATH
 from image_generator import generate_image
@@ -117,6 +119,29 @@ sayer = TTSEngine()
 @client.event
 async def on_ready():
     logger.info("Logged in as %s", client.user)
+    try:
+        # This registers the slash commands with Discord
+        synced = await client.tree.sync()
+        print(f"Synced {len(synced)} command(s)")
+    except Exception as e:
+        print(f"Failed to sync commands: {e}")
+
+@client.tree.command(name="draw", description="Draw cards from a deck!")
+@app_commands.describe(num_cards="How many cards to draw")
+async def draw_slash(interaction: discord.Interaction, num_cards: int):
+    await interaction.response.defer(thinking=True)
+    await interaction.followup.send(content=draw_cards(num_cards, interaction.user.name))
+
+@client.tree.command(name="cards_remaining", description="Check cards remaining in the deck")
+async def cards_remaining_slash(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    await interaction.followup.send(content=get_remaining_card_number(interaction.user.name))
+
+@client.tree.command(name="reload_deck", description="Reloads the deck (use if you goof up)")
+async def reload_deck_slash(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    await interaction.followup.send(content=reload_deck(interaction.user.name))
+
 
 
 @client.command()
