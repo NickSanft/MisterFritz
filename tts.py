@@ -61,7 +61,7 @@ class TTSEngine:
             return self.tts.speakers
         return []
 
-    def generate_speech(self,
+    async def generate_speech(self,
                         message: str,
                         speaker: str = "Baldur Sanjin",
                         language: str = "en",

@@ -143,83 +143,121 @@ async def reload_deck_slash(interaction: discord.Interaction):
     await interaction.followup.send(content=reload_deck(interaction.user.name))
 
 
+# --- CONVERTED COMMANDS ---
 
-@client.command()
-async def hello(ctx):
-    author = ctx.author.name
+@client.tree.command(name="hello", description="Say hello to the bot")
+async def hello_slash(interaction: discord.Interaction):
+    author = interaction.user.name
     METRICS.increment("discord_commands.hello")
-    await ctx.send(f"Hello, {author}!")
+    await interaction.response.send_message(f"Hello, {author}!")
 
-@client.command()
-async def voice(ctx, *, message):
-    author = ctx.author.name
+
+@client.tree.command(name="voice", description="Generate audio from text")
+@app_commands.describe(message="The text you want the bot to say")
+async def voice_slash(interaction: discord.Interaction, message: str):
+    # Defer because TTS generation might take > 3 seconds
+    await interaction.response.defer(thinking=True)
+
+    author = interaction.user.name
     METRICS.increment("discord_commands.voice")
+
+    # Generate the text response first
     original_response = ask_stuff(message, MessageSource.DISCORD_VOICE, author)["text"]
-    output_file = sayer.generate_speech(original_response)
+    # Generate the audio file
+    output_file = await sayer.generate_speech(original_response)
 
     try:
-        if ctx.voice_client:
-            await ctx.voice_client.play(discord.FFmpegPCMAudio(executable="./ffmpeg.exe",source=output_file))
+        if interaction.guild and interaction.guild.voice_client:
+            # Play in voice channel
+            interaction.guild.voice_client.play(discord.FFmpegPCMAudio(executable="./ffmpeg.exe", source=output_file))
+            await interaction.followup.send(f"Playing voice for: '{message}'")
         else:
+            # Upload as file
             files = [discord.File(output_file)]
-            await ctx.send("You are not connected to a voice channel, uploading as a file...", files=files)
+            await interaction.followup.send("You are not connected to a voice channel, uploading as a file...",
+                                            files=files)
     except AttributeError as e:
         METRICS.record_error("discord_commands.voice", e)
-        await ctx.send("Something crazy happened!")
+        await interaction.followup.send("Something crazy happened!")
 
 
-@client.command()
-async def gen(ctx, *, message):
+@client.tree.command(name="gen", description="Generate an image based on a prompt")
+@app_commands.describe(prompt="The image description")
+async def gen_slash(interaction: discord.Interaction, prompt: str):
+    await interaction.response.defer(thinking=True)
     METRICS.increment("discord_commands.gen")
-    logger.info("Image generation request: %s", message)
-    output_file = generate_image(message)
-    file = discord.File(output_file)
-    # Send the file
-    await ctx.send(file=file, content="Here is your file!")
+    logger.info("Image generation request: %s", prompt)
+
+    try:
+        output_file = generate_image(prompt)
+        file = discord.File(output_file)
+        await interaction.followup.send(content="Here is your file!", file=file)
+    except Exception as e:
+        METRICS.record_error("discord_commands.gen", e)
+        await interaction.followup.send(f"Failed to generate image: {e}")
 
 
-@client.command()
-async def join(ctx):
+@client.tree.command(name="join", description="Join the voice channel you are currently in")
+async def join_slash(interaction: discord.Interaction):
     try:
         METRICS.increment("discord_commands.join")
-        channel = ctx.author.voice.channel
-        await channel.connect()
-    except AttributeError as e:
+        if interaction.user.voice and interaction.user.voice.channel:
+            channel = interaction.user.voice.channel
+            await channel.connect()
+            await interaction.response.send_message(f"Joined {channel.name}!")
+        else:
+            await interaction.response.send_message("You are not connected to a voice channel, buddy!", ephemeral=True)
+    except Exception as e:
         METRICS.record_error("discord_commands.join", e)
-        await ctx.send("You are not connected to a voice channel, buddy!")
+        # Using followup in case we deferred (though we didn't here, safe to use response if not deferred)
+        if not interaction.response.is_done():
+            await interaction.response.send_message("I couldn't join the channel.")
 
-@client.command()
-async def lore(ctx, *, message):
+
+@client.tree.command(name="lore", description="Query the document engine for lore")
+@app_commands.describe(query="The question about the lore")
+async def lore_slash(interaction: discord.Interaction, query: str):
+    await interaction.response.defer(thinking=True)
     METRICS.increment("discord_commands.lore")
-    logger.info("Lore request: %s", message)
-    original_message = await ctx.send("This may take a few seconds, please wait. This message will be updated with the result!")
-    original_response = query_documents(message)
+    logger.info("Lore request: %s", query)
+
+    # We deferred, so we use followup to send the result
+    original_response = query_documents(query)
     resp_len = len(original_response)
-    author = ctx.author.name
+    author = interaction.user.name
 
     if resp_len > 2000:
         response = "The answer was over 2000 ({}), so you're getting multiple messages {} \r\n".format(resp_len,
                                                                                                        author) + original_response
         responses = split_into_chunks(response)
-        for i, response in enumerate(responses):
-            await ctx.send(response)
+        for i, chunk in enumerate(responses):
+            if i == 0:
+                await interaction.followup.send(chunk)
+            else:
+                await interaction.channel.send(chunk)
     else:
-        await original_message.edit(content=original_response)
+        await interaction.followup.send(original_response)
 
-@client.command()
-async def leave(ctx):
+
+@client.tree.command(name="leave", description="Leave the current voice channel")
+async def leave_slash(interaction: discord.Interaction):
     try:
         METRICS.increment("discord_commands.leave")
-        await ctx.voice_client.disconnect()
-    except AttributeError as e:
+        if interaction.guild.voice_client:
+            await interaction.guild.voice_client.disconnect()
+            await interaction.response.send_message("Disconnected.")
+        else:
+            await interaction.response.send_message("I am not connected to a voice channel, buddy!", ephemeral=True)
+    except Exception as e:
         METRICS.record_error("discord_commands.leave", e)
-        await ctx.send("I am not connected to a voice channel, buddy!")
+        await interaction.response.send_message("Error attempting to leave.")
 
-@client.command()
-async def health(ctx):
+
+@client.tree.command(name="health", description="Check the system health metrics")
+async def health_slash(interaction: discord.Interaction):
     METRICS.increment("discord_commands.health")
     snapshot = get_health_snapshot()
-    await ctx.send(format_health_text(snapshot))
+    await interaction.response.send_message(format_health_text(snapshot))
 
 
 @client.event
@@ -229,6 +267,7 @@ async def on_message(ctx):
     message_clean = ctx.clean_content
     if ctx.author == client.user:
         return
+    # We still check process_commands just in case any old prefix commands exist or are added later
     elif ctx.content.startswith(command_prefix):
         await client.process_commands(ctx)
         return
@@ -276,13 +315,11 @@ async def on_message(ctx):
                 await attachment.save(file_path)
                 logger.info("Saved audio %s for %s", file_path, request_id)
                 voice_text = await speech_to_text(file_path)
-                if not message_clean :
+                if not message_clean:
                     message_clean = voice_text
                 else:
                     logger.debug("Voice text type: %s", type(voice_text))
                 logger.info("Voice text: %s", voice_text)
-
-
 
     # Send initial status message immediately
     if user_image_paths:
@@ -388,6 +425,7 @@ async def on_message(ctx):
 def split_into_chunks(s, chunk_size=2000):
     return [s[i:i + chunk_size] for i in range(0, len(s), chunk_size)]
 
+
 async def speech_to_text(file_path: str):
     wav_file = f"{file_path}.wav"
     logger.info("Saved audio: %s", file_path)
@@ -401,6 +439,7 @@ async def speech_to_text(file_path: str):
     except Exception as e:
         METRICS.record_error("speech_to_text", e)
         logger.warning("Speech to text error: %s", e)
+
 
 if __name__ == '__main__':
     discord_secret = get_key_from_json_config_file(DISCORD_KEY)
