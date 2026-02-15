@@ -3,9 +3,9 @@ import logging
 import os
 import time
 import uuid
-import speech_recognition as sr
 
 import discord
+import speech_recognition as sr
 from discord import app_commands
 from discord.ext import commands
 from pydub import AudioSegment
@@ -15,8 +15,8 @@ from document_engine import query_documents
 from fritz_utils import get_key_from_json_config_file, MessageSource, DISCORD_KEY, FFMPEG_PATH, FFPROBE_PATH
 from image_generator import generate_image
 from mister_fritz import ask_stuff
-from tts import TTSEngine
 from observability import init_logging, METRICS, get_health_snapshot, format_health_text
+from tts import TTSEngine
 
 r = sr.Recognizer()
 
