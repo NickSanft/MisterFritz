@@ -1,0 +1,3 @@
+# Modelfile
+FROM slekrem/gpt-oss-claude-code-32k
+PARAMETER num_ctx 32768
