@@ -2,6 +2,7 @@ import fnmatch
 import logging
 import os
 import re
+import subprocess
 from typing import Optional
 
 from langchain_core.runnables import RunnableConfig
@@ -328,6 +329,61 @@ def search_files(config: RunnableConfig, pattern: str, path: str = ".", file_glo
     return header + "\n" + "\n".join(matches)
 
 
+# Maximum command execution timeout in seconds
+MAX_EXEC_TIMEOUT = 30
+
+
+@tool(parse_docstring=True)
+def execute_command(config: RunnableConfig, command: str, timeout: int = 30) -> str:
+    """Executes a shell command in the workspace directory and returns the output.
+    The command runs with the workspace as the current working directory.
+
+    Args:
+        config: The RunnableConfig containing workspace_root and user_id in metadata.
+        command: The shell command to execute.
+        timeout: Maximum seconds to wait for the command to finish. Defaults to 30, max 30.
+
+    Returns:
+        The combined stdout and stderr output from the command.
+    """
+    METRICS.increment("tool.execute_command")
+    workspace = _get_workspace(config)
+
+    timeout = min(timeout, MAX_EXEC_TIMEOUT)
+
+    logger.info("Executing command in %s: %s", workspace, command)
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+        output_parts = []
+        if result.stdout:
+            output_parts.append(result.stdout)
+        if result.stderr:
+            output_parts.append(f"STDERR:\n{result.stderr}")
+        output_parts.append(f"Exit code: {result.returncode}")
+
+        output = "\n".join(output_parts)
+
+        # Truncate if too long for the LLM context
+        if len(output) > 10000:
+            output = output[:10000] + "\n... (output truncated)"
+
+        return output
+
+    except subprocess.TimeoutExpired:
+        return f"Error: Command timed out after {timeout} seconds."
+    except Exception as e:
+        METRICS.record_error("execute_command", e)
+        return f"Error executing command: {e}"
+
+
 def _format_size(size_bytes: int) -> str:
     """Format a file size in human-readable form."""
     if size_bytes < 1024:
@@ -340,7 +396,7 @@ def _format_size(size_bytes: int) -> str:
 
 def get_file_tools():
     """Returns the list of file operation tools."""
-    return [list_directory, read_file, write_file, edit_file, search_files]
+    return [list_directory, read_file, write_file, edit_file, search_files, execute_command]
 
 
 def get_file_tools_description():
@@ -351,4 +407,5 @@ def get_file_tools_description():
         "write_file": (write_file, "Write or create a file in the workspace. Provide relative path and full content."),
         "edit_file": (edit_file, "Edit a file by replacing a specific text string with new text. Targeted and safe."),
         "search_files": (search_files, "Search for a regex pattern across files in the workspace, like grep."),
+        "execute_command": (execute_command, "Execute a shell command in the workspace directory and return the output. Use for running code, tests, builds, git commands, etc."),
     }

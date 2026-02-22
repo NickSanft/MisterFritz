@@ -393,7 +393,7 @@ async def on_message(ctx):
         start_time = time.time()
         response_data = await loop.run_in_executor(
             None,
-            lambda: ask_stuff(message_clean, source, author, None, streaming_callback, user_image_paths, user_workspaces.get(author))
+            lambda: ask_stuff(message_clean, source, author, None, streaming_callback, user_image_paths, user_workspaces.get(author) if author == ROOT_USER else None)
         )
         METRICS.record_latency("ask_stuff", time.time() - start_time)
     except Exception as e:

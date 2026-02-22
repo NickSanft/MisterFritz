@@ -25,7 +25,7 @@ import image_generator
 from chroma_store import ChromaStore
 from file_tools import get_file_tools_description
 from fritz_utils import (
-    MessageSource, DOC_STORAGE_DESCRIPTION, CHAT_DB_NAME, THINKING_OLLAMA_MODEL, VISION_MODEL
+    MessageSource, DOC_STORAGE_DESCRIPTION, CHAT_DB_NAME, THINKING_OLLAMA_MODEL, VISION_MODEL, ROOT_USER
 )
 from sqlite_store import SQLiteStore
 from observability import init_logging, METRICS
@@ -359,7 +359,7 @@ def ask_stuff(base_prompt: str, source: MessageSource, user_id: str, progress_ca
         user_image_paths = []
         full_prompt = format_prompt(base_prompt, source, user_id_clean)
 
-    include_file_tools = workspace_root is not None
+    include_file_tools = workspace_root is not None and user_id_clean == ROOT_USER
     system_prompt = get_system_description(get_conversation_tools_description(include_file_tools))
     logger.debug("Role description: %s", system_prompt)
     logger.debug("Prompt to ask: %s", full_prompt)
@@ -469,10 +469,11 @@ def conversation(state: EnhancedState, config: RunnableConfig):
     latest_message = messages[-1].content if messages else ""
     logger.debug("Latest message: %s", latest_message)
 
-    # Determine if file tools should be included based on workspace_root
+    # Only include dev tools if the user is root and has a workspace set
     metadata = config.get("metadata", {})
     workspace_root = metadata.get("workspace_root")
-    include_file_tools = workspace_root is not None
+    user_id = metadata.get("user_id", "")
+    include_file_tools = workspace_root is not None and user_id == ROOT_USER
 
     if include_file_tools:
         tools_desc = get_conversation_tools_description(include_file_tools=True)
@@ -506,6 +507,7 @@ def conversation(state: EnhancedState, config: RunnableConfig):
         "write_file": "Writing to a file...",
         "edit_file": "Editing a file...",
         "search_files": "Searching through files...",
+        "execute_command": "Running a command...",
     }
 
     # Track which tools we've already notified about
