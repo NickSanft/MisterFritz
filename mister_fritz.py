@@ -23,6 +23,7 @@ from langchain.agents import create_agent
 import document_engine
 import image_generator
 from chroma_store import ChromaStore
+from file_tools import get_file_tools_description
 from fritz_utils import (
     MessageSource, DOC_STORAGE_DESCRIPTION, CHAT_DB_NAME, THINKING_OLLAMA_MODEL, VISION_MODEL
 )
@@ -43,7 +44,7 @@ class EnhancedState(TypedDict):
     user_image_paths: list[str]  # For user-provided images (input)
 
 
-def get_conversation_tools_description():
+def get_conversation_tools_description(include_file_tools=False):
     """
     Returns a dictionary of available tools and their descriptions.
     """
@@ -55,7 +56,10 @@ def get_conversation_tools_description():
         "search_memories": (search_memories, "Returns a JSON payload of stored memories you have had with a user based on a search term."),
         "search_documents": (search_documents, f"Search local documents. Use this for questions about: {DOC_STORAGE_DESCRIPTION}"),
         "generate_image": (generate_image, "Generates an image based on a given prompt."),
-        "analyze_image": (analyze_image, "Analyzes an image. If the user asks about an image, assume that the tool knows its location.")    }
+        "analyze_image": (analyze_image, "Analyzes an image. If the user asks about an image, assume that the tool knows its location."),
+    }
+    if include_file_tools:
+        conversation_tool_dict.update(get_file_tools_description())
     return conversation_tool_dict
 
 
@@ -333,7 +337,7 @@ def add_memory(user_id: str, memory_key: str, memory_to_store: str):
 
 
 # ===== MAIN FUNCTION =====
-def ask_stuff(base_prompt: str, source: MessageSource, user_id: str, progress_callback=None, streaming_callback=None, user_image_paths: list[str] = None) -> dict:
+def ask_stuff(base_prompt: str, source: MessageSource, user_id: str, progress_callback=None, streaming_callback=None, user_image_paths: list[str] = None, workspace_root: str = None) -> dict:
     """Process user input and return structured output with text and attachments.
 
     Args:
@@ -345,6 +349,7 @@ def ask_stuff(base_prompt: str, source: MessageSource, user_id: str, progress_ca
         streaming_callback: Optional function to call with partial text as it streams.
                            Should accept a single string argument with accumulated text.
         user_image_paths: Optional list of file paths to images the user has attached.
+        workspace_root: Optional path to the workspace directory for file operations.
     """
     user_id_clean = re.sub(r'[^a-zA-Z0-9]', '', user_id)  # Clean special characters
     # Add user images to metadata if provided
@@ -354,11 +359,10 @@ def ask_stuff(base_prompt: str, source: MessageSource, user_id: str, progress_ca
         user_image_paths = []
         full_prompt = format_prompt(base_prompt, source, user_id_clean)
 
-    system_prompt = get_system_description(get_conversation_tools_description())
+    include_file_tools = workspace_root is not None
+    system_prompt = get_system_description(get_conversation_tools_description(include_file_tools))
     logger.debug("Role description: %s", system_prompt)
     logger.debug("Prompt to ask: %s", full_prompt)
-
-
 
     config = {
         "configurable": {"user_id": user_id_clean, "thread_id": user_id_clean},
@@ -367,7 +371,8 @@ def ask_stuff(base_prompt: str, source: MessageSource, user_id: str, progress_ca
             "thread_id": user_id_clean,
             "progress_callback": progress_callback,
             "streaming_callback": streaming_callback,
-            "user_image_paths": user_image_paths
+            "user_image_paths": user_image_paths,
+            "workspace_root": workspace_root,
         }
     }
     inputs = {"messages": [("user", full_prompt)], "image_paths": [], "user_image_paths": user_image_paths}
@@ -463,8 +468,22 @@ def conversation(state: EnhancedState, config: RunnableConfig):
     messages = state["messages"]
     latest_message = messages[-1].content if messages else ""
     logger.debug("Latest message: %s", latest_message)
-    # Use cached system prompt instead of rebuilding
-    inputs = {"messages": [("system", CACHED_SYSTEM_PROMPT),
+
+    # Determine if file tools should be included based on workspace_root
+    metadata = config.get("metadata", {})
+    workspace_root = metadata.get("workspace_root")
+    include_file_tools = workspace_root is not None
+
+    if include_file_tools:
+        tools_desc = get_conversation_tools_description(include_file_tools=True)
+        system_prompt = get_system_description(tools_desc)
+        active_tools = [tool_info[0] for tool_info in tools_desc.values()]
+        agent = create_agent(ollama_instance, tools=active_tools)
+    else:
+        system_prompt = CACHED_SYSTEM_PROMPT
+        agent = conversation_react_agent
+
+    inputs = {"messages": [("system", system_prompt),
                            ("user", latest_message)]}
 
     # Get progress and streaming callbacks from config if available
@@ -481,7 +500,12 @@ def conversation(state: EnhancedState, config: RunnableConfig):
         "search_web": "Searching the web...",
         "scrape_website": "Scraping website content...",
         "search_memories": "Looking through my memories...",
-        "analyze_image": "🔍 Analyzing your image(s) with vision AI...",
+        "analyze_image": "Analyzing your image(s) with vision AI...",
+        "list_directory": "Browsing the workspace...",
+        "read_file": "Reading a file...",
+        "write_file": "Writing to a file...",
+        "edit_file": "Editing a file...",
+        "search_files": "Searching through files...",
     }
 
     # Track which tools we've already notified about
@@ -491,7 +515,7 @@ def conversation(state: EnhancedState, config: RunnableConfig):
     final_state = None
     accumulated_text = ""
 
-    for s in conversation_react_agent.stream(inputs, config=get_config_values(config), stream_mode="values"):
+    for s in agent.stream(inputs, config=get_config_values(config), stream_mode="values"):
         final_state = s
 
         # Check for tool calls in the latest message

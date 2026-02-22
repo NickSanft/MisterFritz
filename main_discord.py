@@ -115,6 +115,9 @@ client = commands.Bot(command_prefix=command_prefix, intents=intents)
 connection = None
 sayer = TTSEngine()
 
+# Per-user workspace directories for file operations
+user_workspaces: dict[str, str] = {}
+
 
 @client.event
 async def on_ready():
@@ -260,6 +263,37 @@ async def health_slash(interaction: discord.Interaction):
     await interaction.response.send_message(format_health_text(snapshot))
 
 
+@client.tree.command(name="workspace", description="Set or view the workspace directory for file operations")
+@app_commands.describe(path="The directory path to use as workspace (leave empty to see current)")
+async def workspace_slash(interaction: discord.Interaction, path: str = None):
+    METRICS.increment("discord_commands.workspace")
+    author = interaction.user.name
+
+    if path is None:
+        current = user_workspaces.get(author)
+        if current:
+            await interaction.response.send_message(f"Current workspace: `{current}`", ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                "No workspace set. Use `/workspace <path>` to set a directory for file operations.",
+                ephemeral=True
+            )
+        return
+
+    expanded = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isdir(expanded):
+        await interaction.response.send_message(
+            f"Directory does not exist: `{expanded}`", ephemeral=True
+        )
+        return
+
+    user_workspaces[author] = expanded
+    await interaction.response.send_message(
+        f"Workspace set to: `{expanded}`\nFile tools (read, write, edit, search, list) are now active in conversations.",
+        ephemeral=True
+    )
+
+
 @client.event
 async def on_message(ctx):
     author = ctx.author.name
@@ -353,7 +387,7 @@ async def on_message(ctx):
         start_time = time.time()
         response_data = await loop.run_in_executor(
             None,
-            lambda: ask_stuff(message_clean, source, author, None, streaming_callback, user_image_paths)
+            lambda: ask_stuff(message_clean, source, author, None, streaming_callback, user_image_paths, user_workspaces.get(author))
         )
         METRICS.record_latency("ask_stuff", time.time() - start_time)
     except Exception as e:
