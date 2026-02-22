@@ -7,6 +7,7 @@ from typing import Optional
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
+from fritz_utils import ROOT_USER
 from observability import METRICS
 
 logger = logging.getLogger(__name__)
@@ -29,8 +30,17 @@ TEXT_EXTENSIONS = {
 }
 
 
+def _authorize(config: RunnableConfig) -> None:
+    """Verify the requesting user matches the configured root_user."""
+    metadata = config.get("metadata", {})
+    user_id = metadata.get("user_id", "")
+    if not ROOT_USER or user_id != ROOT_USER:
+        raise PermissionError("You do not have permission to use file operations.")
+
+
 def _get_workspace(config: RunnableConfig) -> str:
-    """Extract and validate the workspace root from config metadata."""
+    """Extract and validate the workspace root from config metadata, with authorization."""
+    _authorize(config)
     metadata = config.get("metadata", {})
     workspace = metadata.get("workspace_root")
     if not workspace:

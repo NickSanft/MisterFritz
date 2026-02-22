@@ -36,6 +36,8 @@ def get_key_from_json_config_file(key_name: str) -> str | None:
         print(f"Error reading file: {e}")
     return None
 
+ROOT_USER = get_key_from_json_config_file("root_user")
+
 dcd = get_key_from_json_config_file("doc_storage_description")
 if dcd:
     DOC_STORAGE_DESCRIPTION = get_key_from_json_config_file("doc_storage_description")

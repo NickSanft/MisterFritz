@@ -12,7 +12,7 @@ from pydub import AudioSegment
 
 from deck_of_cards_integration import draw_cards, get_remaining_card_number, reload_deck
 from document_engine import query_documents
-from fritz_utils import get_key_from_json_config_file, MessageSource, DISCORD_KEY, FFMPEG_PATH, FFPROBE_PATH
+from fritz_utils import get_key_from_json_config_file, MessageSource, DISCORD_KEY, FFMPEG_PATH, FFPROBE_PATH, ROOT_USER
 from image_generator import generate_image
 from mister_fritz import ask_stuff
 from observability import init_logging, METRICS, get_health_snapshot, format_health_text
@@ -268,6 +268,12 @@ async def health_slash(interaction: discord.Interaction):
 async def workspace_slash(interaction: discord.Interaction, path: str = None):
     METRICS.increment("discord_commands.workspace")
     author = interaction.user.name
+
+    if author != ROOT_USER:
+        await interaction.response.send_message(
+            "You do not have permission to use file operations.", ephemeral=True
+        )
+        return
 
     if path is None:
         current = user_workspaces.get(author)
