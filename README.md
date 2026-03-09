@@ -17,7 +17,9 @@ Mister Fritz is an AI-powered Discord bot with a sophisticated, sardonic persona
 | Vision Analysis | Analyze user-attached images via LLaVA |
 | File Operations | Sandboxed file read/write/edit/search/execute for the configured root user |
 | Card Game | Built-in deck system with success/failure mechanics for tabletop-style play |
-| Observability | Live health metrics via `/health`, with Prometheus + Grafana support |
+| Observability | Prometheus metrics on `:8000/metrics`, health on `:8000/health`, pre-built Grafana dashboard |
+| Canary deployment | Argo Rollouts canary steps with Prometheus-based promotion gates |
+| Local DevOps sim | Full canary pipeline simulation via Docker Compose — no cloud cluster required |
 
 ---
 
