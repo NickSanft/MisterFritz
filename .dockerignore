@@ -1,0 +1,51 @@
+# Version control
+.git
+.gitignore
+
+# Virtual environments
+.venv
+venv
+env
+ENV
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.egg-info
+
+# Windows FFmpeg binaries (replaced by apt-get ffmpeg in Dockerfile)
+*.exe
+
+# Secrets — never bake credentials into the image
+.env
+config.json
+
+# Tests and dev tooling
+tests/
+testing/
+.pytest_cache
+.coverage
+htmlcov/
+
+# IDE / editor files
+.idea
+.vscode
+*.iml
+
+# Runtime data — mount as volumes instead
+chroma_store/
+input/
+output/
+temp_images/
+temp_audio/
+chat_history.db
+*.db
+*.wav
+
+# Generated artifacts
+mister_fritz_diagram.png
+
+# Docs and README-only files (optional — remove if you want them in image)
+# README.md
