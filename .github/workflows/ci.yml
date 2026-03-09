@@ -8,14 +8,35 @@ on:
   pull_request:
 
 jobs:
-  sanity:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Compile sources
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install test/lint tools
+        run: pip install pytest pytest-cov pytest-asyncio
+
+      - name: Compile all sources
         run: python -m compileall -q .
-      - name: Run tests
-        run: python -m unittest discover -s tests
+
+      - name: Run tests with coverage
+        run: |
+          pytest tests/ \
+            --tb=short \
+            --cov=. \
+            --cov-report=term-missing \
+            --cov-fail-under=60 \
+            -v
+        env:
+          # Provide minimal config so validate_config() passes in any test
+          # that triggers module-level initialisation
+          DISCORD_BOT_TOKEN: "ci-placeholder-token"
+          ROOT_USER: "ci-root"
+          OLLAMA_HOST: "http://127.0.0.1:11434"
