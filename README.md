@@ -208,6 +208,64 @@ CI runs on every push via GitHub Actions (see `.github/workflows/ci.yml`).
 
 ---
 
+## Observability
+
+The bot exposes a metrics server on port `8000` (configurable via `METRICS_PORT`):
+
+| Endpoint | Description |
+|---|---|
+| `GET :8000/health` | JSON health snapshot (uptime, error rate, p99 latency) |
+| `GET :8000/metrics` | Prometheus text format |
+
+### Available Prometheus metrics
+
+| Metric | Type | Labels |
+|---|---|---|
+| `misterfritz_discord_messages_total` | Counter | — |
+| `misterfritz_tool_calls_total` | Counter | `tool` |
+| `misterfritz_errors_total` | Counter | `operation` |
+| `misterfritz_request_duration_seconds` | Histogram | `operation` |
+| `misterfritz_uptime_seconds` | Gauge | — |
+
+The compose stack in `docker-compose.yml` includes Prometheus and Grafana with a pre-provisioned dashboard.
+
+---
+
+## Local DevOps Simulation
+
+Simulate the full canary deployment pipeline **without a Discord token or cloud cluster** using Docker Compose and synthetic traffic:
+
+```bash
+cd local-sim
+
+make up                  # start stable stack (Grafana, Prometheus, nginx)
+make deploy-canary       # introduce canary at 10% traffic
+make watch-canary-auto   # auto promote or rollback based on metrics
+make chaos-errors        # inject 25% error rate → triggers automatic rollback
+make down                # tear everything down
+```
+
+Open Grafana at http://localhost:3000 (admin/admin) to see the **MisterFritz — Canary Deployment** dashboard with real-time error rates, P99 latency, and throughput split by version.
+
+See [`local-sim/README.md`](local-sim/README.md) for the full guide including chaos experiments, canary controller options, and optional Kubernetes setup with kind.
+
+### Production Kubernetes
+
+For a real or local Kubernetes cluster, manifests are in `infra/k8s/`:
+
+```bash
+# Bootstrap a local kind cluster (installs Argo Rollouts, ArgoCD, Prometheus stack)
+bash local-sim/kind/setup.sh
+
+# Trigger a canary rollout
+kubectl argo rollouts set image misterfritz misterfritz=<image> -n misterfritz
+kubectl argo rollouts status misterfritz -n misterfritz --watch
+```
+
+The CI workflow (`.github/workflows/release.yml`) builds the image on tag push, runs a smoke test, and triggers a canary rollout with a manual approval gate.
+
+---
+
 ## Troubleshooting
 
 **"Ollama connection refused"**
