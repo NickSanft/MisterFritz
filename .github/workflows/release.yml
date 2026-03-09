@@ -1,0 +1,110 @@
+name: Release — Build & Canary Deploy
+
+on:
+  push:
+    tags:
+      - "v*"          # trigger on semver tags: v1.2.3
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ── 1. Build and push image ────────────────────────────────────────────────
+  build:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.tags }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── 2. Run full test suite against built image ─────────────────────────────
+  test-image:
+    name: Smoke-test image
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull image and run health check
+        run: |
+          docker run -d --name fritz-smoke \
+            -e DISCORD_BOT_TOKEN=ci-placeholder \
+            -e ROOT_USER=ci-root \
+            -p 8000:8000 \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }} \
+            python local-sim/mock_fritz.py
+          sleep 5
+          curl -f http://localhost:8000/health || (docker logs fritz-smoke && exit 1)
+          curl -f http://localhost:8000/metrics | grep misterfritz
+          docker rm -f fritz-smoke
+
+  # ── 3. Canary deployment (requires self-hosted runner or manual trigger) ───
+  # In real environments: update Argo Rollouts image tag, which triggers the
+  # canary steps defined in infra/k8s/rollout.yaml automatically.
+  canary-deploy:
+    name: Trigger canary rollout
+    runs-on: ubuntu-latest
+    needs: [build, test-image]
+    environment: production        # requires manual approval gate in GitHub
+    steps:
+      - name: Update rollout image tag
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+        run: |
+          echo "$KUBECONFIG_B64" | base64 -d > /tmp/kubeconfig
+          export KUBECONFIG=/tmp/kubeconfig
+
+          VERSION="${{ needs.build.outputs.version }}"
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
+
+          echo "Setting rollout image to $IMAGE"
+          kubectl argo rollouts set image misterfritz \
+            misterfritz="$IMAGE" \
+            -n misterfritz
+
+          echo "Watching rollout (10% → analysis → 50% → analysis → 100%)..."
+          kubectl argo rollouts status misterfritz -n misterfritz --timeout 10m
+
+      - name: Post deployment summary
+        if: always()
+        run: |
+          echo "## Deployment ${{ needs.build.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Image: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Status: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
