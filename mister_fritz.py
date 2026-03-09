@@ -157,7 +157,7 @@ def scrape_web(url: str):
     try:
         # 1. Fetch the content
         _record_tool("scrape_web")
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
 
         # 2. Parse the HTML

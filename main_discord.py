@@ -12,7 +12,7 @@ from pydub import AudioSegment
 
 from deck_of_cards_integration import draw_cards, get_remaining_card_number, reload_deck
 from document_engine import query_documents
-from fritz_utils import get_key_from_json_config_file, MessageSource, DISCORD_KEY, FFMPEG_PATH, FFPROBE_PATH, ROOT_USER
+from fritz_utils import MessageSource, DISCORD_BOT_TOKEN, FFMPEG_PATH, FFPROBE_PATH, ROOT_USER, validate_config
 from image_generator import generate_image
 from mister_fritz import ask_stuff
 from observability import init_logging, METRICS, get_health_snapshot, format_health_text
@@ -482,5 +482,5 @@ async def speech_to_text(file_path: str):
 
 
 if __name__ == '__main__':
-    discord_secret = get_key_from_json_config_file(DISCORD_KEY)
-    client.run(discord_secret)
+    validate_config()
+    client.run(DISCORD_BOT_TOKEN)

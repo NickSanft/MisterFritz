@@ -23,7 +23,7 @@ class ChromaStore(BaseStore[str, Union[str, bytes]]):
             persist_directory: Optional[str] = CHROMA_DB_PATH
     ):
         """
-        Initialize the ChromaStore.5
+        Initialize the ChromaStore.
 
         Args:
             collection_name: The name of the Chroma collection.
