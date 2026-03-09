@@ -15,7 +15,7 @@ from document_engine import query_documents
 from fritz_utils import MessageSource, DISCORD_BOT_TOKEN, FFMPEG_PATH, FFPROBE_PATH, ROOT_USER, validate_config
 from image_generator import generate_image
 from mister_fritz import ask_stuff
-from observability import init_logging, METRICS, get_health_snapshot, format_health_text
+from observability import init_logging, METRICS, get_health_snapshot, format_health_text, start_metrics_server
 from tts import TTSEngine
 
 r = sr.Recognizer()
@@ -483,4 +483,5 @@ async def speech_to_text(file_path: str):
 
 if __name__ == '__main__':
     validate_config()
+    start_metrics_server()
     client.run(DISCORD_BOT_TOKEN)
