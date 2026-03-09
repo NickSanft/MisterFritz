@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 5s        # Fast scraping so Grafana updates quickly in demos
+  evaluation_interval: 5s
+
+scrape_configs:
+  # Scrape stable and canary instances separately so Grafana can distinguish them
+  - job_name: "fritz-stable"
+    static_configs:
+      - targets: ["fritz-stable:8000"]
+        labels:
+          version: "stable"
+
+  - job_name: "fritz-canary"
+    static_configs:
+      - targets: ["fritz-canary:8000"]
+        labels:
+          version: "canary"

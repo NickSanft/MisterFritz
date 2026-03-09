@@ -1,0 +1,31 @@
+# kind cluster config for local Kubernetes simulation.
+# Creates a 1-control-plane + 1-worker cluster with port mappings
+# for the metrics endpoint and Grafana.
+#
+# Install kind:  https://kind.sigs.k8s.io/docs/user/quick-start/#installation
+# Usage:  kind create cluster --config cluster.yaml --name misterfritz
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: misterfritz
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 8080
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 8443
+        protocol: TCP
+      - containerPort: 30000
+        hostPort: 3000      # Grafana NodePort
+        protocol: TCP
+      - containerPort: 30090
+        hostPort: 9090      # Prometheus NodePort
+        protocol: TCP
+  - role: worker

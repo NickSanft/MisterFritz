@@ -1,0 +1,13 @@
+# Minimal image for the mock_fritz.py simulation server.
+# Does not install the full ML/Discord stack — starts in seconds.
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir prometheus-client
+
+COPY local-sim/mock_fritz.py ./mock_fritz.py
+
+EXPOSE 8000
+
+ENTRYPOINT ["python", "mock_fritz.py"]

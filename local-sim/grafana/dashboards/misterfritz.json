@@ -1,0 +1,163 @@
+{
+  "title": "MisterFritz — Canary Deployment",
+  "uid": "misterfritz-canary",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Error Rate by Version",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.02 },
+              { "color": "red", "value": 0.05 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (version) (rate(misterfritz_errors_total[1m])) / (sum by (version) (rate(misterfritz_discord_messages_total[1m])) + sum by (version) (rate(misterfritz_errors_total[1m])))",
+          "legendFormat": "{{version}}",
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "P99 Latency by Version",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 3 },
+              { "color": "red", "value": 8 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (version, le) (rate(misterfritz_request_duration_seconds_bucket[1m])))",
+          "legendFormat": "p99 {{version}}",
+          "datasource": "Prometheus"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (version, le) (rate(misterfritz_request_duration_seconds_bucket[1m])))",
+          "legendFormat": "p50 {{version}}",
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Throughput — Messages / sec",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        {
+          "expr": "sum by (version) (rate(misterfritz_discord_messages_total[1m]))",
+          "legendFormat": "{{version}}",
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Tool Calls / sec",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        {
+          "expr": "sum by (tool, version) (rate(misterfritz_tool_calls_total[1m]))",
+          "legendFormat": "{{tool}} ({{version}})",
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Uptime",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        {
+          "expr": "misterfritz_uptime_seconds",
+          "legendFormat": "{{version}}",
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Total Errors",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (version) (misterfritz_errors_total)",
+          "legendFormat": "{{version}}",
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Error Rate — Canary vs Stable (current)",
+      "type": "bargauge",
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "max": 0.2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.02 },
+              { "color": "red", "value": 0.05 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (version) (rate(misterfritz_errors_total[2m])) / (sum by (version) (rate(misterfritz_discord_messages_total[2m])) + sum by (version) (rate(misterfritz_errors_total[2m])))",
+          "legendFormat": "{{version}}",
+          "datasource": "Prometheus"
+        }
+      ]
+    }
+  ],
+  "templating": { "list": [] },
+  "annotations": { "list": [] }
+}

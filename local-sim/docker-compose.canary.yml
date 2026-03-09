@@ -1,0 +1,101 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# MisterFritz — Local Canary Deployment Simulation
+#
+# Does NOT require a Discord token or Ollama. mock_fritz.py generates
+# synthetic metrics so the entire DevOps pipeline can be observed locally.
+#
+# Quick start:
+#   cd local-sim
+#   make up            # stable only (100% traffic)
+#   make deploy-canary # introduce canary at 10%
+#   make promote       # shift to 100% canary
+#   make chaos-pod     # kill canary; watch auto-recovery in Grafana
+#   make rollback      # revert to stable
+#   make down          # tear everything down
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-fritz-common: &fritz-common
+  build:
+    context: ..
+    dockerfile: local-sim/Dockerfile.mock
+  restart: unless-stopped
+
+services:
+  # ── Stable instance (blue) ──────────────────────────────────────────────
+  fritz-stable:
+    <<: *fritz-common
+    container_name: fritz-stable
+    environment:
+      FRITZ_VERSION: "stable"
+      FRITZ_ERROR_RATE: "${STABLE_ERROR_RATE:-0.02}"
+      FRITZ_LATENCY_BASE: "${STABLE_LATENCY:-1.5}"
+      FRITZ_MSG_INTERVAL: "0.8"
+      METRICS_PORT: "8000"
+    ports:
+      - "8001:8000"    # direct access: http://localhost:8001/health
+    profiles: ["stable", "canary", "full"]
+
+  # ── Canary instance (green) ─────────────────────────────────────────────
+  fritz-canary:
+    <<: *fritz-common
+    container_name: fritz-canary
+    environment:
+      FRITZ_VERSION: "canary"
+      FRITZ_ERROR_RATE: "${CANARY_ERROR_RATE:-0.02}"
+      FRITZ_LATENCY_BASE: "${CANARY_LATENCY:-1.5}"
+      FRITZ_MSG_INTERVAL: "0.8"
+      METRICS_PORT: "8000"
+    ports:
+      - "8002:8000"    # direct access: http://localhost:8002/health
+    profiles: ["canary", "full"]
+
+  # ── nginx load balancer — distributes traffic by weight ─────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: fritz-nginx
+    environment:
+      STABLE_WEIGHT: "${STABLE_WEIGHT:-10}"
+      CANARY_WEIGHT: "${CANARY_WEIGHT:-0}"
+    volumes:
+      - ./nginx/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+    ports:
+      - "8080:80"      # load-balanced endpoint: http://localhost:8080
+    depends_on:
+      - fritz-stable
+    profiles: ["stable", "canary", "full"]
+    restart: unless-stopped
+
+  # ── Prometheus — scrapes both stable and canary directly ─────────────────
+  prometheus:
+    image: prom/prometheus:v2.53.4
+    container_name: fritz-prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    profiles: ["stable", "canary", "full"]
+    restart: unless-stopped
+
+  # ── Grafana — pre-provisioned dashboard ──────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: fritz-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "admin"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ../infra/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    profiles: ["stable", "canary", "full"]
+    restart: unless-stopped
+
+volumes:
+  grafana_data:

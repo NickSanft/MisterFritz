@@ -1,0 +1,38 @@
+# Canary traffic split — weights controlled by STABLE_WEIGHT / CANARY_WEIGHT env vars.
+# nginx processes this template with envsubst on container startup.
+# Defaults: 100% stable, 0% canary (canary not running yet).
+
+upstream fritz_backend {
+    server fritz-stable:8000  weight=${STABLE_WEIGHT};
+    server fritz-canary:8000  weight=${CANARY_WEIGHT};
+    keepalive 4;
+}
+
+server {
+    listen 80;
+    server_name _;
+
+    # Aggregate /health endpoint — checks both upstreams
+    location /health {
+        proxy_pass         http://fritz_backend;
+        proxy_http_version 1.1;
+        proxy_set_header   Connection "";
+        proxy_read_timeout 5s;
+    }
+
+    # Aggregate /metrics — Prometheus will scrape stable & canary directly;
+    # this endpoint is for quick manual inspection via the proxy.
+    location /metrics {
+        proxy_pass         http://fritz_backend;
+        proxy_http_version 1.1;
+        proxy_set_header   Connection "";
+        proxy_read_timeout 5s;
+    }
+
+    # Root info page
+    location / {
+        proxy_pass         http://fritz_backend;
+        proxy_http_version 1.1;
+        proxy_set_header   Connection "";
+    }
+}
