@@ -280,3 +280,4 @@ zipp==3.23.0
 watchdog
 speechrecognition
 pydub
+prometheus-client>=0.20.0
