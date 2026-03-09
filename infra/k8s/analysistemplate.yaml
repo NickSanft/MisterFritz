@@ -1,0 +1,32 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: error-rate-check
+  namespace: misterfritz
+spec:
+  args:
+    - name: service-name
+  metrics:
+    - name: error-rate
+      interval: 30s
+      failureLimit: 2
+      successCondition: result[0] < 0.05      # abort if error rate > 5 %
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring.svc.cluster.local:9090
+          query: |
+            sum(rate(misterfritz_errors_total[1m]))
+            /
+            (sum(rate(misterfritz_discord_messages_total[1m])) + sum(rate(misterfritz_errors_total[1m])))
+
+    - name: p99-latency
+      interval: 30s
+      failureLimit: 2
+      successCondition: result[0] < 10.0      # abort if P99 latency > 10 s
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring.svc.cluster.local:9090
+          query: |
+            histogram_quantile(0.99,
+              rate(misterfritz_request_duration_seconds_bucket{operation="ask_stuff"}[1m])
+            )

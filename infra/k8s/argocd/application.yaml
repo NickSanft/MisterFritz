@@ -1,0 +1,27 @@
+# ArgoCD Application — points at this Git repo.
+# Install ArgoCD: https://argo-cd.readthedocs.io/en/stable/getting_started/
+#   kubectl create namespace argocd
+#   kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: misterfritz
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/OWNER/MisterFritz.git   # replace OWNER
+    targetRevision: HEAD
+    path: infra/k8s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: misterfritz
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true

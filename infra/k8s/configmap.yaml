@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: misterfritz-config
+  namespace: misterfritz
+data:
+  # Point at a host-running Ollama; on Linux add --add-host=host.docker.internal:host-gateway
+  OLLAMA_HOST: "http://host.docker.internal:11434"
+  THINKING_OLLAMA_MODEL: "gpt-oss"
+  FAST_OLLAMA_MODEL: "llama3.2"
+  EMBEDDING_MODEL: "mxbai-embed-large"
+  VISION_MODEL: "llava"
+  DOC_STORAGE_DESCRIPTION: "anything you don't know about."
+  DOC_FOLDER: "/app/input"
+  CHROMA_DB_PATH: "/app/chroma_store"
+  CHAT_DB_NAME: "/app/chat_history.db"
+  METRICS_PORT: "8000"
+  LOG_FORMAT: "json"
+  LOG_LEVEL: "INFO"
+  # FFmpeg is installed via apt-get in the Dockerfile
+  FFMPEG_PATH: "ffmpeg"
+  FFPROBE_PATH: "ffprobe"

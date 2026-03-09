@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: misterfritz
+  namespace: misterfritz
+  labels:
+    app: misterfritz
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8000"
+spec:
+  selector:
+    app: misterfritz
+  ports:
+    - name: metrics
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+  type: ClusterIP

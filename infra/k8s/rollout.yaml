@@ -1,0 +1,82 @@
+# Argo Rollouts canary strategy.
+# Install Argo Rollouts: https://argo-rollouts.readthedocs.io/en/stable/installation/
+#   kubectl create namespace argo-rollouts
+#   kubectl apply -n argo-rollouts -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: misterfritz
+  namespace: misterfritz
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: misterfritz
+  template:
+    metadata:
+      labels:
+        app: misterfritz
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: misterfritz
+          image: ghcr.io/OWNER/misterfritz:latest
+          imagePullPolicy: Always
+          ports:
+            - name: metrics
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: misterfritz-config
+            - secretRef:
+                name: misterfritz-secrets
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+  strategy:
+    canary:
+      # Traffic steps: 10% → pause for analysis → 50% → pause → 100%
+      steps:
+        - setWeight: 10
+        - analysis:
+            templates:
+              - templateName: error-rate-check
+            args:
+              - name: service-name
+                value: misterfritz
+        - pause:
+            duration: 2m
+        - setWeight: 50
+        - analysis:
+            templates:
+              - templateName: error-rate-check
+            args:
+              - name: service-name
+                value: misterfritz
+        - pause:
+            duration: 2m
+        - setWeight: 100
+      canaryService: misterfritz-canary
+      stableService: misterfritz-stable
+      trafficRouting:
+        nginx:
+          stableIngress: misterfritz-ingress
