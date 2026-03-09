@@ -1,6 +1,6 @@
 import unittest
 
-from deck_of_cards_integration import (
+from cards import (
     Card, Deck, draw_cards, get_remaining_card_number, reload_deck,
     SUITS, RANKS, SUCCESS_RANKS, USER_DECKS,
 )

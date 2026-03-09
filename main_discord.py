@@ -6,16 +6,13 @@ import uuid
 
 import discord
 import speech_recognition as sr
-from discord import app_commands
 from discord.ext import commands
 from pydub import AudioSegment
 
-from deck_of_cards_integration import draw_cards, get_remaining_card_number, reload_deck
-from document_engine import query_documents
-from fritz_utils import MessageSource, DISCORD_BOT_TOKEN, FFMPEG_PATH, FFPROBE_PATH, ROOT_USER, validate_config
-from image_generator import generate_image
+from bot_commands import FritzCommands
+from fritz_utils import DISCORD_BOT_TOKEN, FFMPEG_PATH, FFPROBE_PATH, ROOT_USER, MessageSource, validate_config
 from mister_fritz import ask_stuff
-from observability import init_logging, METRICS, get_health_snapshot, format_health_text, start_metrics_server
+from observability import METRICS, init_logging, start_metrics_server
 from tts import TTSEngine
 
 _recognizer = sr.Recognizer()
@@ -28,21 +25,15 @@ AudioSegment.ffmpeg = FFMPEG_PATH
 AudioSegment.ffprobe = FFPROBE_PATH
 
 if not os.path.exists(FFMPEG_PATH):
-    logger.error("ffmpeg.exe not found at %s", FFMPEG_PATH)
+    logger.error("ffmpeg not found at %s", FFMPEG_PATH)
 if not os.path.exists(FFPROBE_PATH):
-    logger.error("ffprobe.exe not found at %s - pydub needs this to read OGG files", FFPROBE_PATH)
+    logger.error("ffprobe not found at %s - pydub needs this to read OGG files", FFPROBE_PATH)
 
 
 class StreamingMessageHandler:
     """Manages incremental Discord message updates with rate limiting."""
 
     def __init__(self, message: discord.Message, loop: asyncio.AbstractEventLoop, min_update_interval: float = 1.5):
-        """
-        Args:
-            message: The Discord message to edit with streaming content
-            loop: The asyncio event loop for scheduling edits
-            min_update_interval: Minimum seconds between edits (default 1.5 for rate limiting)
-        """
         self.message = message
         self.loop = loop
         self.min_update_interval = min_update_interval
@@ -55,8 +46,6 @@ class StreamingMessageHandler:
     async def update_text(self, new_text: str):
         """Update the message with new text, respecting rate limits."""
         self.pending_text = new_text
-
-        # If we're not currently updating, schedule an update
         if not self.is_updating:
             self.is_updating = True
             await self._perform_update()
@@ -64,236 +53,35 @@ class StreamingMessageHandler:
     async def _perform_update(self):
         """Perform the actual message edit with rate limiting."""
         while self.is_updating:
-            # Check if we have pending text to update
             if self.pending_text and self.pending_text != self.current_text:
-                # Check if enough time has passed since last update
                 time_since_last = time.time() - self.last_update_time
                 if time_since_last < self.min_update_interval:
-                    # Wait for the remaining time
                     await asyncio.sleep(self.min_update_interval - time_since_last)
-
-                # Perform the edit
                 try:
-                    text_to_send = self.pending_text[:2000]  # Discord limit
-                    await self.message.edit(content=text_to_send)
+                    await self.message.edit(content=self.pending_text[:2000])
                     self.current_text = self.pending_text
                     self.last_update_time = time.time()
                     self.pending_text = None
                 except discord.errors.HTTPException as e:
                     logger.warning("Error editing message: %s", e)
-                    await asyncio.sleep(2)  # Back off on error
+                    await asyncio.sleep(2)
             else:
-                # No pending updates, stop the update loop
                 self.is_updating = False
 
     async def final_update(self, final_text: str, files: list = None):
         """Perform the final update with complete text and optional file attachments."""
-        # Wait for any pending updates to complete
         while self.is_updating:
             await asyncio.sleep(0.1)
-
         try:
-            # If text is too long, we can't attach files to edits, so send files separately
-            if len(final_text) > 2000:
-                await self.message.edit(content=final_text[:2000])
-                if files:
-                    await self.message.channel.send(files=files)
-            else:
-                await self.message.edit(content=final_text)
-                # Send files separately since we can't attach to edits
-                if files:
-                    await self.message.channel.send(files=files)
+            await self.message.edit(content=final_text[:2000])
+            if files:
+                await self.message.channel.send(files=files)
         except discord.errors.HTTPException as e:
             logger.warning("Error in final update: %s", e)
 
-command_prefix = "$"
-intents = discord.Intents.default()
-intents.message_content = True
-client = commands.Bot(command_prefix=command_prefix, intents=intents)
 
-sayer = TTSEngine()
-
-# Per-user workspace directories for file operations
-user_workspaces: dict[str, str] = {}
-
-
-@client.event
-async def on_ready():
-    logger.info("Logged in as %s", client.user)
-    try:
-        # This registers the slash commands with Discord
-        synced = await client.tree.sync()
-        print(f"Synced {len(synced)} command(s)")
-    except Exception as e:
-        print(f"Failed to sync commands: {e}")
-
-@client.tree.command(name="draw", description="Draw cards from a deck!")
-@app_commands.describe(num_cards="How many cards to draw")
-async def draw_slash(interaction: discord.Interaction, num_cards: int):
-    await interaction.response.defer(thinking=True)
-    await interaction.followup.send(content=draw_cards(num_cards, interaction.user.name))
-
-@client.tree.command(name="cards_remaining", description="Check cards remaining in the deck")
-async def cards_remaining_slash(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=True)
-    await interaction.followup.send(content=get_remaining_card_number(interaction.user.name))
-
-@client.tree.command(name="reload_deck", description="Reloads the deck (use if you goof up)")
-async def reload_deck_slash(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=True)
-    await interaction.followup.send(content=reload_deck(interaction.user.name))
-
-
-@client.tree.command(name="hello", description="Say hello to the bot")
-async def hello_slash(interaction: discord.Interaction):
-    author = interaction.user.name
-    METRICS.increment("discord_commands.hello")
-    await interaction.response.send_message(f"Hello, {author}!")
-
-
-@client.tree.command(name="voice", description="Generate audio from text")
-@app_commands.describe(message="The text you want the bot to say")
-async def voice_slash(interaction: discord.Interaction, message: str):
-    # Defer because TTS generation might take > 3 seconds
-    await interaction.response.defer(thinking=True)
-
-    author = interaction.user.name
-    METRICS.increment("discord_commands.voice")
-
-    # Generate the text response first
-    original_response = ask_stuff(message, MessageSource.DISCORD_VOICE, author)["text"]
-    # Generate the audio file
-    output_file = await sayer.generate_speech(original_response)
-
-    try:
-        if interaction.guild and interaction.guild.voice_client:
-            # Play in voice channel
-            interaction.guild.voice_client.play(discord.FFmpegPCMAudio(executable=FFMPEG_PATH, source=output_file))
-            await interaction.followup.send(f"Playing voice for: '{message}'")
-        else:
-            # Upload as file
-            files = [discord.File(output_file)]
-            await interaction.followup.send("You are not connected to a voice channel, uploading as a file...",
-                                            files=files)
-    except AttributeError as e:
-        METRICS.record_error("discord_commands.voice", e)
-        await interaction.followup.send("Something crazy happened!")
-
-
-@client.tree.command(name="gen", description="Generate an image based on a prompt")
-@app_commands.describe(prompt="The image description")
-async def gen_slash(interaction: discord.Interaction, prompt: str):
-    await interaction.response.defer(thinking=True)
-    METRICS.increment("discord_commands.gen")
-    logger.info("Image generation request: %s", prompt)
-
-    try:
-        output_file = generate_image(prompt)
-        file = discord.File(output_file)
-        await interaction.followup.send(content="Here is your file!", file=file)
-    except Exception as e:
-        METRICS.record_error("discord_commands.gen", e)
-        await interaction.followup.send(f"Failed to generate image: {e}")
-
-
-@client.tree.command(name="join", description="Join the voice channel you are currently in")
-async def join_slash(interaction: discord.Interaction):
-    try:
-        METRICS.increment("discord_commands.join")
-        if interaction.user.voice and interaction.user.voice.channel:
-            channel = interaction.user.voice.channel
-            await channel.connect()
-            await interaction.response.send_message(f"Joined {channel.name}!")
-        else:
-            await interaction.response.send_message("You are not connected to a voice channel, buddy!", ephemeral=True)
-    except Exception as e:
-        METRICS.record_error("discord_commands.join", e)
-        # Using followup in case we deferred (though we didn't here, safe to use response if not deferred)
-        if not interaction.response.is_done():
-            await interaction.response.send_message("I couldn't join the channel.")
-
-
-@client.tree.command(name="lore", description="Query the document engine for lore")
-@app_commands.describe(query="The question about the lore")
-async def lore_slash(interaction: discord.Interaction, query: str):
-    await interaction.response.defer(thinking=True)
-    METRICS.increment("discord_commands.lore")
-    logger.info("Lore request: %s", query)
-
-    # We deferred, so we use followup to send the result
-    original_response = query_documents(query)
-    resp_len = len(original_response)
-    author = interaction.user.name
-
-    if resp_len > 2000:
-        response = "The answer was over 2000 ({}), so you're getting multiple messages {} \r\n".format(resp_len,
-                                                                                                       author) + original_response
-        responses = split_into_chunks(response)
-        for i, chunk in enumerate(responses):
-            if i == 0:
-                await interaction.followup.send(chunk)
-            else:
-                await interaction.channel.send(chunk)
-    else:
-        await interaction.followup.send(original_response)
-
-
-@client.tree.command(name="leave", description="Leave the current voice channel")
-async def leave_slash(interaction: discord.Interaction):
-    try:
-        METRICS.increment("discord_commands.leave")
-        if interaction.guild.voice_client:
-            await interaction.guild.voice_client.disconnect()
-            await interaction.response.send_message("Disconnected.")
-        else:
-            await interaction.response.send_message("I am not connected to a voice channel, buddy!", ephemeral=True)
-    except Exception as e:
-        METRICS.record_error("discord_commands.leave", e)
-        await interaction.response.send_message("Error attempting to leave.")
-
-
-@client.tree.command(name="health", description="Check the system health metrics")
-async def health_slash(interaction: discord.Interaction):
-    METRICS.increment("discord_commands.health")
-    snapshot = get_health_snapshot()
-    await interaction.response.send_message(format_health_text(snapshot))
-
-
-@client.tree.command(name="workspace", description="Set or view the workspace directory for file operations")
-@app_commands.describe(path="The directory path to use as workspace (leave empty to see current)")
-async def workspace_slash(interaction: discord.Interaction, path: str = None):
-    METRICS.increment("discord_commands.workspace")
-    author = interaction.user.name
-
-    if author != ROOT_USER:
-        await interaction.response.send_message(
-            "You do not have permission to use file operations.", ephemeral=True
-        )
-        return
-
-    if path is None:
-        current = user_workspaces.get(author)
-        if current:
-            await interaction.response.send_message(f"Current workspace: `{current}`", ephemeral=True)
-        else:
-            await interaction.response.send_message(
-                "No workspace set. Use `/workspace <path>` to set a directory for file operations.",
-                ephemeral=True
-            )
-        return
-
-    expanded = os.path.abspath(os.path.expanduser(path))
-    if not os.path.isdir(expanded):
-        await interaction.response.send_message(
-            f"Directory does not exist: `{expanded}`", ephemeral=True
-        )
-        return
-
-    user_workspaces[author] = expanded
-    await interaction.response.send_message(
-        f"Workspace set to: `{expanded}`\nFile tools (read, write, edit, search, list) are now active in conversations.",
-        ephemeral=True
-    )
+def split_into_chunks(s: str, chunk_size: int = 2000) -> list[str]:
+    return [s[i:i + chunk_size] for i in range(0, len(s), chunk_size)]
 
 
 def _cleanup_temp_files(paths: list[str], request_id: str) -> None:
@@ -308,6 +96,26 @@ def _cleanup_temp_files(paths: list[str], request_id: str) -> None:
             logger.warning("Error cleaning up %s: %s", path, e)
 
 
+command_prefix = "$"
+intents = discord.Intents.default()
+intents.message_content = True
+client = commands.Bot(command_prefix=command_prefix, intents=intents)
+
+sayer = TTSEngine()
+user_workspaces: dict[str, str] = {}
+
+
+@client.event
+async def on_ready():
+    await client.add_cog(FritzCommands(client, sayer, user_workspaces))
+    logger.info("Logged in as %s", client.user)
+    try:
+        synced = await client.tree.sync()
+        print(f"Synced {len(synced)} command(s)")
+    except Exception as e:
+        print(f"Failed to sync commands: {e}")
+
+
 @client.event
 async def on_message(ctx):
     author = ctx.author.name
@@ -315,7 +123,6 @@ async def on_message(ctx):
     message_clean = ctx.clean_content
     if ctx.author == client.user:
         return
-    # Check prefix commands in case any are added later
     elif ctx.content.startswith(command_prefix):
         await client.process_commands(ctx)
         return
@@ -326,16 +133,13 @@ async def on_message(ctx):
     request_id = str(uuid.uuid4())[:8]
     logger.info("Incoming message %s from %s", request_id, author)
 
-    # Get the event loop
     loop = asyncio.get_running_loop()
 
-    # Download and save any image attachments
     user_image_paths = []
     source = MessageSource.DISCORD_TEXT
     if ctx.attachments:
         logger.info("Processing %d attachment(s) for %s", len(ctx.attachments), request_id)
         for attachment in ctx.attachments:
-            # Check if it's an image
             if attachment.content_type and attachment.content_type.startswith('image/'):
                 source = MessageSource.DISCORD_TEXT_AND_IMAGE
                 try:
@@ -355,38 +159,21 @@ async def on_message(ctx):
                 voice_text = await speech_to_text(file_path)
                 if not message_clean:
                     message_clean = voice_text
-                else:
-                    logger.debug("Voice text type: %s", type(voice_text))
                 logger.info("Voice text: %s", voice_text)
 
-    # Send initial status message immediately
     if user_image_paths:
         status_msg = await ctx.channel.send(f"✍️ *Analyzing {len(user_image_paths)} image(s)...*")
     else:
         status_msg = await ctx.channel.send("✍️ *Mister Fritz is thinking...*")
 
-    # Create streaming handler for updating the message
     streaming_handler = StreamingMessageHandler(status_msg, loop)
 
-    # Create a streaming callback that updates Discord message from the worker thread
     def streaming_callback(partial_text: str):
-        """Update Discord message with partial text from the worker thread."""
-        # Schedule the coroutine in the event loop from the worker thread
-        asyncio.run_coroutine_threadsafe(
-            streaming_handler.update_text(partial_text),
-            loop
-        )
+        asyncio.run_coroutine_threadsafe(streaming_handler.update_text(partial_text), loop)
 
-    # Create a progress callback that sends separate messages for tool status
     def progress_callback(message: str):
-        """Send progress updates to Discord from the worker thread."""
-        # Schedule the coroutine in the event loop from the worker thread
-        asyncio.run_coroutine_threadsafe(
-            ctx.channel.send(message),
-            loop
-        )
+        asyncio.run_coroutine_threadsafe(ctx.channel.send(message), loop)
 
-    # Run the blocking ask_stuff function in a thread with streaming enabled
     try:
         start_time = time.time()
         response_data = await loop.run_in_executor(
@@ -415,40 +202,26 @@ async def on_message(ctx):
         original_response = response_data["text"]
         image_paths = response_data.get("image_paths", [])
 
-    # Prepare any image files for upload
     files = []
-    if image_paths:
-        for image_path in image_paths:
-            try:
-                files.append(discord.File(image_path))
-            except Exception as e:
-                METRICS.record_error("image_load", e)
-                logger.warning("Error loading image file %s: %s", image_path, e)
+    for image_path in image_paths:
+        try:
+            files.append(discord.File(image_path))
+        except Exception as e:
+            METRICS.record_error("image_load", e)
+            logger.warning("Error loading image file %s: %s", image_path, e)
 
-    resp_len = len(original_response)
-
-    if resp_len > 2000:
-        # For long responses, split into chunks
-        responses = split_into_chunks(original_response)
-        for i, chunk in enumerate(responses):
-            # Attach files to the first message only
+    if len(original_response) > 2000:
+        chunks = split_into_chunks(original_response)
+        for i, chunk in enumerate(chunks):
             chunk_files = files if i == 0 else []
             if i == 0:
-                # Edit the streaming message with the first chunk
                 await streaming_handler.final_update(chunk, chunk_files)
             else:
-                # Send additional chunks as new messages
                 await ctx.channel.send(chunk, files=chunk_files)
     else:
-        # Use the streaming handler's final update for the complete response
         await streaming_handler.final_update(original_response, files)
 
-    # Clean up temporary user images after processing
     _cleanup_temp_files(user_image_paths, request_id)
-
-
-def split_into_chunks(s, chunk_size=2000):
-    return [s[i:i + chunk_size] for i in range(0, len(s), chunk_size)]
 
 
 async def speech_to_text(file_path: str):

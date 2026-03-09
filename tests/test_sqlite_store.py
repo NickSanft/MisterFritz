@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 
-from sqlite_store import SQLiteStore
+from storage import SQLiteStore
 
 
 class TestSQLiteStoreCRUD(unittest.TestCase):

@@ -33,14 +33,13 @@ _ensure_mock("document_engine")
 # Import the functions we want to test AFTER ensuring mocks are in place.
 # (chroma_store, langchain_ollama, and langchain.agents are real packages in
 # the venv; they don't connect to Ollama at import / __init__ time.)
-from mister_fritz import (  # noqa: E402  (import after sys.modules setup)
+from agent_tools import (  # noqa: E402  (import after sys.modules setup)
     get_current_time_internal,
-    format_prompt,
-    get_source_info,
     scrape_web,
     search_web,
     roll_dice,
 )
+from mister_fritz import format_prompt, get_source_info  # noqa: E402
 from fritz_utils import MessageSource  # noqa: E402
 
 
@@ -99,24 +98,24 @@ class TestScrapeWebTool(unittest.TestCase):
 
     def test_extracts_visible_text(self):
         html = "<html><body><p>Hello world</p></body></html>"
-        with patch("mister_fritz.requests.get", return_value=self._mock_response(html)):
+        with patch("agent_tools.requests.get", return_value=self._mock_response(html)):
             result = scrape_web.invoke({"url": "http://example.com"})
         self.assertIn("Hello world", result)
 
     def test_strips_script_tags(self):
         html = "<html><body><script>alert('xss')</script><p>Clean</p></body></html>"
-        with patch("mister_fritz.requests.get", return_value=self._mock_response(html)):
+        with patch("agent_tools.requests.get", return_value=self._mock_response(html)):
             result = scrape_web.invoke({"url": "http://example.com"})
         self.assertNotIn("alert", result)
         self.assertIn("Clean", result)
 
     def test_returns_error_string_on_exception(self):
-        with patch("mister_fritz.requests.get", side_effect=ConnectionError("failed")):
+        with patch("agent_tools.requests.get", side_effect=ConnectionError("failed")):
             result = scrape_web.invoke({"url": "http://bad-host.invalid"})
         self.assertIn("Error", result)
 
     def test_passes_timeout_to_requests(self):
-        with patch("mister_fritz.requests.get",
+        with patch("agent_tools.requests.get",
                    return_value=self._mock_response("<p>ok</p>")) as mock_get:
             scrape_web.invoke({"url": "http://example.com"})
         _, kwargs = mock_get.call_args
@@ -127,14 +126,14 @@ class TestScrapeWebTool(unittest.TestCase):
 class TestSearchWebTool(unittest.TestCase):
     def test_returns_list_of_results(self):
         fake_results = [{"title": "Test", "body": "Test body", "href": "http://test.com"}]
-        with patch("mister_fritz.DDGS") as mock_ddgs:
+        with patch("agent_tools.DDGS") as mock_ddgs:
             mock_ddgs.return_value.text.return_value = fake_results
             result = search_web.invoke({"text_to_search": "python testing"})
         self.assertIsInstance(result, list)
         self.assertEqual(len(result), 1)
 
     def test_returns_empty_list_on_no_results(self):
-        with patch("mister_fritz.DDGS") as mock_ddgs:
+        with patch("agent_tools.DDGS") as mock_ddgs:
             mock_ddgs.return_value.text.return_value = []
             result = search_web.invoke({"text_to_search": "xyzzy_no_results"})
         self.assertEqual(result, [])
