@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 import random
@@ -9,9 +10,10 @@ from typing import Literal, TypedDict, Annotated
 import requests
 from bs4 import BeautifulSoup
 
+import ollama as _ollama_client
 import pytz
 from ddgs import DDGS
-from langchain_core.messages import HumanMessage, RemoveMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool, BaseTool
 from langchain_ollama import ChatOllama
@@ -65,6 +67,7 @@ def get_conversation_tools_description(include_file_tools=False):
 
 def _record_tool(name: str) -> None:
     METRICS.increment(f"tool.{name}")
+
 
 # ===== UTILITY FUNCTIONS =====
 def get_system_description(tools: dict[str, tuple[BaseTool, str]]):
@@ -236,7 +239,6 @@ def generate_image(prompt: str):
     return image_generator.generate_image(prompt)
 
 
-
 @tool(parse_docstring=True)
 def search_documents(query: str):
     """
@@ -276,9 +278,6 @@ def analyze_image(config: RunnableConfig, question: str = "What is in this image
     Returns:
         string: A description of what's in the image(s).
     """
-    import base64
-    import ollama
-
     # Get user images from config
     metadata = config.get("metadata", {})
     user_images = metadata.get("user_image_paths", [])
@@ -293,8 +292,8 @@ def analyze_image(config: RunnableConfig, question: str = "What is in this image
         encoded_images = []
         for img_path in user_images:
             try:
-                with open(img_path, 'rb') as image_file:
-                    encoded_images.append(base64.b64encode(image_file.read()).decode('utf-8'))
+                with open(img_path, "rb") as image_file:
+                    encoded_images.append(base64.b64encode(image_file.read()).decode("utf-8"))
             except Exception as e:
                 METRICS.record_error("analyze_image.read", e)
                 logger.warning("Error reading image %s: %s", img_path, e)
@@ -304,7 +303,7 @@ def analyze_image(config: RunnableConfig, question: str = "What is in this image
 
         # Call vision model
         logger.info("Analyzing %d image(s) with %s", len(encoded_images), VISION_MODEL)
-        response = ollama.chat(
+        response = _ollama_client.chat(
             model=VISION_MODEL,
             messages=[{
                 'role': 'user',
@@ -404,18 +403,6 @@ def ask_stuff(base_prompt: str, source: MessageSource, user_id: str, progress_ca
     }
 
 
-def print_stream(stream):
-    """Process and print streamed messages."""
-    message = ""
-    for s in stream:
-        message = s["messages"][-1]
-        if isinstance(message, tuple):
-            logger.debug("Stream message tuple: %s", message)
-        else:
-            message.pretty_print()
-    return message.content
-
-
 # ===== SETUP & INITIALIZATION =====
 conversation_tools = [tool_info[0] for tool_info in get_conversation_tools_description().values()]
 logger.debug("Conversation tools: %s", conversation_tools)
@@ -433,8 +420,6 @@ conversation_react_agent = create_agent(ollama_instance, tools=conversation_tool
 
 
 def should_continue(state: EnhancedState) -> Literal["summarize_conversation", "__end__"]:
-    #messages = state["messages"]
-    #print(f"Messages: {messages}")
     """Decide whether to summarize or end the conversation."""
     return SUMMARIZE_CONVERSATION_NODE if len(state["messages"]) > 15 else END
 
@@ -540,8 +525,6 @@ def conversation(state: EnhancedState, config: RunnableConfig):
             # Stream partial text content if available and streaming callback exists
             # Only stream AI messages (not system, user, or tool messages)
             elif hasattr(latest, 'content') and isinstance(latest.content, str) and streaming_callback:
-                # Check if this is an AI message by checking the type
-                from langchain_core.messages import AIMessage
                 if isinstance(latest, AIMessage):
                     new_text = latest.content
                     if new_text and new_text != accumulated_text:

@@ -18,7 +18,7 @@ from mister_fritz import ask_stuff
 from observability import init_logging, METRICS, get_health_snapshot, format_health_text, start_metrics_server
 from tts import TTSEngine
 
-r = sr.Recognizer()
+_recognizer = sr.Recognizer()
 
 init_logging()
 logger = logging.getLogger(__name__)
@@ -31,7 +31,6 @@ if not os.path.exists(FFMPEG_PATH):
     logger.error("ffmpeg.exe not found at %s", FFMPEG_PATH)
 if not os.path.exists(FFPROBE_PATH):
     logger.error("ffprobe.exe not found at %s - pydub needs this to read OGG files", FFPROBE_PATH)
-
 
 
 class StreamingMessageHandler:
@@ -112,7 +111,6 @@ intents = discord.Intents.default()
 intents.message_content = True
 client = commands.Bot(command_prefix=command_prefix, intents=intents)
 
-connection = None
 sayer = TTSEngine()
 
 # Per-user workspace directories for file operations
@@ -146,8 +144,6 @@ async def reload_deck_slash(interaction: discord.Interaction):
     await interaction.followup.send(content=reload_deck(interaction.user.name))
 
 
-# --- CONVERTED COMMANDS ---
-
 @client.tree.command(name="hello", description="Say hello to the bot")
 async def hello_slash(interaction: discord.Interaction):
     author = interaction.user.name
@@ -172,7 +168,7 @@ async def voice_slash(interaction: discord.Interaction, message: str):
     try:
         if interaction.guild and interaction.guild.voice_client:
             # Play in voice channel
-            interaction.guild.voice_client.play(discord.FFmpegPCMAudio(executable="./ffmpeg.exe", source=output_file))
+            interaction.guild.voice_client.play(discord.FFmpegPCMAudio(executable=FFMPEG_PATH, source=output_file))
             await interaction.followup.send(f"Playing voice for: '{message}'")
         else:
             # Upload as file
@@ -300,18 +296,30 @@ async def workspace_slash(interaction: discord.Interaction, path: str = None):
     )
 
 
+def _cleanup_temp_files(paths: list[str], request_id: str) -> None:
+    """Remove temporary files created during message processing."""
+    for path in paths:
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                logger.info("Cleaned up %s for %s", path, request_id)
+        except Exception as e:
+            METRICS.record_error("cleanup_error", e)
+            logger.warning("Error cleaning up %s: %s", path, e)
+
+
 @client.event
 async def on_message(ctx):
     author = ctx.author.name
-    channel_type = ctx.channel
+    channel = ctx.channel
     message_clean = ctx.clean_content
     if ctx.author == client.user:
         return
-    # We still check process_commands just in case any old prefix commands exist or are added later
+    # Check prefix commands in case any are added later
     elif ctx.content.startswith(command_prefix):
         await client.process_commands(ctx)
         return
-    elif not isinstance(channel_type, discord.DMChannel) and not client.user.mentioned_in(ctx):
+    elif not isinstance(channel, discord.DMChannel) and not client.user.mentioned_in(ctx):
         return
 
     METRICS.increment("discord_messages")
@@ -331,13 +339,8 @@ async def on_message(ctx):
             if attachment.content_type and attachment.content_type.startswith('image/'):
                 source = MessageSource.DISCORD_TEXT_AND_IMAGE
                 try:
-                    # Create temp directory if it doesn't exist
-                    import os
-                    temp_dir = "temp_images"
-                    os.makedirs(temp_dir, exist_ok=True)
-
-                    # Save the image
-                    file_path = os.path.join(temp_dir, f"{author}_{attachment.id}_{attachment.filename}")
+                    os.makedirs("temp_images", exist_ok=True)
+                    file_path = os.path.join("temp_images", f"{author}_{attachment.id}_{attachment.filename}")
                     await attachment.save(file_path)
                     user_image_paths.append(file_path)
                     logger.info("Saved image %s for %s", file_path, request_id)
@@ -345,13 +348,8 @@ async def on_message(ctx):
                     METRICS.record_error("attachment_save", e)
                     logger.warning("Error saving image attachment: %s", e)
             elif attachment.content_type and attachment.content_type.startswith('audio/'):
-                # Create temp directory if it doesn't exist
-                import os
-                temp_dir = "temp_audio"
-                os.makedirs(temp_dir, exist_ok=True)
-
-                # Save the image
-                file_path = os.path.join(temp_dir, f"{author}_{attachment.id}_{attachment.filename}")
+                os.makedirs("temp_audio", exist_ok=True)
+                file_path = os.path.join("temp_audio", f"{author}_{attachment.id}_{attachment.filename}")
                 await attachment.save(file_path)
                 logger.info("Saved audio %s for %s", file_path, request_id)
                 voice_text = await speech_to_text(file_path)
@@ -393,23 +391,19 @@ async def on_message(ctx):
         start_time = time.time()
         response_data = await loop.run_in_executor(
             None,
-            lambda: ask_stuff(message_clean, source, author, None, streaming_callback, user_image_paths, user_workspaces.get(author) if author == ROOT_USER else None)
+            lambda: ask_stuff(
+                message_clean, source, author,
+                progress_callback, streaming_callback,
+                user_image_paths,
+                user_workspaces.get(author) if author == ROOT_USER else None,
+            )
         )
         METRICS.record_latency("ask_stuff", time.time() - start_time)
     except Exception as e:
         METRICS.record_error("ask_stuff", e)
         logger.exception("Error during ask_stuff for %s", request_id)
         await status_msg.edit(content=f"❌ An error occurred: {str(e)}")
-        # Clean up temporary images
-        for img_path in user_image_paths:
-            try:
-                import os
-                if os.path.exists(img_path):
-                    os.remove(img_path)
-                    logger.info("Cleaned up %s after error", img_path)
-            except Exception as cleanup_error:
-                METRICS.record_error("cleanup_error", cleanup_error)
-                logger.warning("Error cleaning up %s: %s", img_path, cleanup_error)
+        _cleanup_temp_files(user_image_paths, request_id)
         return
 
     logger.debug("Response data for %s: %s", request_id, response_data)
@@ -431,7 +425,6 @@ async def on_message(ctx):
                 METRICS.record_error("image_load", e)
                 logger.warning("Error loading image file %s: %s", image_path, e)
 
-    # --- THE EDIT LOGIC ---
     resp_len = len(original_response)
 
     if resp_len > 2000:
@@ -451,15 +444,7 @@ async def on_message(ctx):
         await streaming_handler.final_update(original_response, files)
 
     # Clean up temporary user images after processing
-    for img_path in user_image_paths:
-        try:
-            import os
-            if os.path.exists(img_path):
-                os.remove(img_path)
-                logger.info("Cleaned up %s for %s", img_path, request_id)
-        except Exception as cleanup_error:
-            METRICS.record_error("cleanup_error", cleanup_error)
-            logger.warning("Error cleaning up %s: %s", img_path, cleanup_error)
+    _cleanup_temp_files(user_image_paths, request_id)
 
 
 def split_into_chunks(s, chunk_size=2000):
@@ -473,9 +458,9 @@ async def speech_to_text(file_path: str):
     logger.info("Converted %s to %s", file_path, wav_file)
     voice_message = sr.AudioFile(wav_file)
     with voice_message as source:
-        audio = r.record(source)
+        audio = _recognizer.record(source)
     try:
-        return r.recognize_google(audio)
+        return _recognizer.recognize_google(audio)
     except Exception as e:
         METRICS.record_error("speech_to_text", e)
         logger.warning("Speech to text error: %s", e)
