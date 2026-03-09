@@ -588,5 +588,8 @@ app = workflow.compile(checkpointer=checkpointer, store=store)
 
 logger.debug("Conversation tools description: %s", get_conversation_tools_description())
 
-with open("mister_fritz_diagram.png", "wb") as binary_file:
-    binary_file.write(app.get_graph().draw_mermaid_png())
+try:
+    with open("mister_fritz_diagram.png", "wb") as binary_file:
+        binary_file.write(app.get_graph().draw_mermaid_png())
+except Exception as _diagram_err:
+    logger.debug("Could not write graph diagram (non-fatal): %s", _diagram_err)
