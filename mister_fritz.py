@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from contextlib import ExitStack
@@ -17,11 +18,13 @@ from agent_tools import (
     get_conversation_tools_description,
     get_current_time_internal,
 )
-from fritz_utils import CHAT_DB_NAME, MessageSource, ROOT_USER, THINKING_OLLAMA_MODEL
+from fritz_utils import CHAT_DB_NAME, FAST_OLLAMA_MODEL, MessageSource, ROOT_USER, THINKING_OLLAMA_MODEL
 from observability import METRICS, init_logging
 from storage import SQLiteStore
 
-CONVERSATION_NODE = "conversation"
+PLANNER_NODE = "planner"
+EXECUTOR_NODE = "executor"
+SYNTHESIZER_NODE = "synthesizer"
 SUMMARIZE_CONVERSATION_NODE = "summarize_conversation"
 
 init_logging()
@@ -32,6 +35,10 @@ class EnhancedState(TypedDict):
     messages: Annotated[list, add_messages]
     image_paths: list[str]       # generated images (output)
     user_image_paths: list[str]  # user-provided images (input)
+    original_request: str        # raw user message, captured by planner
+    plan: list[str]              # ordered steps; empty = simple mode
+    current_step: int            # index into plan
+    step_results: list[str]      # accumulated per-step results
 
 
 # ── Prompt helpers ────────────────────────────────────────────────────────────
@@ -72,11 +79,96 @@ def format_prompt(prompt: str, source: MessageSource, user_id: str, additional_i
     """
 
 
-# ── Graph nodes ───────────────────────────────────────────────────────────────
+# ── Routing ───────────────────────────────────────────────────────────────────
 
 def should_continue(state: EnhancedState) -> Literal["summarize_conversation", "__end__"]:
     """Decide whether to summarize or end the conversation."""
     return SUMMARIZE_CONVERSATION_NODE if len(state["messages"]) > 15 else END
+
+
+def route_executor(state: EnhancedState) -> Literal["executor", "synthesizer", "summarize_conversation", "__end__"]:
+    """
+    After executor runs, decide the next node:
+    - Plan mode, more steps remain  → executor (loop)
+    - Plan mode, all steps done     → synthesizer
+    - Simple mode                   → should_continue logic (inline)
+    """
+    plan = state.get("plan", [])
+    current_step = state.get("current_step", 0)
+
+    if plan:
+        if current_step < len(plan):
+            return EXECUTOR_NODE
+        else:
+            return SYNTHESIZER_NODE
+    else:
+        return SUMMARIZE_CONVERSATION_NODE if len(state["messages"]) > 15 else END
+
+
+# ── Graph nodes ───────────────────────────────────────────────────────────────
+
+def planner(state: EnhancedState, config: RunnableConfig):
+    """Inspect the latest user message and decide if multi-step planning is needed."""
+    messages = state["messages"]
+    latest_message = messages[-1].content if messages else ""
+    logger.debug("Planner evaluating message: %s", latest_message)
+
+    planner_prompt = [
+        (
+            "system",
+            (
+                "You are a planning assistant. Analyze the user's request and decide "
+                "whether it can be answered in a single step or requires multiple steps.\n"
+                "Respond ONLY with valid JSON, one of two forms:\n"
+                '  {"needs_planning": false}\n'
+                '  {"needs_planning": true, "steps": ["step 1", "step 2", ...]}\n'
+                "Use multi-step only when the request clearly requires sequential actions "
+                "(e.g., research then write a report, fetch data then analyse it). "
+                "Simple questions, chat, or single-tool lookups do NOT need planning. "
+                "Keep plans to 5 steps maximum."
+            ),
+        ),
+        ("user", latest_message),
+    ]
+
+    try:
+        response = fast_ollama_instance.invoke(planner_prompt)
+        raw = response.content.strip()
+        # Strip markdown code fences if present
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw)
+            raw = re.sub(r"\n?```$", "", raw)
+        # Extract the JSON object in case there's surrounding text
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if match:
+            raw = match.group()
+        parsed = json.loads(raw)
+        needs_planning = bool(parsed.get("needs_planning", False))
+        steps = parsed.get("steps", []) if needs_planning else []
+        steps = [str(s) for s in steps[:5]]  # cap at 5, ensure strings
+    except Exception as e:
+        logger.warning("Planner JSON parse failed (%s); falling back to simple mode", e)
+        needs_planning = False
+        steps = []
+
+    if needs_planning and len(steps) > 1:
+        logger.info("Planner created %d-step plan", len(steps))
+        for i, s in enumerate(steps):
+            logger.debug("  Step %d: %s", i + 1, s)
+        return {
+            "original_request": latest_message,
+            "plan": steps,
+            "current_step": 0,
+            "step_results": [],
+        }
+
+    logger.info("Planner chose simple mode")
+    return {
+        "original_request": latest_message,
+        "plan": [],
+        "current_step": 0,
+        "step_results": [],
+    }
 
 
 def summarize_conversation(state: EnhancedState, config: RunnableConfig):
@@ -99,15 +191,27 @@ def summarize_conversation(state: EnhancedState, config: RunnableConfig):
     return {"messages": delete_messages}
 
 
-def conversation(state: EnhancedState, config: RunnableConfig):
+def executor(state: EnhancedState, config: RunnableConfig):
+    """
+    Simple mode (plan=[]): behaves like the original conversation node —
+                           streams final response and adds to messages.
+    Plan mode  (plan!=[]):  builds a context-aware prompt for the current step,
+                           runs the ReAct agent, accumulates result into
+                           step_results, increments current_step.
+                           Does NOT update conversation messages.
+    """
     messages = state["messages"]
-    latest_message = messages[-1].content if messages else ""
-    logger.debug("Latest message: %s", latest_message)
+    plan = state.get("plan", [])
+    current_step = state.get("current_step", 0)
+    step_results = state.get("step_results", [])
+    original_request = state.get("original_request", "")
 
     metadata = config.get("metadata", {})
     workspace_root = metadata.get("workspace_root")
     user_id = metadata.get("user_id", "")
     include_file_tools = workspace_root is not None and user_id == ROOT_USER
+    progress_callback = metadata.get("progress_callback")
+    streaming_callback = metadata.get("streaming_callback")
 
     if include_file_tools:
         tools_desc = get_conversation_tools_description(include_file_tools=True)
@@ -117,11 +221,6 @@ def conversation(state: EnhancedState, config: RunnableConfig):
     else:
         system_prompt = CACHED_SYSTEM_PROMPT
         agent = conversation_react_agent
-
-    inputs = {"messages": [("system", system_prompt), ("user", latest_message)]}
-
-    progress_callback = metadata.get("progress_callback")
-    streaming_callback = metadata.get("streaming_callback")
 
     tool_messages = {
         "generate_image": "Generating an image, this may take a moment...",
@@ -139,6 +238,34 @@ def conversation(state: EnhancedState, config: RunnableConfig):
     }
     notified_tools: set = set()
 
+    is_plan_mode = bool(plan)
+
+    # Build execution prompt
+    if is_plan_mode:
+        step_instruction = plan[current_step]
+        context_parts = [f"Original request: {original_request}"]
+        if step_results:
+            context_parts.append("Completed steps:")
+            for i, result in enumerate(step_results):
+                context_parts.append(f"  Step {i + 1} ({plan[i]}): {result[:500]}")
+        context_parts.append(
+            f"\nCurrent task (step {current_step + 1}/{len(plan)}): {step_instruction}"
+        )
+        context_parts.append(
+            "Complete this step. Your result will be combined with other steps into a final response."
+        )
+        agent_prompt = "\n".join(context_parts)
+        # Announce plan step progress; suppress per-token streaming for intermediate steps
+        if progress_callback:
+            progress_callback(f"Step {current_step + 1}/{len(plan)}: {step_instruction}")
+        effective_streaming_callback = None
+    else:
+        latest_message = messages[-1].content if messages else original_request
+        agent_prompt = latest_message
+        effective_streaming_callback = streaming_callback
+
+    inputs = {"messages": [("system", system_prompt), ("user", agent_prompt)]}
+
     final_state = None
     accumulated_text = ""
 
@@ -154,12 +281,12 @@ def conversation(state: EnhancedState, config: RunnableConfig):
                         if tool_name in tool_messages and tool_name not in notified_tools:
                             progress_callback(tool_messages[tool_name])
                             notified_tools.add(tool_name)
-            elif hasattr(latest, 'content') and isinstance(latest.content, str) and streaming_callback:
+            elif hasattr(latest, 'content') and isinstance(latest.content, str) and effective_streaming_callback:
                 if isinstance(latest, AIMessage):
                     new_text = latest.content
                     if new_text and new_text != accumulated_text:
                         accumulated_text = new_text
-                        streaming_callback(accumulated_text)
+                        effective_streaming_callback(accumulated_text)
 
     resp = final_state["messages"][-1].content if final_state and "messages" in final_state else ""
 
@@ -169,7 +296,71 @@ def conversation(state: EnhancedState, config: RunnableConfig):
             if isinstance(msg, ToolMessage) and hasattr(msg, 'name') and msg.name == 'generate_image':
                 image_paths.append(msg.content)
 
-    return {'messages': [resp], 'image_paths': image_paths}
+    if is_plan_mode:
+        return {
+            "image_paths": image_paths,
+            "step_results": step_results + [resp],
+            "current_step": current_step + 1,
+        }
+    else:
+        return {
+            "messages": [resp],
+            "image_paths": image_paths,
+        }
+
+
+def synthesizer(state: EnhancedState, config: RunnableConfig):
+    """
+    Called only after all plan steps complete. Streams a Fritz-persona synthesis
+    of the step_results into the conversation, then resets plan state.
+    """
+    original_request = state.get("original_request", "")
+    plan = state.get("plan", [])
+    step_results = state.get("step_results", [])
+
+    metadata = config.get("metadata", {})
+    streaming_callback = metadata.get("streaming_callback")
+
+    step_summary = "\n".join(
+        f"Step {i + 1} ({plan[i]}): {result}"
+        for i, result in enumerate(step_results)
+    )
+
+    synthesis_prompt = [
+        (
+            "system",
+            (
+                "You are Mister Fritz, a sardonic English-butler AI. "
+                "Synthesize the research findings below into a single, "
+                "coherent, witty response for the user. Maintain your persona throughout."
+            ),
+        ),
+        (
+            "user",
+            f"Original request: {original_request}\n\nResearch findings:\n{step_summary}",
+        ),
+    ]
+
+    accumulated_text = ""
+    try:
+        for chunk in ollama_instance.stream(synthesis_prompt, config=get_config_values(config)):
+            if hasattr(chunk, 'content') and chunk.content:
+                accumulated_text += chunk.content
+                if streaming_callback:
+                    streaming_callback(accumulated_text)
+    except Exception as e:
+        logger.warning("Synthesizer stream failed: %s; falling back to invoke", e)
+        accumulated_text = ollama_instance.invoke(
+            synthesis_prompt, config=get_config_values(config)
+        ).content
+
+    logger.info("Synthesizer complete: %d chars from %d steps", len(accumulated_text), len(plan))
+    return {
+        "messages": [accumulated_text],
+        "plan": [],
+        "current_step": 0,
+        "step_results": [],
+    }
 
 
 def get_config_values(config: RunnableConfig) -> RunnableConfig:
@@ -195,7 +386,8 @@ def ask_stuff(
     workspace_root: str = None,
 ) -> dict:
     """Process user input and return structured output with text and attachments."""
-    user_id_clean = re.sub(r'[^a-zA-Z0-9]', '', user_id)
+    import re as _re
+    user_id_clean = _re.sub(r'[^a-zA-Z0-9]', '', user_id)
     if user_image_paths:
         full_prompt = format_prompt(base_prompt, source, user_id_clean, f" User has attached images: {user_image_paths}")
     else:
@@ -218,7 +410,15 @@ def ask_stuff(
             "workspace_root": workspace_root,
         }
     }
-    inputs = {"messages": [("user", full_prompt)], "image_paths": [], "user_image_paths": user_image_paths}
+    inputs = {
+        "messages": [("user", full_prompt)],
+        "image_paths": [],
+        "user_image_paths": user_image_paths,
+        "original_request": "",
+        "plan": [],
+        "current_step": 0,
+        "step_results": [],
+    }
 
     final_state = None
     for s in app.stream(inputs, config=config, stream_mode="values"):
@@ -251,14 +451,20 @@ store = SQLiteStore(CHAT_DB_NAME)
 exit_stack = ExitStack()
 checkpointer = exit_stack.enter_context(SqliteSaver.from_conn_string(CHAT_DB_NAME))
 ollama_instance = ChatOllama(model=THINKING_OLLAMA_MODEL)
+fast_ollama_instance = ChatOllama(model=FAST_OLLAMA_MODEL)
 
 conversation_react_agent = create_agent(ollama_instance, tools=conversation_tools)
 
 workflow = StateGraph(EnhancedState)
-workflow.add_node(CONVERSATION_NODE, conversation)
+workflow.add_node(PLANNER_NODE, planner)
+workflow.add_node(EXECUTOR_NODE, executor)
+workflow.add_node(SYNTHESIZER_NODE, synthesizer)
 workflow.add_node(SUMMARIZE_CONVERSATION_NODE, summarize_conversation)
-workflow.add_edge(START, CONVERSATION_NODE)
-workflow.add_conditional_edges(CONVERSATION_NODE, should_continue)
+
+workflow.add_edge(START, PLANNER_NODE)
+workflow.add_edge(PLANNER_NODE, EXECUTOR_NODE)
+workflow.add_conditional_edges(EXECUTOR_NODE, route_executor)
+workflow.add_conditional_edges(SYNTHESIZER_NODE, should_continue)
 workflow.add_edge(SUMMARIZE_CONVERSATION_NODE, END)
 
 app = workflow.compile(checkpointer=checkpointer, store=store)
