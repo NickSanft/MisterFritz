@@ -1,5 +1,6 @@
 import logging
 import os
+from typing import Optional
 
 import discord
 from discord import app_commands
@@ -23,10 +24,96 @@ def split_into_chunks(s: str, chunk_size: int = 2000) -> list[str]:
 class FritzCommands(commands.Cog):
     """All MisterFritz slash commands."""
 
-    def __init__(self, bot: commands.Bot, sayer: TTSEngine, user_workspaces: dict[str, str]):
+    def __init__(self, bot: commands.Bot, sayer: TTSEngine, user_workspaces: dict[str, str], schedule_manager=None):
         self.bot = bot
         self.sayer = sayer
         self.user_workspaces = user_workspaces
+        self.schedule_manager = schedule_manager
+
+    # ── Scheduled tasks ───────────────────────────────────────────────────────
+
+    schedule = app_commands.Group(name="schedule", description="Manage scheduled Fritz tasks")
+
+    @schedule.command(name="add", description="Schedule a recurring Fritz prompt in this channel")
+    @app_commands.describe(
+        every="When to run: interval ('30m', '2h', '1d') or cron ('0 9 * * *')",
+        prompt="What to ask Fritz each time",
+        description="Optional label to help identify this schedule",
+    )
+    async def schedule_add(
+        self,
+        interaction: discord.Interaction,
+        every: str,
+        prompt: str,
+        description: Optional[str] = None,
+    ):
+        METRICS.increment("discord_commands.schedule_add")
+        if self.schedule_manager is None:
+            await interaction.response.send_message(
+                "Scheduler is not available.", ephemeral=True
+            )
+            return
+        try:
+            schedule_id = self.schedule_manager.add_schedule(
+                user_id=interaction.user.name,
+                channel_id=interaction.channel_id,
+                guild_id=interaction.guild_id,
+                prompt=prompt,
+                schedule_expr=every,
+                description=description or "",
+            )
+            await interaction.response.send_message(
+                f"✅ Schedule `{schedule_id}` created.\n"
+                f"**Every:** `{every}`\n"
+                f"**Prompt:** {prompt}",
+                ephemeral=True,
+            )
+        except ValueError as e:
+            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+        except Exception as e:
+            logger.exception("Failed to add schedule for %s", interaction.user.name)
+            await interaction.response.send_message(f"❌ Failed to create schedule: {e}", ephemeral=True)
+
+    @schedule.command(name="list", description="List your active scheduled tasks")
+    async def schedule_list(self, interaction: discord.Interaction):
+        METRICS.increment("discord_commands.schedule_list")
+        if self.schedule_manager is None:
+            await interaction.response.send_message("Scheduler is not available.", ephemeral=True)
+            return
+        schedules = self.schedule_manager.list_schedules(interaction.user.name)
+        if not schedules:
+            await interaction.response.send_message(
+                "You have no scheduled tasks. Use `/schedule add` to create one.", ephemeral=True
+            )
+            return
+        lines = ["**Your scheduled tasks:**"]
+        for s in schedules:
+            label = f" — {s['description']}" if s["description"] else ""
+            lines.append(f"`{s['id']}` every `{s['schedule']}`{label}\n  _{s['prompt']}_")
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+    @schedule.command(name="remove", description="Remove a scheduled task by its ID")
+    @app_commands.describe(schedule_id="The schedule ID shown in /schedule list")
+    async def schedule_remove(self, interaction: discord.Interaction, schedule_id: str):
+        METRICS.increment("discord_commands.schedule_remove")
+        if self.schedule_manager is None:
+            await interaction.response.send_message("Scheduler is not available.", ephemeral=True)
+            return
+        try:
+            removed = self.schedule_manager.remove_schedule(schedule_id, interaction.user.name)
+            if removed:
+                await interaction.response.send_message(
+                    f"✅ Schedule `{schedule_id}` removed.", ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(
+                    f"❌ No schedule found with ID `{schedule_id}`.", ephemeral=True
+                )
+        except PermissionError as e:
+            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+        except Exception as e:
+            logger.exception("Failed to remove schedule %s", schedule_id)
+            await interaction.response.send_message(f"❌ Failed to remove schedule: {e}", ephemeral=True)
 
     # ── Card game ─────────────────────────────────────────────────────────────
 

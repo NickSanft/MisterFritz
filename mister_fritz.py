@@ -226,6 +226,7 @@ def executor(state: EnhancedState, config: RunnableConfig):
         "generate_image": "Generating an image, this may take a moment...",
         "search_documents": "Searching through documents for you...",
         "search_web": "Searching the web...",
+        "scrape_web": "Scraping website content...",
         "scrape_website": "Scraping website content...",
         "search_memories": "Looking through my memories...",
         "analyze_image": "Analyzing your image(s) with vision AI...",

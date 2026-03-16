@@ -281,3 +281,4 @@ watchdog
 speechrecognition
 pydub
 prometheus-client>=0.20.0
+APScheduler>=3.10.0

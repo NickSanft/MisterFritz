@@ -13,6 +13,7 @@ from bot_commands import FritzCommands
 from fritz_utils import DISCORD_BOT_TOKEN, FFMPEG_PATH, FFPROBE_PATH, ROOT_USER, MessageSource, validate_config
 from mister_fritz import ask_stuff
 from observability import METRICS, init_logging, start_metrics_server
+from scheduler import ScheduleManager
 from tts import TTSEngine
 
 _recognizer = sr.Recognizer()
@@ -103,11 +104,15 @@ client = commands.Bot(command_prefix=command_prefix, intents=intents)
 
 sayer = TTSEngine()
 user_workspaces: dict[str, str] = {}
+schedule_manager = None
 
 
 @client.event
 async def on_ready():
-    await client.add_cog(FritzCommands(client, sayer, user_workspaces))
+    global schedule_manager
+    schedule_manager = ScheduleManager(client)
+    schedule_manager.start()
+    await client.add_cog(FritzCommands(client, sayer, user_workspaces, schedule_manager))
     logger.info("Logged in as %s", client.user)
     try:
         synced = await client.tree.sync()
