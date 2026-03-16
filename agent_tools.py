@@ -1,6 +1,8 @@
 import base64
+import importlib.util
 import json
 import logging
+import os
 import random
 import re
 import uuid
@@ -234,6 +236,47 @@ def analyze_image(config: RunnableConfig, question: str = "What is in this image
         return error_msg
 
 
+# ── Skill auto-loader ─────────────────────────────────────────────────────────
+
+_SKILLS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
+_skills_cache: dict | None = None
+
+
+def _load_skills() -> dict:
+    """Auto-discover and load tools from the skills/ directory.
+
+    Any .py file in skills/ that exposes a register() -> dict function is
+    imported and its tools added to the registry. Results are cached so
+    discovery only runs once per process.
+    """
+    global _skills_cache
+    if _skills_cache is not None:
+        return _skills_cache
+
+    _skills_cache = {}
+    if not os.path.isdir(_SKILLS_DIR):
+        return _skills_cache
+
+    for filename in sorted(os.listdir(_SKILLS_DIR)):
+        if filename.startswith("_") or not filename.endswith(".py"):
+            continue
+        module_name = filename[:-3]
+        filepath = os.path.join(_SKILLS_DIR, filename)
+        try:
+            spec = importlib.util.spec_from_file_location(f"skills.{module_name}", filepath)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            if callable(getattr(module, "register", None)):
+                registered = module.register()
+                if isinstance(registered, dict):
+                    _skills_cache.update(registered)
+                    logger.info("Loaded skill '%s': %d tool(s)", module_name, len(registered))
+        except Exception as e:
+            logger.warning("Failed to load skill '%s': %s", module_name, e)
+
+    return _skills_cache
+
+
 # ── Tool registry ─────────────────────────────────────────────────────────────
 
 def get_conversation_tools_description(include_file_tools: bool = False) -> dict[str, tuple[BaseTool, str]]:
@@ -248,6 +291,7 @@ def get_conversation_tools_description(include_file_tools: bool = False) -> dict
         "generate_image": (generate_image, "Generates an image based on a given prompt."),
         "analyze_image": (analyze_image, "Analyzes an image. If the user asks about an image, assume that the tool knows its location."),
     }
+    tools.update(_load_skills())
     if include_file_tools:
         tools.update(get_file_tools_description())
     return tools
