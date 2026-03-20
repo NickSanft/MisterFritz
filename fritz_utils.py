@@ -90,6 +90,24 @@ ROOT_USER: str | None = _env_or_json("ROOT_USER", "root_user")
 FFMPEG_PATH: str = os.environ.get("FFMPEG_PATH") or _find_binary("ffmpeg", "./ffmpeg.exe")
 FFPROBE_PATH: str = os.environ.get("FFPROBE_PATH") or _find_binary("ffprobe", "./ffprobe.exe")
 
+# ---------------------------------------------------------------------------
+# Whisper STT
+# ---------------------------------------------------------------------------
+
+WHISPER_MODEL: str = os.environ.get("WHISPER_MODEL", "base")
+# Options: tiny, base, small, medium, large  (larger = slower but more accurate)
+# "base" is a good default — ~140 MB, runs on CPU in reasonable time.
+WHISPER_DEVICE: str = os.environ.get("WHISPER_DEVICE", "cpu")
+# Set to "cuda" if a GPU is available.
+WHISPER_LANGUAGE: str | None = os.environ.get("WHISPER_LANGUAGE") or None
+# None = auto-detect language. Set e.g. "en" to force English and speed up inference.
+
+# ---------------------------------------------------------------------------
+# Telegram
+# ---------------------------------------------------------------------------
+
+TELEGRAM_BOT_TOKEN: str | None = _env_or_json("TELEGRAM_BOT_TOKEN", "telegram_bot_token")
+
 
 # ---------------------------------------------------------------------------
 # Startup validation
@@ -119,4 +137,6 @@ class MessageSource(Enum):
     DISCORD_TEXT = 0,
     DISCORD_TEXT_AND_IMAGE = 1,
     DISCORD_VOICE = 2,
-    LOCAL = 3
+    LOCAL = 3,
+    TELEGRAM_TEXT = 4,
+    TELEGRAM_VOICE = 5,
