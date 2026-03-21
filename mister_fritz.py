@@ -67,6 +67,10 @@ def get_source_info(source: MessageSource, user_id: str) -> str:
         return f"User is texting from Discord with and has an image that the analyze_image tool has the path for already. (User ID: {user_id})"
     elif source == MessageSource.DISCORD_VOICE:
         return f"User is speaking from Discord (User ID: {user_id}). Please answer in 30 words or less."
+    elif source == MessageSource.TELEGRAM_TEXT:
+        return f"User is texting from Telegram (User ID: {user_id})"
+    elif source == MessageSource.TELEGRAM_VOICE:
+        return f"User is speaking from Telegram (User ID: {user_id}). Please answer in 30 words or less."
     return f"User is interacting via CLI (User ID: {user_id})"
 
 

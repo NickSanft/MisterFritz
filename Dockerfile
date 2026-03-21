@@ -46,6 +46,12 @@ RUN mkdir -p input output chroma_store temp_images temp_audio
 ENV FFMPEG_PATH=ffmpeg
 ENV FFPROBE_PATH=ffprobe
 
+# Whisper STT — pre-bake the model into the image so first-run doesn't download it
+ENV WHISPER_MODEL=small
+ENV WHISPER_DEVICE=cpu
+ENV WHISPER_COMPUTE_TYPE=int8
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8')" || true
+
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 

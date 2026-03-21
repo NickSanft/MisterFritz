@@ -278,7 +278,8 @@ xxhash==3.6.0
 yarl==1.22.0
 zipp==3.23.0
 watchdog
-speechrecognition
 pydub
+faster-whisper>=1.0.0
+python-telegram-bot>=20.0
 prometheus-client>=0.20.0
 APScheduler>=3.10.0

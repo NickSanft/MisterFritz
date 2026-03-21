@@ -40,3 +40,6 @@ jobs:
           DISCORD_BOT_TOKEN: "ci-placeholder-token"
           ROOT_USER: "ci-root"
           OLLAMA_HOST: "http://127.0.0.1:11434"
+          WHISPER_MODEL: "small"
+          WHISPER_DEVICE: "cpu"
+          WHISPER_COMPUTE_TYPE: "int8"

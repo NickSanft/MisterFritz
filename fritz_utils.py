@@ -91,16 +91,26 @@ FFMPEG_PATH: str = os.environ.get("FFMPEG_PATH") or _find_binary("ffmpeg", "./ff
 FFPROBE_PATH: str = os.environ.get("FFPROBE_PATH") or _find_binary("ffprobe", "./ffprobe.exe")
 
 # ---------------------------------------------------------------------------
-# Whisper STT
+# Whisper STT (faster-whisper)
 # ---------------------------------------------------------------------------
 
-WHISPER_MODEL: str = os.environ.get("WHISPER_MODEL", "base")
-# Options: tiny, base, small, medium, large  (larger = slower but more accurate)
-# "base" is a good default — ~140 MB, runs on CPU in reasonable time.
+WHISPER_MODEL: str = os.environ.get("WHISPER_MODEL", "small")
+# Options: tiny, base, small, medium, large-v2, large-v3
+# "small" is the recommended default — good accuracy, reasonable CPU speed.
 WHISPER_DEVICE: str = os.environ.get("WHISPER_DEVICE", "cpu")
 # Set to "cuda" if a GPU is available.
+WHISPER_COMPUTE_TYPE: str = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")
+# int8 halves memory and roughly doubles CPU speed with minimal accuracy loss.
+# Use "float16" on CUDA, "float32" for maximum accuracy on CPU.
 WHISPER_LANGUAGE: str | None = os.environ.get("WHISPER_LANGUAGE") or None
 # None = auto-detect language. Set e.g. "en" to force English and speed up inference.
+WHISPER_BEAM_SIZE: int = int(os.environ.get("WHISPER_BEAM_SIZE", "5"))
+# Higher = more accurate but slower. 5 is the Whisper default.
+WHISPER_INITIAL_PROMPT: str = os.environ.get(
+    "WHISPER_INITIAL_PROMPT",
+    "Mister Fritz is an AI assistant. The user is speaking a conversational message.",
+)
+# Seeds the transcription with context — helps with proper nouns and domain vocabulary.
 
 # ---------------------------------------------------------------------------
 # Telegram
