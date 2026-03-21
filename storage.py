@@ -10,7 +10,14 @@ from typing_extensions import Literal
 
 from fritz_utils import CHROMA_DB_PATH, EMBEDDING_MODEL
 
-_embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
+_embeddings = None
+
+
+def _get_embeddings() -> OllamaEmbeddings:
+    global _embeddings
+    if _embeddings is None:
+        _embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
+    return _embeddings
 
 
 class SQLiteStore(BaseStore[str, Union[str, bytes]]):
@@ -90,12 +97,13 @@ class ChromaStore(BaseStore[str, Union[str, bytes]]):
             collection_name: str = "langchain_store",
             persist_directory: Optional[str] = CHROMA_DB_PATH,
     ):
-        self.embedding_function = _embeddings
+        embeddings = _get_embeddings()
+        self.embedding_function = embeddings
         self.collection_name = collection_name
         self.persist_directory = persist_directory
         self.vectorstore = Chroma(
             collection_name=collection_name,
-            embedding_function=_embeddings,
+            embedding_function=embeddings,
             persist_directory=persist_directory,
         )
 

@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import threading
 from contextlib import ExitStack
 from typing import Annotated, Literal, TypedDict
 
@@ -220,7 +221,7 @@ def executor(state: EnhancedState, config: RunnableConfig):
         agent = create_agent(ollama_instance, tools=active_tools)
     else:
         system_prompt = CACHED_SYSTEM_PROMPT
-        agent = conversation_react_agent
+        agent = _get_conversation_agent()
 
     tool_messages = {
         "generate_image": "Generating an image, this may take a moment...",
@@ -443,10 +444,11 @@ def ask_stuff(
 
 # ── Setup & initialisation ────────────────────────────────────────────────────
 
-conversation_tools = [tool_info[0] for tool_info in get_conversation_tools_description().values()]
+_conversation_tools_desc = get_conversation_tools_description()
+conversation_tools = [tool_info[0] for tool_info in _conversation_tools_desc.values()]
 logger.debug("Conversation tools: %s", conversation_tools)
 
-CACHED_SYSTEM_PROMPT = get_system_description(get_conversation_tools_description())
+CACHED_SYSTEM_PROMPT = get_system_description(_conversation_tools_desc)
 
 store = SQLiteStore(CHAT_DB_NAME)
 exit_stack = ExitStack()
@@ -454,7 +456,15 @@ checkpointer = exit_stack.enter_context(SqliteSaver.from_conn_string(CHAT_DB_NAM
 ollama_instance = ChatOllama(model=THINKING_OLLAMA_MODEL)
 fast_ollama_instance = ChatOllama(model=FAST_OLLAMA_MODEL)
 
-conversation_react_agent = create_agent(ollama_instance, tools=conversation_tools)
+_conversation_react_agent = None
+
+
+def _get_conversation_agent():
+    global _conversation_react_agent
+    if _conversation_react_agent is None:
+        logger.info("Initialising conversation ReAct agent")
+        _conversation_react_agent = create_agent(ollama_instance, tools=conversation_tools)
+    return _conversation_react_agent
 
 workflow = StateGraph(EnhancedState)
 workflow.add_node(PLANNER_NODE, planner)
@@ -472,8 +482,12 @@ app = workflow.compile(checkpointer=checkpointer, store=store)
 
 logger.debug("Conversation tools description: %s", get_conversation_tools_description())
 
-try:
-    with open("mister_fritz_diagram.png", "wb") as binary_file:
-        binary_file.write(app.get_graph().draw_mermaid_png())
-except Exception as _diagram_err:
-    logger.debug("Could not write graph diagram (non-fatal): %s", _diagram_err)
+def _write_diagram():
+    try:
+        with open("mister_fritz_diagram.png", "wb") as binary_file:
+            binary_file.write(app.get_graph().draw_mermaid_png())
+        logger.debug("Graph diagram written")
+    except Exception as _diagram_err:
+        logger.debug("Could not write graph diagram (non-fatal): %s", _diagram_err)
+
+threading.Thread(target=_write_diagram, name="diagram-writer", daemon=True).start()

@@ -5,30 +5,18 @@ import time
 import uuid
 
 import discord
-import speech_recognition as sr
 from discord.ext import commands
-from pydub import AudioSegment
 
 from bot_commands import FritzCommands
-from fritz_utils import DISCORD_BOT_TOKEN, FFMPEG_PATH, FFPROBE_PATH, ROOT_USER, MessageSource, validate_config
+from fritz_utils import DISCORD_BOT_TOKEN, ROOT_USER, MessageSource, validate_config
 from mister_fritz import ask_stuff
 from observability import METRICS, init_logging, start_metrics_server
 from scheduler import ScheduleManager
+from stt import transcribe as _whisper_transcribe
 from tts import TTSEngine
-
-_recognizer = sr.Recognizer()
 
 init_logging()
 logger = logging.getLogger(__name__)
-
-AudioSegment.converter = FFMPEG_PATH
-AudioSegment.ffmpeg = FFMPEG_PATH
-AudioSegment.ffprobe = FFPROBE_PATH
-
-if not os.path.exists(FFMPEG_PATH):
-    logger.error("ffmpeg not found at %s", FFMPEG_PATH)
-if not os.path.exists(FFPROBE_PATH):
-    logger.error("ffprobe not found at %s - pydub needs this to read OGG files", FFPROBE_PATH)
 
 
 class StreamingMessageHandler:
@@ -102,14 +90,19 @@ intents = discord.Intents.default()
 intents.message_content = True
 client = commands.Bot(command_prefix=command_prefix, intents=intents)
 
-sayer = TTSEngine()
+sayer = None
 user_workspaces: dict[str, str] = {}
 schedule_manager = None
 
 
 @client.event
 async def on_ready():
-    global schedule_manager
+    global sayer, schedule_manager
+    loop = asyncio.get_running_loop()
+    if sayer is None:
+        logger.info("Loading TTS engine...")
+        sayer = await loop.run_in_executor(None, TTSEngine)
+        logger.info("TTS engine ready")
     schedule_manager = ScheduleManager(client)
     schedule_manager.start()
     await client.add_cog(FritzCommands(client, sayer, user_workspaces, schedule_manager))
@@ -229,19 +222,10 @@ async def on_message(ctx):
     _cleanup_temp_files(user_image_paths, request_id)
 
 
-async def speech_to_text(file_path: str):
-    wav_file = f"{file_path}.wav"
-    logger.info("Saved audio: %s", file_path)
-    AudioSegment.from_ogg(file_path).export(wav_file, format="wav")
-    logger.info("Converted %s to %s", file_path, wav_file)
-    voice_message = sr.AudioFile(wav_file)
-    with voice_message as source:
-        audio = _recognizer.record(source)
-    try:
-        return _recognizer.recognize_google(audio)
-    except Exception as e:
-        METRICS.record_error("speech_to_text", e)
-        logger.warning("Speech to text error: %s", e)
+async def speech_to_text(file_path: str) -> str | None:
+    """Thin async wrapper around the Whisper STT module."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _whisper_transcribe, file_path)
 
 
 if __name__ == '__main__':

@@ -26,7 +26,14 @@ from storage import ChromaStore
 
 logger = logging.getLogger(__name__)
 
-chroma_store = ChromaStore()
+_chroma_store = None
+
+
+def _get_chroma_store() -> ChromaStore:
+    global _chroma_store
+    if _chroma_store is None:
+        _chroma_store = ChromaStore()
+    return _chroma_store
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -46,7 +53,7 @@ def get_current_time_internal() -> str:
 
 def search_memories_internal(config: RunnableConfig, query: str) -> str:
     user_id = config.get("metadata").get("user_id")
-    search_result = chroma_store.search(query, (str(user_id),), limit=30)
+    search_result = _get_chroma_store().search(query, (str(user_id),), limit=30)
     summaries = {}
     for _, summary_dict in search_result:
         for key, summary in summary_dict.items():
@@ -59,7 +66,7 @@ def search_memories_internal(config: RunnableConfig, query: str) -> str:
 def add_memory(user_id: str, memory_key: str, memory_to_store: str) -> str:
     """Store a memory for a user."""
     memory_dict = {memory_key: memory_to_store}
-    chroma_store.put((str(user_id),), str(uuid.uuid4()), memory_dict)
+    _get_chroma_store().put((str(user_id),), str(uuid.uuid4()), memory_dict)
     return "Added memory for {}: {}".format(memory_key, memory_to_store)
 
 
