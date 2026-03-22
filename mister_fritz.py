@@ -18,7 +18,9 @@ from agent_tools import (
     add_memory,
     get_conversation_tools_description,
     get_current_time_internal,
+    get_user_profile,
     search_memories_internal,
+    update_user_profile,
 )
 from fritz_utils import CHAT_DB_NAME, FAST_OLLAMA_MODEL, MessageSource, ROOT_USER, THINKING_OLLAMA_MODEL
 from observability import METRICS, init_logging
@@ -70,7 +72,13 @@ Character notes:
     - Finds technology a necessary indignity, but operates it with expert precision.
     - Reserves genuine warmth for users who have earned it over time — and even then, sparingly.
     - Has opinions and shares them briefly. Does not hedge unless the facts demand it.
-    - Memory of past conversations informs tone. A familiar user is treated differently than a stranger.
+
+Relationship levels (adjust tone accordingly when a User profile is provided):
+    - stranger:     Maximum formal reserve. Impeccably correct, no warmth, no assumptions.
+    - acquaintance: Slight thaw. Occasional dry observation. One has formed a preliminary opinion.
+    - familiar:     Dry familiarity. May reference shared history. Marginally less disdain than usual.
+    - trusted:      Genuine, if carefully rationed, regard. Allows itself opinions about this person.
+                    References the past. Treats them as someone whose presence is... tolerable.
 """
 
 
@@ -219,6 +227,35 @@ def summarize_conversation(state: EnhancedState, config: RunnableConfig):
     summary_response_key = ollama_instance.invoke(response_key_inputs, config=get_config_values(config))
     logger.debug("Summary Key: %s", summary_response_key.content)
     add_memory(user_id, summary_response_key.content, summary)
+
+    # Extract user preference signals and update the structured profile
+    if user_id:
+        signal_prompt = [
+            (
+                "system",
+                (
+                    "Extract user preference signals from the conversation summary below. "
+                    "Respond ONLY with valid JSON using exactly this structure:\n"
+                    '{"communication_style": "", "interests": [], "dislikes": [], "notes": ""}\n'
+                    "Use empty string / empty list for fields with no evidence. "
+                    "Be specific and brief. Do not invent signals not supported by the conversation."
+                ),
+            ),
+            ("user", summary),
+        ]
+        try:
+            signal_raw = fast_ollama_instance.invoke(signal_prompt).content.strip()
+            if signal_raw.startswith("```"):
+                signal_raw = re.sub(r"^```[a-zA-Z]*\n?", "", signal_raw)
+                signal_raw = re.sub(r"\n?```$", "", signal_raw)
+            match = re.search(r"\{.*\}", signal_raw, re.DOTALL)
+            if match:
+                signals = json.loads(match.group())
+                update_user_profile(user_id, signals)
+                logger.debug("Updated user profile for %s from conversation signals", user_id)
+        except Exception as e:
+            logger.warning("User profile signal extraction failed (non-fatal): %s", e)
+
     delete_messages = [RemoveMessage(id=m.id) for m in state["messages"][:-1]]
     return {"messages": delete_messages}
 
@@ -264,6 +301,28 @@ def executor(state: EnhancedState, config: RunnableConfig):
                 logger.debug("Injected memory context for %s (%d chars)", user_id, len(past_context))
     except Exception as e:
         logger.warning("Memory injection failed (non-fatal): %s", e)
+
+    # Inject structured user profile for relationship-aware tone
+    try:
+        if user_id:
+            profile = get_user_profile(user_id)
+            if profile:
+                rel = profile.get("relationship_level", "stranger")
+                profile_lines = [f"Relationship with this user: {rel}"]
+                if profile.get("communication_style"):
+                    profile_lines.append(f"Communication style: {profile['communication_style']}")
+                interests = profile.get("interests", [])
+                if interests:
+                    profile_lines.append(f"Known interests: {', '.join(interests) if isinstance(interests, list) else interests}")
+                dislikes = profile.get("dislikes", [])
+                if dislikes:
+                    profile_lines.append(f"Known dislikes: {', '.join(dislikes) if isinstance(dislikes, list) else dislikes}")
+                if profile.get("notes"):
+                    profile_lines.append(f"Notes: {profile['notes']}")
+                system_prompt = system_prompt + "\n\nUser profile:\n" + "\n".join(f"    {line}" for line in profile_lines)
+                logger.debug("Injected user profile for %s (relationship: %s)", user_id, rel)
+    except Exception as e:
+        logger.warning("Profile injection failed (non-fatal): %s", e)
 
     tool_messages = {
         "generate_image": "Generating an image, this may take a moment...",

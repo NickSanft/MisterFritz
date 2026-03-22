@@ -70,6 +70,59 @@ def add_memory(user_id: str, memory_key: str, memory_to_store: str) -> str:
     return "Added memory for {}: {}".format(memory_key, memory_to_store)
 
 
+_RELATIONSHIP_LEVELS = [
+    (25, "trusted"),
+    (10, "familiar"),
+    (3,  "acquaintance"),
+    (0,  "stranger"),
+]
+
+
+def get_user_profile(user_id: str) -> dict:
+    """Fetch the structured profile for a user, returning an empty dict if none exists."""
+    result = _get_chroma_store().get(f"profile_{user_id}")
+    if result:
+        raw = result.get("profile_data", "")
+        if raw:
+            try:
+                return json.loads(raw)
+            except Exception:
+                pass
+    return {}
+
+
+def update_user_profile(user_id: str, updates: dict) -> None:
+    """Merge signal updates into the user profile and persist it.
+
+    Automatically increments the interaction count and derives the
+    relationship_level from it — those two fields are not settable via updates.
+    """
+    profile = get_user_profile(user_id)
+
+    for key, value in updates.items():
+        if key in ("interaction_count", "relationship_level"):
+            continue  # managed internally
+        if isinstance(value, list):
+            existing = profile.get(key, [])
+            merged = list({v for v in (existing if isinstance(existing, list) else []) + value if v})
+            profile[key] = merged
+        elif value:  # skip empty strings
+            profile[key] = value
+
+    profile["interaction_count"] = profile.get("interaction_count", 0) + 1
+    count = profile["interaction_count"]
+    profile["relationship_level"] = next(
+        level for threshold, level in _RELATIONSHIP_LEVELS if count >= threshold
+    )
+
+    _get_chroma_store().put(
+        (str(user_id),),
+        f"profile_{user_id}",
+        {"profile_data": json.dumps(profile)},
+    )
+    logger.debug("Updated profile for %s: count=%d level=%s", user_id, count, profile["relationship_level"])
+
+
 # ── LangChain tools ───────────────────────────────────────────────────────────
 
 @tool(parse_docstring=True)
