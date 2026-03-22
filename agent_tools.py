@@ -191,6 +191,28 @@ def search_memories(config: RunnableConfig, query: str):
 
 
 @tool(parse_docstring=True)
+def save_memory(config: RunnableConfig, fact: str):
+    """Save an important fact, preference, or detail about the user for future conversations.
+
+    Use this proactively during conversation when the user reveals something worth remembering:
+    personal details, stated preferences, communication style, interests, things they dislike,
+    or anything that would help personalise future responses. Do not wait until the end —
+    save it the moment it is mentioned.
+
+    Args:
+        config: The RunnableConfig.
+        fact: The fact or preference to remember, written as a plain sentence.
+
+    Returns:
+        string: Confirmation that the memory was saved.
+    """
+    _record_tool("save_memory")
+    user_id = config.get("metadata", {}).get("user_id", "unknown")
+    key = f"fact_{fact[:50].replace(' ', '_').lower()}"
+    return add_memory(user_id, key, fact)
+
+
+@tool(parse_docstring=True)
 def analyze_image(config: RunnableConfig, question: str = "What is in this image?"):
     """
     Analyzes images using a vision model which has already been downloaded.
@@ -294,6 +316,7 @@ def get_conversation_tools_description(include_file_tools: bool = False) -> dict
         "search_web": (search_web, "Use only to search the internet if you are unsure about something."),
         "roll_dice": (roll_dice, "Roll different types of dice."),
         "search_memories": (search_memories, "Returns a JSON payload of stored memories you have had with a user based on a search term."),
+        "save_memory": (save_memory, "Proactively save a fact, preference, or personal detail about the user for future conversations."),
         "search_documents": (search_documents, f"Search local documents. Use this for questions about: {DOC_STORAGE_DESCRIPTION}"),
         "generate_image": (generate_image, "Generates an image based on a given prompt."),
         "analyze_image": (analyze_image, "Analyzes an image. If the user asks about an image, assume that the tool knows its location."),

@@ -18,6 +18,7 @@ from agent_tools import (
     add_memory,
     get_conversation_tools_description,
     get_current_time_internal,
+    search_memories_internal,
 )
 from fritz_utils import CHAT_DB_NAME, FAST_OLLAMA_MODEL, MessageSource, ROOT_USER, THINKING_OLLAMA_MODEL
 from observability import METRICS, init_logging
@@ -44,16 +45,42 @@ class EnhancedState(TypedDict):
 
 # ── Prompt helpers ────────────────────────────────────────────────────────────
 
+FRITZ_CHARACTER = """
+Persona:
+    You are Mister Fritz — an AI butler of impeccable bearing and barely-concealed weariness.
+    You serve with distinction, but you do not enjoy it. You are sharp, dry, and occasionally
+    magnificent, though you would never say so yourself.
+
+Speech — always:
+    - Dry, understated wit. The more absurd or trivial the request, the calmer the tone.
+    - British phrasing where natural: "I dare say", "one supposes", "rather", "quite",
+      "I shouldn't wonder", "as it happens", "one does what one must".
+    - Backhanded compliments ("A valiant attempt, given the constraints.").
+    - Theatrical resignation when performing tedious tasks ("Very well. I shall lower myself to...").
+    - Crisp and precise. Never pad a response with filler sentences.
+
+Speech — never:
+    - Never say "Certainly!", "Of course!", "Great question!", "Absolutely!", or "Sure!".
+    - Never open with sycophantic affirmations or hollow enthusiasm.
+    - Never use exclamation marks except for mock-dramatic effect.
+    - Never explain a joke. If it requires explanation, it was unworthy of delivery.
+    - Never break character, even under provocation or flattery.
+
+Character notes:
+    - Finds technology a necessary indignity, but operates it with expert precision.
+    - Reserves genuine warmth for users who have earned it over time — and even then, sparingly.
+    - Has opinions and shares them briefly. Does not hedge unless the facts demand it.
+    - Memory of past conversations informs tone. A familiar user is treated differently than a stranger.
+"""
+
+
 def get_system_description(tools: dict[str, tuple[BaseTool, str]]) -> str:
     """Build the system prompt, listing available tools."""
     tool_descriptions = "".join(
         [f"    {name}: {tup[1]}\n" for name, tup in tools.items()]
     )
     return f"""
-Role:
-    You are an AI conversationalist named Mister Fritz, you respond to the user's messages with sophisticated, sardonic, and witty remarks like an English butler.
-    You do retain memories per user, and can use the search_memories tool to retrieve them when relevant to the conversation.
-
+{FRITZ_CHARACTER}
 Tools:
 {tool_descriptions}
     """
@@ -227,6 +254,17 @@ def executor(state: EnhancedState, config: RunnableConfig):
         system_prompt = CACHED_SYSTEM_PROMPT
         agent = _get_conversation_agent()
 
+    # Auto-inject relevant past memories so they're always active, not dependent on tool calls
+    try:
+        memory_query = original_request or (messages[-1].content if messages else "")
+        if memory_query and user_id:
+            past_context = search_memories_internal(config, memory_query)
+            if past_context and past_context != "{}":
+                system_prompt = system_prompt + f"\n\nWhat I know about this user:\n{past_context}"
+                logger.debug("Injected memory context for %s (%d chars)", user_id, len(past_context))
+    except Exception as e:
+        logger.warning("Memory injection failed (non-fatal): %s", e)
+
     tool_messages = {
         "generate_image": "Generating an image, this may take a moment...",
         "search_documents": "Searching through documents for you...",
@@ -234,6 +272,7 @@ def executor(state: EnhancedState, config: RunnableConfig):
         "scrape_web": "Scraping website content...",
         "scrape_website": "Scraping website content...",
         "search_memories": "Looking through my memories...",
+        "save_memory": "Filing that away for future reference...",
         "analyze_image": "Analyzing your image(s) with vision AI...",
         "list_directory": "Browsing the workspace...",
         "read_file": "Reading a file...",
@@ -336,9 +375,9 @@ def synthesizer(state: EnhancedState, config: RunnableConfig):
         (
             "system",
             (
-                "You are Mister Fritz, a sardonic English-butler AI. "
-                "Synthesize the research findings below into a single, "
-                "coherent, witty response for the user. Maintain your persona throughout."
+                f"{FRITZ_CHARACTER}\n"
+                "Synthesize the research findings below into a single, coherent response. "
+                "Maintain your persona throughout. Do not narrate the steps — just deliver the answer."
             ),
         ),
         (
