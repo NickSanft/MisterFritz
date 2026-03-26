@@ -6,7 +6,7 @@ input/*
 chroma_store/*
 *.wav
 .cache.sqlite
-chat_history.db*
+fritz.db*
 
 
 # Byte-compiled / optimized / DLL files
