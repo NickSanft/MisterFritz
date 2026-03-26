@@ -19,6 +19,7 @@ from agent_tools import (
     get_conversation_tools_description,
     get_current_time_internal,
     get_user_profile,
+    make_schedule_message_tool,
     search_memories_internal,
     update_user_profile,
 )
@@ -281,9 +282,18 @@ def executor(state: EnhancedState, config: RunnableConfig):
     include_file_tools = workspace_root is not None and user_id == ROOT_USER
     progress_callback = metadata.get("progress_callback")
     streaming_callback = metadata.get("streaming_callback")
+    channel_id = metadata.get("channel_id")
+    schedule_manager = metadata.get("schedule_manager")
 
-    if include_file_tools:
-        tools_desc = get_conversation_tools_description(include_file_tools=True)
+    schedule_tool = None
+    if channel_id is not None and schedule_manager is not None:
+        schedule_tool = make_schedule_message_tool(channel_id, schedule_manager)
+
+    if include_file_tools or schedule_tool is not None:
+        tools_desc = get_conversation_tools_description(
+            include_file_tools=include_file_tools,
+            schedule_tool=schedule_tool,
+        )
         system_prompt = get_system_description(tools_desc)
         active_tools = [tool_info[0] for tool_info in tools_desc.values()]
         agent = create_agent(ollama_instance, tools=active_tools)
@@ -333,6 +343,7 @@ def executor(state: EnhancedState, config: RunnableConfig):
         "search_memories": "Looking through my memories...",
         "save_memory": "Filing that away for future reference...",
         "analyze_image": "Analyzing your image(s) with vision AI...",
+        "schedule_message": "Scheduling that for later...",
         "list_directory": "Browsing the workspace...",
         "read_file": "Reading a file...",
         "write_file": "Writing to a file...",
@@ -488,6 +499,8 @@ def ask_stuff(
     streaming_callback=None,
     user_image_paths: list[str] = None,
     workspace_root: str = None,
+    channel_id: int | None = None,
+    schedule_manager=None,
 ) -> dict:
     """Process user input and return structured output with text and attachments."""
     import re as _re
@@ -512,6 +525,8 @@ def ask_stuff(
             "streaming_callback": streaming_callback,
             "user_image_paths": user_image_paths,
             "workspace_root": workspace_root,
+            "channel_id": channel_id,
+            "schedule_manager": schedule_manager,
         }
     }
     inputs = {

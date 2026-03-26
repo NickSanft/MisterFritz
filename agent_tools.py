@@ -361,7 +361,25 @@ def _load_skills() -> dict:
 
 # ── Tool registry ─────────────────────────────────────────────────────────────
 
-def get_conversation_tools_description(include_file_tools: bool = False) -> dict[str, tuple[BaseTool, str]]:
+def make_schedule_message_tool(channel_id: int, schedule_manager) -> BaseTool:
+    """Return a tool that lets Fritz schedule a one-time message in the current channel."""
+
+    @tool
+    def schedule_message(delay_minutes: int, message: str) -> str:
+        """Schedule a one-time message to be sent in the current Discord channel after a delay.
+        Use this when the user asks you to remind them of something or say something in N minutes.
+        delay_minutes must be a positive integer. message is what Fritz should say when the time arrives."""
+        try:
+            sid = schedule_manager.schedule_once(channel_id, "scheduled", delay_minutes, message)
+            return f"Scheduled (ID: {sid}). Will deliver in {delay_minutes} minute(s)."
+        except Exception as e:
+            logger.warning("schedule_message tool failed: %s", e)
+            return f"Failed to schedule: {e}"
+
+    return schedule_message
+
+
+def get_conversation_tools_description(include_file_tools: bool = False, schedule_tool: BaseTool | None = None) -> dict[str, tuple[BaseTool, str]]:
     """Return a dict of {name: (tool, description)} for all conversation tools."""
     tools = {
         "get_current_time": (get_current_time, "Fetch the current time (US / Central Standard Time)."),
@@ -374,6 +392,11 @@ def get_conversation_tools_description(include_file_tools: bool = False) -> dict
         "generate_image": (generate_image, "Generates an image based on a given prompt."),
         "analyze_image": (analyze_image, "Analyzes an image. If the user asks about an image, assume that the tool knows its location."),
     }
+    if schedule_tool is not None:
+        tools["schedule_message"] = (
+            schedule_tool,
+            "Schedule a one-time message to be sent in the current channel after N minutes.",
+        )
     tools.update(_load_skills())
     if include_file_tools:
         tools.update(get_file_tools_description())

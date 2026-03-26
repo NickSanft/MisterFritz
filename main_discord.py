@@ -181,6 +181,8 @@ async def on_message(ctx):
                 progress_callback, streaming_callback,
                 user_image_paths,
                 user_workspaces.get(author) if author == ROOT_USER else None,
+                ctx.channel.id,
+                schedule_manager,
             )
         )
         METRICS.record_latency("ask_stuff", time.time() - start_time)

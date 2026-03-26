@@ -27,8 +27,8 @@ class SQLiteStore(BaseStore[str, Union[str, bytes]]):
 
     def _initialize_db(self):
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS store (
                     namespace TEXT,
                     key TEXT,
@@ -36,6 +36,9 @@ class SQLiteStore(BaseStore[str, Union[str, bytes]]):
                     PRIMARY KEY (namespace, key)
                 )
             """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_store_namespace ON store(namespace)"
+            )
             conn.commit()
 
     def _execute_query(self, query: str, params: Tuple = ()):

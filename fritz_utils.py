@@ -50,8 +50,9 @@ def _find_binary(name: str, fallback: str) -> str:
 DOC_FOLDER = os.environ.get("DOC_FOLDER", "./input")
 CHROMA_DB_PATH = os.environ.get("CHROMA_DB_PATH", "./chroma_store")
 CHROMA_COLLECTION_NAME = os.environ.get("CHROMA_COLLECTION_NAME", "word_docs_rag")
-CHAT_DB_NAME = os.environ.get("CHAT_DB_NAME", "chat_history.db")
-SCHEDULE_DB = os.environ.get("SCHEDULE_DB", "schedules.db")
+DB_NAME      = os.environ.get("DB_NAME", "fritz.db")
+CHAT_DB_NAME = os.environ.get("CHAT_DB_NAME", DB_NAME)
+SCHEDULE_DB  = os.environ.get("SCHEDULE_DB",  DB_NAME)
 INDEXED_FILES_PATH = os.path.join(CHROMA_DB_PATH, "indexed_files.txt")
 
 # ---------------------------------------------------------------------------

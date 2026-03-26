@@ -13,12 +13,13 @@ import logging
 import re
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import discord
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from fritz_utils import SCHEDULE_DB, MessageSource
@@ -38,6 +39,7 @@ class ScheduleManager:
 
     def _init_db(self):
         with sqlite3.connect(SCHEDULE_DB) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS schedules (
                     id TEXT PRIMARY KEY,
@@ -50,6 +52,9 @@ class ScheduleManager:
                     created_at TEXT NOT NULL
                 )
             """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_schedules_user_id ON schedules(user_id)"
+            )
             conn.commit()
 
     def _parse_trigger(self, schedule_expr: str):
@@ -88,8 +93,14 @@ class ScheduleManager:
         logger.info("Running scheduled task %s for %s", schedule_id, user_id)
         channel = self.bot.get_channel(channel_id)
         if channel is None:
-            logger.warning("Channel %d not found for schedule %s — skipping", channel_id, schedule_id)
-            return
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except discord.NotFound:
+                logger.warning("Channel %d not found for schedule %s — skipping", channel_id, schedule_id)
+                return
+            except discord.Forbidden:
+                logger.warning("No permission to access channel %d for schedule %s — skipping", channel_id, schedule_id)
+                return
 
         status_msg = await channel.send("⏰ *Running scheduled task...*")
 
@@ -179,6 +190,27 @@ class ScheduleManager:
             }
             for r in rows
         ]
+
+    def schedule_once(
+        self,
+        channel_id: int,
+        user_id: str,
+        delay_minutes: int,
+        prompt: str,
+    ) -> str:
+        """Register a one-shot job that fires once after delay_minutes. Not persisted to DB."""
+        if delay_minutes < 1:
+            raise ValueError("Delay must be at least 1 minute.")
+        schedule_id = str(uuid.uuid4())[:8]
+        run_at = datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)
+        self.scheduler.add_job(
+            self._run_task,
+            trigger=DateTrigger(run_date=run_at),
+            args=[schedule_id, user_id, channel_id, prompt],
+            id=schedule_id,
+        )
+        logger.info("One-shot task %s for %s in %dm", schedule_id, user_id, delay_minutes)
+        return schedule_id
 
     def start(self):
         """Start the scheduler and restore all persisted schedules from SQLite."""
