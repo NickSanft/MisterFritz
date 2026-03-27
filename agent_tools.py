@@ -20,7 +20,7 @@ from langchain_core.tools import tool, BaseTool
 import document_engine
 import image_generator
 from file_tools import get_file_tools_description
-from fritz_utils import DOC_STORAGE_DESCRIPTION, ROOT_USER, VISION_MODEL
+from fritz_utils import DOC_STORAGE_DESCRIPTION, FAST_OLLAMA_MODEL, ROOT_USER, VISION_MODEL
 from observability import METRICS
 from storage import ChromaStore
 
@@ -42,12 +42,16 @@ def _record_tool(name: str) -> None:
     METRICS.increment(f"tool.{name}")
 
 
-def get_current_time_internal() -> str:
-    """Return the current CST time as an RFC3339 string."""
-    cst = pytz.timezone('US/Central')
-    cst_now = datetime.now(pytz.utc).astimezone(cst)
-    timestamp = cst_now.isoformat()
-    logger.debug("Current time: %s", timestamp)
+def get_current_time_internal(timezone_name: str = "US/Central") -> str:
+    """Return the current time in the given IANA timezone as an RFC3339 string."""
+    try:
+        tz = pytz.timezone(timezone_name)
+    except pytz.UnknownTimeZoneError:
+        logger.warning("Unknown timezone %r, falling back to US/Central", timezone_name)
+        tz = pytz.timezone("US/Central")
+    now = datetime.now(pytz.utc).astimezone(tz)
+    timestamp = now.isoformat()
+    logger.debug("Current time (%s): %s", timezone_name, timestamp)
     return timestamp
 
 
@@ -68,6 +72,56 @@ def add_memory(user_id: str, memory_key: str, memory_to_store: str) -> str:
     memory_dict = {memory_key: memory_to_store}
     _get_chroma_store().put((str(user_id),), str(uuid.uuid4()), memory_dict)
     return "Added memory for {}: {}".format(memory_key, memory_to_store)
+
+
+_EXTRACTION_PROMPT = (
+    "You are a memory extraction assistant. Given a short conversation snippet, "
+    "extract any facts about the USER (not the assistant) that are worth remembering "
+    "long-term: preferences, personal details, timezone, job, interests, dislikes, "
+    "habits, names of people they mention, etc. "
+    "Return ONLY a JSON array of short plain-English fact strings. "
+    "Return [] if there is nothing notable. Do not explain.\n\n"
+    "User said: {user_msg}\nAssistant replied: {assistant_msg}"
+)
+
+
+def _extract_and_store_memories(user_id: str, user_message: str, assistant_response: str) -> None:
+    """Run a fast LLM pass to pull facts from the turn and persist them. Non-blocking caller."""
+    if not user_message or not assistant_response:
+        return
+    prompt = _EXTRACTION_PROMPT.format(
+        user_msg=user_message[:600],
+        assistant_msg=assistant_response[:600],
+    )
+    try:
+        response = _ollama_client.chat(
+            model=FAST_OLLAMA_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        content = response.message.content.strip()
+        match = re.search(r'\[.*?\]', content, re.DOTALL)
+        if not match:
+            return
+        facts = json.loads(match.group())
+        if not isinstance(facts, list):
+            return
+        for fact in facts[:5]:  # cap at 5 per turn to avoid noise
+            if isinstance(fact, str) and len(fact.strip()) > 8:
+                key = f"auto_{fact[:50].replace(' ', '_').lower()}"
+                add_memory(user_id, key, fact.strip())
+                logger.debug("Auto-extracted memory for %s: %s", user_id, fact)
+    except Exception as e:
+        logger.debug("Memory extraction skipped (non-fatal): %s", e)
+
+
+def extract_memories_background(user_id: str, user_message: str, assistant_response: str) -> None:
+    """Spawn a daemon thread to extract memories without blocking the response."""
+    import threading
+    threading.Thread(
+        target=_extract_and_store_memories,
+        args=(user_id, user_message, assistant_response),
+        daemon=True,
+    ).start()
 
 
 _RELATIONSHIP_LEVELS = [
@@ -126,14 +180,19 @@ def update_user_profile(user_id: str, updates: dict) -> None:
 # ── LangChain tools ───────────────────────────────────────────────────────────
 
 @tool(parse_docstring=True)
-def get_current_time():
+def get_current_time(timezone_name: str = "US/Central") -> str:
     """
     Returns the current time as a string in RFC3339 (YYYY-MM-DDTHH:MM:SS) format.
 
-    Example - 2025-01-13T23:11:56.337644-06:00
+    Always pass the user's timezone if you know it. Check the user profile for a
+    'timezone' field before calling. Example - 2025-01-13T23:11:56.337644-06:00
+
+    Args:
+        timezone_name: IANA timezone name e.g. "America/Chicago", "America/New_York",
+                       "Europe/London", "Asia/Tokyo". Defaults to US/Central.
     """
     _record_tool("get_current_time")
-    return get_current_time_internal()
+    return get_current_time_internal(timezone_name)
 
 
 @tool(parse_docstring=True)
@@ -361,6 +420,50 @@ def _load_skills() -> dict:
 
 # ── Tool registry ─────────────────────────────────────────────────────────────
 
+def make_list_schedules_tool(user_id: str, schedule_manager) -> BaseTool:
+    """Return a tool that lists the user's active recurring schedules."""
+
+    @tool
+    def list_my_schedules() -> str:
+        """List all of your active recurring scheduled tasks.
+        Use this when the user asks what they have scheduled or what reminders are active."""
+        try:
+            schedules = schedule_manager.list_schedules(user_id)
+        except Exception as e:
+            return f"Failed to retrieve schedules: {e}"
+        if not schedules:
+            return "You have no active recurring scheduled tasks."
+        lines = []
+        for s in schedules:
+            label = f" — {s['description']}" if s["description"] else ""
+            lines.append(f"ID `{s['id']}`{label}: every `{s['schedule']}` → {s['prompt']}")
+        return "\n".join(lines)
+
+    return list_my_schedules
+
+
+def make_cancel_reminder_tool(user_id: str, schedule_manager) -> BaseTool:
+    """Return a tool that cancels a scheduled task by ID."""
+
+    @tool
+    def cancel_reminder(schedule_id: str) -> str:
+        """Cancel a scheduled task or reminder by its ID.
+        Use list_my_schedules first if you need to find the ID.
+
+        Args:
+            schedule_id: The 8-character schedule ID to cancel.
+        """
+        try:
+            removed = schedule_manager.remove_schedule(schedule_id, user_id)
+            return f"Schedule `{schedule_id}` cancelled." if removed else f"No schedule found with ID `{schedule_id}`."
+        except PermissionError as e:
+            return str(e)
+        except Exception as e:
+            return f"Failed to cancel: {e}"
+
+    return cancel_reminder
+
+
 def make_schedule_message_tool(channel_id: int, schedule_manager) -> BaseTool:
     """Return a tool that lets Fritz schedule a one-time message in the current channel."""
 
@@ -379,10 +482,17 @@ def make_schedule_message_tool(channel_id: int, schedule_manager) -> BaseTool:
     return schedule_message
 
 
-def get_conversation_tools_description(include_file_tools: bool = False, schedule_tool: BaseTool | None = None) -> dict[str, tuple[BaseTool, str]]:
-    """Return a dict of {name: (tool, description)} for all conversation tools."""
+def get_conversation_tools_description(
+    include_file_tools: bool = False,
+    extra_tools: dict[str, tuple[BaseTool, str]] | None = None,
+) -> dict[str, tuple[BaseTool, str]]:
+    """Return a dict of {name: (tool, description)} for all conversation tools.
+
+    extra_tools: optional caller-supplied tools to merge in (e.g. schedule_message,
+    list_my_schedules, cancel_reminder which need runtime context like channel_id).
+    """
     tools = {
-        "get_current_time": (get_current_time, "Fetch the current time (US / Central Standard Time)."),
+        "get_current_time": (get_current_time, "Fetch the current time. Pass the user's timezone_name if known."),
         "scrape_web": (scrape_web, "If provided a URL by the user, this can be used to scrape a website's HTML."),
         "search_web": (search_web, "Use only to search the internet if you are unsure about something."),
         "roll_dice": (roll_dice, "Roll different types of dice."),
@@ -392,11 +502,8 @@ def get_conversation_tools_description(include_file_tools: bool = False, schedul
         "generate_image": (generate_image, "Generates an image based on a given prompt."),
         "analyze_image": (analyze_image, "Analyzes an image. If the user asks about an image, assume that the tool knows its location."),
     }
-    if schedule_tool is not None:
-        tools["schedule_message"] = (
-            schedule_tool,
-            "Schedule a one-time message to be sent in the current channel after N minutes.",
-        )
+    if extra_tools:
+        tools.update(extra_tools)
     tools.update(_load_skills())
     if include_file_tools:
         tools.update(get_file_tools_description())

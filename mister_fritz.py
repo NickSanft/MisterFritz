@@ -16,9 +16,12 @@ from langgraph.graph import StateGraph, add_messages
 
 from agent_tools import (
     add_memory,
+    extract_memories_background,
     get_conversation_tools_description,
     get_current_time_internal,
     get_user_profile,
+    make_cancel_reminder_tool,
+    make_list_schedules_tool,
     make_schedule_message_tool,
     search_memories_internal,
     update_user_profile,
@@ -285,14 +288,25 @@ def executor(state: EnhancedState, config: RunnableConfig):
     channel_id = metadata.get("channel_id")
     schedule_manager = metadata.get("schedule_manager")
 
-    schedule_tool = None
+    extra_tools: dict = {}
     if channel_id is not None and schedule_manager is not None:
-        schedule_tool = make_schedule_message_tool(channel_id, schedule_manager)
+        extra_tools["schedule_message"] = (
+            make_schedule_message_tool(channel_id, schedule_manager),
+            "Schedule a one-time message to be sent in the current channel after N minutes.",
+        )
+        extra_tools["list_my_schedules"] = (
+            make_list_schedules_tool(user_id, schedule_manager),
+            "List the user's active recurring scheduled tasks.",
+        )
+        extra_tools["cancel_reminder"] = (
+            make_cancel_reminder_tool(user_id, schedule_manager),
+            "Cancel a scheduled task or reminder by its ID.",
+        )
 
-    if include_file_tools or schedule_tool is not None:
+    if include_file_tools or extra_tools:
         tools_desc = get_conversation_tools_description(
             include_file_tools=include_file_tools,
-            schedule_tool=schedule_tool,
+            extra_tools=extra_tools or None,
         )
         system_prompt = get_system_description(tools_desc)
         active_tools = [tool_info[0] for tool_info in tools_desc.values()]
@@ -319,6 +333,11 @@ def executor(state: EnhancedState, config: RunnableConfig):
             if profile:
                 rel = profile.get("relationship_level", "stranger")
                 profile_lines = [f"Relationship with this user: {rel}"]
+                if profile.get("timezone"):
+                    profile_lines.append(
+                        f"Timezone: {profile['timezone']} — always pass this as timezone_name "
+                        f"when calling get_current_time, and use it for all time/scheduling references"
+                    )
                 if profile.get("communication_style"):
                     profile_lines.append(f"Communication style: {profile['communication_style']}")
                 interests = profile.get("interests", [])
@@ -344,6 +363,8 @@ def executor(state: EnhancedState, config: RunnableConfig):
         "save_memory": "Filing that away for future reference...",
         "analyze_image": "Analyzing your image(s) with vision AI...",
         "schedule_message": "Scheduling that for later...",
+        "list_my_schedules": "Checking your schedules...",
+        "cancel_reminder": "Cancelling that reminder...",
         "list_directory": "Browsing the workspace...",
         "read_file": "Reading a file...",
         "write_file": "Writing to a file...",
@@ -552,6 +573,11 @@ def ask_stuff(
         final_text = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
 
     image_paths = final_state.get("image_paths", []) if final_state else []
+
+    # Fire-and-forget: extract memorable facts from this turn in the background.
+    if final_text and base_prompt:
+        extract_memories_background(user_id_clean, base_prompt, final_text)
+
     return {
         "text": final_text,
         "image_paths": image_paths,
