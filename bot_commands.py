@@ -9,11 +9,11 @@ from discord.ext import commands
 from bot_adapters import split_into_chunks
 from cards import draw_cards, get_remaining_card_number, reload_deck
 from document_engine import query_documents
+import fritz_utils
 from fritz_utils import (
     FAST_OLLAMA_MODEL,
     FFMPEG_PATH,
     MessageSource,
-    ROOT_USER,
     THINKING_OLLAMA_MODEL,
     __version__,
 )
@@ -39,13 +39,14 @@ def _format_uptime(seconds: int) -> str:
     return f"{days}d {hours}h {minutes}m"
 
 
-async def _require_root(interaction: discord.Interaction) -> bool:
-    """Reject the interaction with an ephemeral message if the caller isn't ROOT_USER.
+async def _require_admin(interaction: discord.Interaction) -> bool:
+    """Reject the interaction with an ephemeral message if the caller isn't an admin.
 
-    Returns True if the caller is authorised, False otherwise. The caller should
-    short-circuit on False.
+    An admin is ROOT_USER or anyone listed in ADMIN_USERS. Returns True if the
+    caller is authorised, False otherwise. The caller should short-circuit on
+    False.
     """
-    if interaction.user.name == ROOT_USER:
+    if fritz_utils.is_admin(interaction.user.name):
         return True
     await interaction.response.send_message(
         "You do not have permission to use this command.", ephemeral=True
@@ -80,7 +81,7 @@ class FritzCommands(commands.Cog):
         description: Optional[str] = None,
     ):
         METRICS.increment("discord_commands.schedule_add")
-        if not await _require_root(interaction):
+        if not await _require_admin(interaction):
             return
         if self.schedule_manager is None:
             await interaction.response.send_message(
@@ -130,7 +131,7 @@ class FritzCommands(commands.Cog):
     @app_commands.describe(schedule_id="The schedule ID shown in /schedule list")
     async def schedule_remove(self, interaction: discord.Interaction, schedule_id: str):
         METRICS.increment("discord_commands.schedule_remove")
-        if not await _require_root(interaction):
+        if not await _require_admin(interaction):
             return
         if self.schedule_manager is None:
             await interaction.response.send_message("Scheduler is not available.", ephemeral=True)
@@ -335,7 +336,7 @@ class FritzCommands(commands.Cog):
         METRICS.increment("discord_commands.workspace")
         author = interaction.user.name
 
-        if author != ROOT_USER:
+        if not fritz_utils.is_admin(author):
             await interaction.response.send_message(
                 "You do not have permission to use file operations.", ephemeral=True
             )

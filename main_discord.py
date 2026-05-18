@@ -9,7 +9,8 @@ from discord.ext import commands
 
 from bot_adapters import split_into_chunks  # noqa: F401 — re-exported for tests
 from bot_commands import FritzCommands
-from fritz_utils import DISCORD_BOT_TOKEN, ROOT_USER, MessageSource, validate_config
+import fritz_utils
+from fritz_utils import DISCORD_BOT_TOKEN, MessageSource, validate_config
 from mister_fritz import ask_stuff
 from observability import METRICS, init_logging, start_metrics_server
 from scheduler import ScheduleManager
@@ -177,7 +178,7 @@ async def on_message(ctx):
                 message_clean, source, author,
                 progress_callback, streaming_callback,
                 user_image_paths,
-                user_workspaces.get(author) if author == ROOT_USER else None,
+                user_workspaces.get(author) if fritz_utils.is_admin(author) else None,
                 ctx.channel.id,
                 schedule_manager,
             )

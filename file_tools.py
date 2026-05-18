@@ -9,12 +9,12 @@ from typing import Optional
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
+import fritz_utils
 from fritz_utils import (
     EXEC_ALLOWED_COMMANDS,
     EXEC_OUTPUT_TRUNCATE,
     MAX_FILE_SIZE_BYTES,
     MAX_READ_LINES,
-    ROOT_USER,
 )
 from observability import METRICS
 
@@ -38,10 +38,10 @@ TEXT_EXTENSIONS = {
 
 
 def _authorize(config: RunnableConfig) -> None:
-    """Verify the requesting user matches the configured root_user."""
+    """Verify the requesting user is an admin (ROOT_USER or in ADMIN_USERS)."""
     metadata = config.get("metadata", {})
     user_id = metadata.get("user_id", "")
-    if not ROOT_USER or user_id != ROOT_USER:
+    if not fritz_utils.is_admin(user_id):
         raise PermissionError("You do not have permission to use file operations.")
 
 

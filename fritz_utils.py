@@ -130,6 +130,27 @@ DOC_STORAGE_DESCRIPTION: str = _env_or_json(
 
 ROOT_USER: str | None = _env_or_json("ROOT_USER", "root_user")
 
+# Additional admin Discord usernames, beyond ROOT_USER. Comma-separated env var.
+# Lets you grant a friend admin powers without rotating ROOT_USER.
+ADMIN_USERS: frozenset[str] = frozenset(
+    u.strip()
+    for u in os.environ.get("ADMIN_USERS", "").split(",")
+    if u.strip()
+)
+
+
+def is_admin(user_id: str | None) -> bool:
+    """Return True if user_id is the project owner (ROOT_USER) or in ADMIN_USERS.
+
+    Reads from the module's own scope at call time so tests can patch
+    ROOT_USER / ADMIN_USERS without re-importing callers.
+    """
+    if not user_id:
+        return False
+    if ROOT_USER and user_id == ROOT_USER:
+        return True
+    return user_id in ADMIN_USERS
+
 # ---------------------------------------------------------------------------
 # FFmpeg — prefer system install; fall back to bundled Windows executables
 # ---------------------------------------------------------------------------

@@ -188,7 +188,8 @@ All settings can be set as environment variables or in a `.env` file. See `.env.
 | Variable | Default | Description |
 |---|---|---|
 | `DISCORD_BOT_TOKEN` | — | **Required.** Your Discord bot token |
-| `ROOT_USER` | — | **Required.** Discord username with file operation access |
+| `ROOT_USER` | — | **Required.** Discord username with admin privileges (file tools, workspace, schedule mutation) |
+| `ADMIN_USERS` | — | Comma-separated additional admin usernames. Anyone listed gets the same powers as `ROOT_USER`. |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama API endpoint |
 | `THINKING_OLLAMA_MODEL` | `gpt-oss` | Primary reasoning model |
 | `FAST_OLLAMA_MODEL` | `llama3.2` | Fast model for quick tasks |
@@ -346,7 +347,7 @@ The first run downloads Stable Diffusion XL (~7 GB). GPU (CUDA) is strongly reco
 Install optional deps: `pip install easyocr PyMuPDF pillow`.
 
 **Schedule commands say "permission denied"**
-`/schedule add` and `/schedule remove` are restricted to `ROOT_USER` (Phase 2). `/schedule list` is open to all users. Set `ROOT_USER=<your discord username>` in `.env`.
+`/schedule add` and `/schedule remove` are restricted to admins (`ROOT_USER` plus anyone in `ADMIN_USERS`). `/schedule list` is open to all users. Set `ROOT_USER=<your discord username>` in `.env`, or add yourself to `ADMIN_USERS` if you only need additional admins.
 
 ---
 

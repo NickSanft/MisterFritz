@@ -14,6 +14,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - `CONTRIBUTING.md` with development setup, test/lint instructions, and how to add tools, commands, and config knobs.
 - GitHub issue templates (bug report, feature request) and a PR template.
 - `ruff` lint gate in CI.
+- Interactive setup wizard at `scripts/setup.py` — checks Ollama, pulls models, validates Discord token, writes `.env`.
+- `ADMIN_USERS` env var: comma-separated list of additional admin usernames. Anyone listed gets the same powers as `ROOT_USER`.
+- `fritz_utils.is_admin(user_id)` — single source of truth for admin authorisation, decoupled from the single-`ROOT_USER` assumption.
+
+### Changed
+- `_require_root` helper renamed to `_require_admin` to reflect that it now allows anyone in `ADMIN_USERS`, not just `ROOT_USER`.
+- All `user_id == ROOT_USER` comparisons across `bot_commands`, `file_tools`, `main_discord`, and `mister_fritz` migrated to `fritz_utils.is_admin()`. Zero behavioural change for single-admin deployments; multi-admin via `ADMIN_USERS` now works.
 
 ## [0.1.0] — 2026-05-18
 

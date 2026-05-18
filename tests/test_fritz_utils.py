@@ -99,6 +99,39 @@ class TestEnvVarOverride(unittest.TestCase):
         self.assertEqual(result, "env_value")
 
 
+class TestIsAdmin(unittest.TestCase):
+    """is_admin() should accept ROOT_USER or anyone in ADMIN_USERS."""
+
+    def test_root_user_is_admin(self):
+        with patch.object(fu, "ROOT_USER", "alice"), \
+             patch.object(fu, "ADMIN_USERS", frozenset()):
+            self.assertTrue(fu.is_admin("alice"))
+
+    def test_admin_users_member_is_admin(self):
+        with patch.object(fu, "ROOT_USER", "alice"), \
+             patch.object(fu, "ADMIN_USERS", frozenset({"bob", "carol"})):
+            self.assertTrue(fu.is_admin("bob"))
+            self.assertTrue(fu.is_admin("carol"))
+
+    def test_unknown_user_is_not_admin(self):
+        with patch.object(fu, "ROOT_USER", "alice"), \
+             patch.object(fu, "ADMIN_USERS", frozenset({"bob"})):
+            self.assertFalse(fu.is_admin("dave"))
+
+    def test_empty_user_id_is_not_admin(self):
+        with patch.object(fu, "ROOT_USER", "alice"), \
+             patch.object(fu, "ADMIN_USERS", frozenset()):
+            self.assertFalse(fu.is_admin(""))
+            self.assertFalse(fu.is_admin(None))
+
+    def test_no_root_user_set_admin_list_still_works(self):
+        # Deployments that drop ROOT_USER entirely in favour of ADMIN_USERS.
+        with patch.object(fu, "ROOT_USER", None), \
+             patch.object(fu, "ADMIN_USERS", frozenset({"alice"})):
+            self.assertTrue(fu.is_admin("alice"))
+            self.assertFalse(fu.is_admin("bob"))
+
+
 class TestMessageSource(unittest.TestCase):
     def test_all_variants_exist(self):
         from fritz_utils import MessageSource
