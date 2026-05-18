@@ -22,7 +22,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from fritz_utils import SCHEDULE_DB, MessageSource
+from fritz_utils import SCHEDULE_DB, SCHEDULE_MIN_DELAY_MIN, MessageSource
 
 logger = logging.getLogger(__name__)
 
@@ -199,8 +199,8 @@ class ScheduleManager:
         prompt: str,
     ) -> str:
         """Register a one-shot job that fires once after delay_minutes. Not persisted to DB."""
-        if delay_minutes < 1:
-            raise ValueError("Delay must be at least 1 minute.")
+        if delay_minutes < SCHEDULE_MIN_DELAY_MIN:
+            raise ValueError(f"Delay must be at least {SCHEDULE_MIN_DELAY_MIN} minute(s).")
         schedule_id = str(uuid.uuid4())[:8]
         run_at = datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)
         self.scheduler.add_job(

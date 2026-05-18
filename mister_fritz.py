@@ -26,7 +26,15 @@ from agent_tools import (
     search_memories_internal,
     update_user_profile,
 )
-from fritz_utils import CHAT_DB_NAME, FAST_OLLAMA_MODEL, MessageSource, OLLAMA_TIMEOUT, ROOT_USER, THINKING_OLLAMA_MODEL
+from fritz_utils import (
+    CHAT_DB_NAME,
+    FAST_OLLAMA_MODEL,
+    MessageSource,
+    OLLAMA_TIMEOUT,
+    ROOT_USER,
+    SUMMARIZE_THRESHOLD,
+    THINKING_OLLAMA_MODEL,
+)
 from observability import METRICS, init_logging
 from storage import SQLiteStore
 
@@ -127,7 +135,7 @@ def format_prompt(prompt: str, source: MessageSource, user_id: str, additional_i
 
 def should_continue(state: EnhancedState) -> Literal["summarize_conversation", "__end__"]:
     """Decide whether to summarize or end the conversation."""
-    return SUMMARIZE_CONVERSATION_NODE if len(state["messages"]) > 15 else END
+    return SUMMARIZE_CONVERSATION_NODE if len(state["messages"]) > SUMMARIZE_THRESHOLD else END
 
 
 def route_executor(state: EnhancedState) -> Literal["executor", "synthesizer", "summarize_conversation", "__end__"]:
@@ -146,7 +154,7 @@ def route_executor(state: EnhancedState) -> Literal["executor", "synthesizer", "
         else:
             return SYNTHESIZER_NODE
     else:
-        return SUMMARIZE_CONVERSATION_NODE if len(state["messages"]) > 15 else END
+        return SUMMARIZE_CONVERSATION_NODE if len(state["messages"]) > SUMMARIZE_THRESHOLD else END
 
 
 # ── Graph nodes ───────────────────────────────────────────────────────────────

@@ -9,15 +9,20 @@ from typing import Optional
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
-from fritz_utils import EXEC_ALLOWED_COMMANDS, ROOT_USER
+from fritz_utils import (
+    EXEC_ALLOWED_COMMANDS,
+    EXEC_OUTPUT_TRUNCATE,
+    MAX_FILE_SIZE_BYTES,
+    MAX_READ_LINES,
+    ROOT_USER,
+)
 from observability import METRICS
 
 logger = logging.getLogger(__name__)
 
-# Maximum lines to return in a single read
-MAX_READ_LINES = 500
-# Maximum file size in bytes to read (1MB)
-MAX_FILE_SIZE = 1_048_576
+# Backwards-compatible aliases — the test suite and other modules may still
+# import these names. The values are now sourced from fritz_utils.
+MAX_FILE_SIZE = MAX_FILE_SIZE_BYTES
 # File extensions to include in search by default
 TEXT_EXTENSIONS = {
     '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.c', '.cpp', '.h', '.hpp',
@@ -430,8 +435,8 @@ def execute_command(config: RunnableConfig, command: str, timeout: int = 30) -> 
         output = "\n".join(output_parts)
 
         # Truncate if too long for the LLM context
-        if len(output) > 10000:
-            output = output[:10000] + "\n... (output truncated)"
+        if len(output) > EXEC_OUTPUT_TRUNCATE:
+            output = output[:EXEC_OUTPUT_TRUNCATE] + "\n... (output truncated)"
 
         return output
 

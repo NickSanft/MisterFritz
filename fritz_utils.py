@@ -68,6 +68,26 @@ VISION_MODEL = os.environ.get("VISION_MODEL", "llava")
 OLLAMA_TIMEOUT: float = float(os.environ.get("OLLAMA_TIMEOUT", "120"))
 
 # ---------------------------------------------------------------------------
+# Tunables (formerly magic numbers in module bodies)
+# ---------------------------------------------------------------------------
+
+# Number of conversation messages before the agent triggers a summarisation pass.
+SUMMARIZE_THRESHOLD: int = int(os.environ.get("SUMMARIZE_THRESHOLD", "15"))
+
+# Max number of lines returned by the file_tools.read_file tool.
+MAX_READ_LINES: int = int(os.environ.get("MAX_READ_LINES", "500"))
+
+# Max file size (bytes) the file_tools will read or search through. 1 MiB default.
+MAX_FILE_SIZE_BYTES: int = int(os.environ.get("MAX_FILE_SIZE_BYTES", str(1_048_576)))
+
+# Truncation length for execute_command stdout/stderr returned to the LLM.
+EXEC_OUTPUT_TRUNCATE: int = int(os.environ.get("EXEC_OUTPUT_TRUNCATE", "10000"))
+
+# Minimum delay (minutes) for one-shot scheduled tasks. Prevents accidental
+# "schedule in 0 minutes" foot-guns.
+SCHEDULE_MIN_DELAY_MIN: int = int(os.environ.get("SCHEDULE_MIN_DELAY_MIN", "1"))
+
+# ---------------------------------------------------------------------------
 # File-tool sandbox
 # ---------------------------------------------------------------------------
 

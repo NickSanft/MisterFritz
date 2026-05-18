@@ -21,6 +21,20 @@ def split_into_chunks(s: str, chunk_size: int = 2000) -> list[str]:
     return [s[i:i + chunk_size] for i in range(0, len(s), chunk_size)]
 
 
+async def _require_root(interaction: discord.Interaction) -> bool:
+    """Reject the interaction with an ephemeral message if the caller isn't ROOT_USER.
+
+    Returns True if the caller is authorised, False otherwise. The caller should
+    short-circuit on False.
+    """
+    if interaction.user.name == ROOT_USER:
+        return True
+    await interaction.response.send_message(
+        "You do not have permission to use this command.", ephemeral=True
+    )
+    return False
+
+
 class FritzCommands(commands.Cog):
     """All MisterFritz slash commands."""
 
@@ -48,6 +62,8 @@ class FritzCommands(commands.Cog):
         description: Optional[str] = None,
     ):
         METRICS.increment("discord_commands.schedule_add")
+        if not await _require_root(interaction):
+            return
         if self.schedule_manager is None:
             await interaction.response.send_message(
                 "Scheduler is not available.", ephemeral=True
@@ -96,6 +112,8 @@ class FritzCommands(commands.Cog):
     @app_commands.describe(schedule_id="The schedule ID shown in /schedule list")
     async def schedule_remove(self, interaction: discord.Interaction, schedule_id: str):
         METRICS.increment("discord_commands.schedule_remove")
+        if not await _require_root(interaction):
+            return
         if self.schedule_manager is None:
             await interaction.response.send_message("Scheduler is not available.", ephemeral=True)
             return
