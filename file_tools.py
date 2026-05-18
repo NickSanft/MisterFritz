@@ -9,7 +9,6 @@ from typing import Optional
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
-import fritz_utils
 from fritz_utils import (
     EXEC_ALLOWED_COMMANDS,
     EXEC_OUTPUT_TRUNCATE,
@@ -38,11 +37,18 @@ TEXT_EXTENSIONS = {
 
 
 def _authorize(config: RunnableConfig) -> None:
-    """Verify the requesting user is an admin (ROOT_USER or in ADMIN_USERS)."""
+    """Verify the request has a workspace_root set.
+
+    Per-user workspaces (Phase 7b) mean any user can use file tools — they're
+    sandboxed to their own dir. The actual authorisation happens at /workspace
+    enable time and is enforced by _resolve_safe_path keeping operations
+    inside the workspace.
+    """
     metadata = config.get("metadata", {})
-    user_id = metadata.get("user_id", "")
-    if not fritz_utils.is_admin(user_id):
-        raise PermissionError("You do not have permission to use file operations.")
+    if not metadata.get("workspace_root"):
+        raise PermissionError(
+            "You do not have a workspace. Run /workspace enable to create one."
+        )
 
 
 def _get_workspace(config: RunnableConfig) -> str:

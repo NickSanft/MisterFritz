@@ -21,6 +21,7 @@ from image_generator import generate_image
 from mister_fritz import ask_stuff
 from observability import METRICS, format_health_text, get_health_snapshot
 from tts import TTSEngine
+import workspace_store
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +58,9 @@ async def _require_admin(interaction: discord.Interaction) -> bool:
 class FritzCommands(commands.Cog):
     """All MisterFritz slash commands."""
 
-    def __init__(self, bot: commands.Bot, sayer: TTSEngine, user_workspaces: dict[str, str], schedule_manager=None):
+    def __init__(self, bot: commands.Bot, sayer: TTSEngine, schedule_manager=None):
         self.bot = bot
         self.sayer = sayer
-        self.user_workspaces = user_workspaces
         self.schedule_manager = schedule_manager
 
     # ── Scheduled tasks ───────────────────────────────────────────────────────
@@ -330,38 +330,78 @@ class FritzCommands(commands.Cog):
 
     # ── File workspace ────────────────────────────────────────────────────────
 
-    @app_commands.command(name="workspace", description="Set or view the workspace directory for file operations")
-    @app_commands.describe(path="The directory path to use as workspace (leave empty to see current)")
-    async def workspace_slash(self, interaction: discord.Interaction, path: str = None):
-        METRICS.increment("discord_commands.workspace")
-        author = interaction.user.name
+    workspace = app_commands.Group(name="workspace", description="Manage the file-tools workspace")
 
-        if not fritz_utils.is_admin(author):
+    @workspace.command(name="status", description="Show your current workspace, if any")
+    async def workspace_status(self, interaction: discord.Interaction):
+        METRICS.increment("discord_commands.workspace.status")
+        author = interaction.user.name
+        current = workspace_store.get(author)
+        if current:
             await interaction.response.send_message(
-                "You do not have permission to use file operations.", ephemeral=True
+                f"Your workspace: `{current}`", ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                "You have no workspace. Run `/workspace enable` to create a sandboxed one.",
+                ephemeral=True,
+            )
+
+    @workspace.command(
+        name="enable",
+        description="Create a sandboxed workspace for yourself and enable file tools",
+    )
+    async def workspace_enable(self, interaction: discord.Interaction):
+        METRICS.increment("discord_commands.workspace.enable")
+        author = interaction.user.name
+        try:
+            path = workspace_store.enable_sandboxed(author)
+        except Exception as e:
+            logger.exception("Failed to enable workspace for %s", author)
+            await interaction.response.send_message(
+                f"❌ Could not create workspace: {e}", ephemeral=True
             )
             return
+        await interaction.response.send_message(
+            f"✅ Workspace ready at `{path}`.\n"
+            "File tools (read, write, edit, search, list, run) are now active in "
+            "your conversations. Drop files in that directory to give Fritz access.",
+            ephemeral=True,
+        )
 
-        if path is None:
-            current = self.user_workspaces.get(author)
-            if current:
-                await interaction.response.send_message(f"Current workspace: `{current}`", ephemeral=True)
-            else:
-                await interaction.response.send_message(
-                    "No workspace set. Use `/workspace <path>` to set a directory for file operations.",
-                    ephemeral=True,
-                )
+    @workspace.command(name="disable", description="Forget your workspace (files on disk are kept)")
+    async def workspace_disable(self, interaction: discord.Interaction):
+        METRICS.increment("discord_commands.workspace.disable")
+        author = interaction.user.name
+        removed = workspace_store.remove(author)
+        if removed:
+            await interaction.response.send_message(
+                "✅ Workspace disabled. Your files were not deleted — re-enable any time.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                "You don't have a workspace to disable.", ephemeral=True
+            )
+
+    @workspace.command(
+        name="set",
+        description="(Admin) Register an existing directory as your workspace",
+    )
+    @app_commands.describe(path="Absolute or ~ path to a directory on the bot host")
+    async def workspace_set(self, interaction: discord.Interaction, path: str):
+        METRICS.increment("discord_commands.workspace.set")
+        if not await _require_admin(interaction):
             return
-
+        author = interaction.user.name
         expanded = os.path.abspath(os.path.expanduser(path))
         if not os.path.isdir(expanded):
             await interaction.response.send_message(
                 f"Directory does not exist: `{expanded}`", ephemeral=True
             )
             return
-
-        self.user_workspaces[author] = expanded
+        workspace_store.set_path(author, expanded)
         await interaction.response.send_message(
-            f"Workspace set to: `{expanded}`\nFile tools (read, write, edit, search, list) are now active in conversations.",
+            f"✅ Workspace set to `{expanded}`. File tools active in conversations.",
             ephemeral=True,
         )

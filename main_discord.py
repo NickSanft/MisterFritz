@@ -9,13 +9,13 @@ from discord.ext import commands
 
 from bot_adapters import split_into_chunks  # noqa: F401 — re-exported for tests
 from bot_commands import FritzCommands
-import fritz_utils
 from fritz_utils import DISCORD_BOT_TOKEN, MessageSource, validate_config
 from mister_fritz import ask_stuff
 from observability import METRICS, init_logging, start_metrics_server
 from scheduler import ScheduleManager
 from stt import transcribe as _whisper_transcribe
 from tts import TTSEngine
+import workspace_store
 
 init_logging()
 logger = logging.getLogger(__name__)
@@ -89,7 +89,6 @@ intents.message_content = True
 client = commands.Bot(command_prefix=command_prefix, intents=intents)
 
 sayer = None
-user_workspaces: dict[str, str] = {}
 schedule_manager = None
 
 
@@ -103,7 +102,7 @@ async def on_ready():
         logger.info("TTS engine ready")
     schedule_manager = ScheduleManager(client)
     schedule_manager.start()
-    await client.add_cog(FritzCommands(client, sayer, user_workspaces, schedule_manager))
+    await client.add_cog(FritzCommands(client, sayer, schedule_manager))
     logger.info("Logged in as %s", client.user)
     try:
         synced = await client.tree.sync()
@@ -178,7 +177,7 @@ async def on_message(ctx):
                 message_clean, source, author,
                 progress_callback, streaming_callback,
                 user_image_paths,
-                user_workspaces.get(author) if fritz_utils.is_admin(author) else None,
+                workspace_store.get(author),
                 ctx.channel.id,
                 schedule_manager,
             )

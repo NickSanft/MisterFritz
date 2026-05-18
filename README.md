@@ -36,7 +36,10 @@ Mister Fritz is an AI-powered Discord bot with a sophisticated, sardonic persona
 | `/cards_remaining` | Check how many cards remain |
 | `/reload_deck` | Reset your deck |
 | `/health` | Show system health and metrics |
-| `/workspace <path>` | (Root user only) Set the file operations workspace |
+| `/help`, `/about` | Discover bot capabilities and version info |
+| `/workspace enable` | Create a sandboxed workspace and turn on file tools for yourself |
+| `/workspace disable` / `status` | Manage your workspace |
+| `/workspace set <path>` | (Admin only) Register an arbitrary host path as your workspace |
 
 Direct messages or `@mentions` trigger the full agent with all tools.
 Attach images or Discord voice messages — Fritz can analyze both.
@@ -188,8 +191,9 @@ All settings can be set as environment variables or in a `.env` file. See `.env.
 | Variable | Default | Description |
 |---|---|---|
 | `DISCORD_BOT_TOKEN` | — | **Required.** Your Discord bot token |
-| `ROOT_USER` | — | **Required.** Discord username with admin privileges (file tools, workspace, schedule mutation) |
+| `ROOT_USER` | — | **Required.** Discord username with admin privileges (`/workspace set`, `/schedule add/remove`) |
 | `ADMIN_USERS` | — | Comma-separated additional admin usernames. Anyone listed gets the same powers as `ROOT_USER`. |
+| `WORKSPACES_ROOT` | `./workspaces` | Parent directory for per-user sandboxed workspaces created via `/workspace enable`. |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama API endpoint |
 | `THINKING_OLLAMA_MODEL` | `gpt-oss` | Primary reasoning model |
 | `FAST_OLLAMA_MODEL` | `llama3.2` | Fast model for quick tasks |

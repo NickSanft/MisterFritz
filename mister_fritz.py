@@ -26,7 +26,6 @@ from agent_tools import (
     search_memories_internal,
     update_user_profile,
 )
-import fritz_utils
 from fritz_utils import (
     CHAT_DB_NAME,
     FAST_OLLAMA_MODEL,
@@ -290,7 +289,7 @@ def executor(state: EnhancedState, config: RunnableConfig):
     metadata = config.get("metadata", {})
     workspace_root = metadata.get("workspace_root")
     user_id = metadata.get("user_id", "")
-    include_file_tools = workspace_root is not None and fritz_utils.is_admin(user_id)
+    include_file_tools = workspace_root is not None
     progress_callback = metadata.get("progress_callback")
     streaming_callback = metadata.get("streaming_callback")
     channel_id = metadata.get("channel_id")
@@ -540,7 +539,7 @@ def ask_stuff(
         user_image_paths = []
         full_prompt = format_prompt(base_prompt, source, user_id_clean)
 
-    include_file_tools = workspace_root is not None and fritz_utils.is_admin(user_id_clean)
+    include_file_tools = workspace_root is not None
     system_prompt = get_system_description(get_conversation_tools_description(include_file_tools))
     logger.debug("Role description: %s", system_prompt)
     logger.debug("Prompt to ask: %s", full_prompt)

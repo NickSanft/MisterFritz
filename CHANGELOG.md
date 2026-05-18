@@ -21,6 +21,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ### Changed
 - `_require_root` helper renamed to `_require_admin` to reflect that it now allows anyone in `ADMIN_USERS`, not just `ROOT_USER`.
 - All `user_id == ROOT_USER` comparisons across `bot_commands`, `file_tools`, `main_discord`, and `mister_fritz` migrated to `fritz_utils.is_admin()`. Zero behavioural change for single-admin deployments; multi-admin via `ADMIN_USERS` now works.
+- **Phase 7b — per-user workspaces.** File tools are no longer admin-gated; any user can run `/workspace enable` to get a sandboxed directory at `WORKSPACES_ROOT/<user_id>/` and use the file tools (read/write/edit/search/list/run) scoped to it. Workspaces persist across bot restarts in a new SQLite table.
+- `/workspace` is now a subcommand group: `/workspace status` (anyone), `/workspace enable` (anyone, creates sandbox), `/workspace disable` (anyone), `/workspace set <path>` (admin only, registers arbitrary host path). **Breaking change** to the prior `/workspace [path]` shape.
+- `file_tools._authorize` now gates on "workspace is set", not "user is admin". The shell allowlist and `_resolve_safe_path` keep each user inside their own directory.
+- New `WORKSPACES_ROOT` env var (default `./workspaces`).
 
 ## [0.1.0] — 2026-05-18
 

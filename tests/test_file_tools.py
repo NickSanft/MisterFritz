@@ -28,19 +28,33 @@ def _config(workspace: str, user: str = _ROOT) -> dict:
 
 
 class TestAuthorization(unittest.TestCase):
+    """Phase 7b: file tools are per-user-sandboxed, not admin-gated.
+    Any user with workspace_root set in their config can use them.
+    """
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
 
-    def test_non_root_user_raises_permission_error(self):
-        with patch.object(fritz_utils, "ROOT_USER", _ROOT):
-            with self.assertRaises(PermissionError):
-                list_directory.invoke({"path": "."}, config=_config(self.tmp, user="evil_user"))
+    def test_user_with_workspace_is_allowed(self):
+        # Non-admin user with a workspace gets in.
+        result = list_directory.invoke(
+            {"path": "."},
+            config=_config(self.tmp, user="regular_user"),
+        )
+        # Empty dir returns a "Directory '.' is empty." message, not an error.
+        self.assertNotIn("Error", result)
+        self.assertNotIn("permission", result.lower())
 
-    def test_no_workspace_raises_value_error(self):
-        cfg = {"configurable": {}, "metadata": {"user_id": _ROOT, "workspace_root": None}}
-        with patch.object(fritz_utils, "ROOT_USER", _ROOT):
-            with self.assertRaises((ValueError, Exception)):
-                list_directory.invoke({"path": "."}, config=cfg)
+    def test_no_workspace_raises_permission_error(self):
+        # Without workspace_root set, _authorize should reject.
+        cfg = {"configurable": {}, "metadata": {"user_id": "anyone", "workspace_root": None}}
+        with self.assertRaises(PermissionError):
+            list_directory.invoke({"path": "."}, config=cfg)
+
+    def test_missing_workspace_key_raises_permission_error(self):
+        # Metadata exists but workspace_root key is absent.
+        cfg = {"configurable": {}, "metadata": {"user_id": "anyone"}}
+        with self.assertRaises(PermissionError):
+            list_directory.invoke({"path": "."}, config=cfg)
 
 
 class TestPathTraversal(unittest.TestCase):

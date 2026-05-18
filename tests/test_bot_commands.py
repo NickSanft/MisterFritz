@@ -50,7 +50,6 @@ def _make_cog(schedule_manager=None) -> FritzCommands:
     return FritzCommands(
         bot=MagicMock(),
         sayer=MagicMock(),
-        user_workspaces={},
         schedule_manager=schedule_manager,
     )
 
@@ -144,6 +143,53 @@ class TestScheduleListOpenToAll(unittest.IsolatedAsyncioTestCase):
             await cog.schedule_list.callback(cog, interaction)
         # list_schedules is read-only and per-user, so it's open by design.
         manager.list_schedules.assert_called_once_with("regular_user")
+
+
+class TestWorkspaceEnableOpenToAll(unittest.IsolatedAsyncioTestCase):
+    """Phase 7b: any user can enable their own sandboxed workspace."""
+
+    async def test_non_admin_can_enable_workspace(self):
+        cog = _make_cog()
+        with _patch_admins(), \
+             unittest.mock.patch("bot_commands.workspace_store.enable_sandboxed",
+                                 return_value="/tmp/workspaces/regular_user") as enable_mock:
+            interaction = _fake_interaction("regular_user")
+            await cog.workspace_enable.callback(cog, interaction)
+        enable_mock.assert_called_once_with("regular_user")
+        interaction.response.send_message.assert_called_once()
+        # Confirm the response is ephemeral (workspace path is sensitive).
+        _, kwargs = interaction.response.send_message.call_args
+        self.assertTrue(kwargs.get("ephemeral"))
+
+    async def test_anyone_can_disable_their_workspace(self):
+        cog = _make_cog()
+        with _patch_admins(), \
+             unittest.mock.patch("bot_commands.workspace_store.remove", return_value=True):
+            interaction = _fake_interaction("regular_user")
+            await cog.workspace_disable.callback(cog, interaction)
+        interaction.response.send_message.assert_called_once()
+
+    async def test_status_shows_current_workspace(self):
+        cog = _make_cog()
+        with _patch_admins(), \
+             unittest.mock.patch("bot_commands.workspace_store.get",
+                                 return_value="/tmp/workspaces/alice"):
+            interaction = _fake_interaction("alice")
+            await cog.workspace_status.callback(cog, interaction)
+        interaction.response.send_message.assert_called_once()
+
+
+class TestWorkspaceSetAdminOnly(unittest.IsolatedAsyncioTestCase):
+    """/workspace set <path> is admin-only — it registers an arbitrary host path."""
+
+    async def test_non_admin_blocked_from_workspace_set(self):
+        cog = _make_cog()
+        with _patch_admins(), \
+             unittest.mock.patch("bot_commands.workspace_store.set_path") as set_mock:
+            interaction = _fake_interaction("not_root")
+            await cog.workspace_set.callback(cog, interaction, path="/tmp/whatever")
+        interaction.response.send_message.assert_called_once()
+        set_mock.assert_not_called()
 
 
 if __name__ == "__main__":

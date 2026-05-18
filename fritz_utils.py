@@ -51,6 +51,9 @@ def _find_binary(name: str, fallback: str) -> str:
 
 DOC_FOLDER = os.environ.get("DOC_FOLDER", "./input")
 CHROMA_DB_PATH = os.environ.get("CHROMA_DB_PATH", "./chroma_store")
+# Parent directory for per-user sandboxed workspaces created via /workspace enable.
+# Each enabled user gets their own subdirectory WORKSPACES_ROOT/<user_id>/.
+WORKSPACES_ROOT = os.environ.get("WORKSPACES_ROOT", "./workspaces")
 CHROMA_COLLECTION_NAME = os.environ.get("CHROMA_COLLECTION_NAME", "word_docs_rag")
 DB_NAME      = os.environ.get("DB_NAME", "fritz.db")
 CHAT_DB_NAME = os.environ.get("CHAT_DB_NAME", DB_NAME)
