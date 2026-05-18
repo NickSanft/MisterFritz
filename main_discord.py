@@ -7,6 +7,7 @@ import uuid
 import discord
 from discord.ext import commands
 
+from bot_adapters import split_into_chunks  # noqa: F401 — re-exported for tests
 from bot_commands import FritzCommands
 from fritz_utils import DISCORD_BOT_TOKEN, ROOT_USER, MessageSource, validate_config
 from mister_fritz import ask_stuff
@@ -67,10 +68,6 @@ class StreamingMessageHandler:
                 await self.message.channel.send(files=files)
         except discord.errors.HTTPException as e:
             logger.warning("Error in final update: %s", e)
-
-
-def split_into_chunks(s: str, chunk_size: int = 2000) -> list[str]:
-    return [s[i:i + chunk_size] for i in range(0, len(s), chunk_size)]
 
 
 def _cleanup_temp_files(paths: list[str], request_id: str) -> None:

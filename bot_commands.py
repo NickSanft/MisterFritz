@@ -6,6 +6,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from bot_adapters import split_into_chunks
 from cards import draw_cards, get_remaining_card_number, reload_deck
 from document_engine import query_documents
 from fritz_utils import FFMPEG_PATH, ROOT_USER, MessageSource
@@ -15,10 +16,6 @@ from observability import METRICS, format_health_text, get_health_snapshot
 from tts import TTSEngine
 
 logger = logging.getLogger(__name__)
-
-
-def split_into_chunks(s: str, chunk_size: int = 2000) -> list[str]:
-    return [s[i:i + chunk_size] for i in range(0, len(s), chunk_size)]
 
 
 async def _require_root(interaction: discord.Interaction) -> bool:

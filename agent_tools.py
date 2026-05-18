@@ -9,9 +9,9 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
+import httpx
 import ollama as _ollama_client
 import pytz
-import requests
 from bs4 import BeautifulSoup
 from ddgs import DDGS
 from langchain_core.runnables import RunnableConfig
@@ -25,6 +25,15 @@ from observability import METRICS
 from storage import ChromaStore
 
 logger = logging.getLogger(__name__)
+
+# Shared HTTP client for scrape_web. Reusing the client gives us connection
+# pooling and HTTP keep-alive across calls. Timeout splits connect vs read so
+# a slow-but-reachable host doesn't get the same budget as a dead one.
+_HTTP_CLIENT = httpx.Client(
+    timeout=httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=5.0),
+    follow_redirects=True,
+    headers={"User-Agent": "MisterFritz/1.0 (+scrape_web)"},
+)
 
 _chroma_store = None
 
@@ -208,7 +217,7 @@ def scrape_web(url: str):
     """
     try:
         _record_tool("scrape_web")
-        response = requests.get(url, timeout=10)
+        response = _HTTP_CLIENT.get(url)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         for element in soup(['script', 'style', 'head', 'title', 'meta', '[document]']):

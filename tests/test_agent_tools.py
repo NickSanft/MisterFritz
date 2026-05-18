@@ -33,6 +33,7 @@ _ensure_mock("document_engine")
 # Import the functions we want to test AFTER ensuring mocks are in place.
 # (chroma_store, langchain_ollama, and langchain.agents are real packages in
 # the venv; they don't connect to Ollama at import / __init__ time.)
+import agent_tools  # noqa: E402  — also needed for patching _HTTP_CLIENT
 from agent_tools import (  # noqa: E402  (import after sys.modules setup)
     get_current_time_internal,
     scrape_web,
@@ -98,29 +99,28 @@ class TestScrapeWebTool(unittest.TestCase):
 
     def test_extracts_visible_text(self):
         html = "<html><body><p>Hello world</p></body></html>"
-        with patch("agent_tools.requests.get", return_value=self._mock_response(html)):
+        with patch.object(agent_tools._HTTP_CLIENT, "get", return_value=self._mock_response(html)):
             result = scrape_web.invoke({"url": "http://example.com"})
         self.assertIn("Hello world", result)
 
     def test_strips_script_tags(self):
         html = "<html><body><script>alert('xss')</script><p>Clean</p></body></html>"
-        with patch("agent_tools.requests.get", return_value=self._mock_response(html)):
+        with patch.object(agent_tools._HTTP_CLIENT, "get", return_value=self._mock_response(html)):
             result = scrape_web.invoke({"url": "http://example.com"})
         self.assertNotIn("alert", result)
         self.assertIn("Clean", result)
 
     def test_returns_error_string_on_exception(self):
-        with patch("agent_tools.requests.get", side_effect=ConnectionError("failed")):
+        with patch.object(agent_tools._HTTP_CLIENT, "get", side_effect=ConnectionError("failed")):
             result = scrape_web.invoke({"url": "http://bad-host.invalid"})
         self.assertIn("Error", result)
 
-    def test_passes_timeout_to_requests(self):
-        with patch("agent_tools.requests.get",
-                   return_value=self._mock_response("<p>ok</p>")) as mock_get:
-            scrape_web.invoke({"url": "http://example.com"})
-        _, kwargs = mock_get.call_args
-        self.assertIn("timeout", kwargs)
-        self.assertEqual(kwargs["timeout"], 10)
+    def test_http_client_has_timeout_configured(self):
+        # Timeout is configured on the shared client, not per-call. Sanity-check
+        # the client was built with a non-default timeout.
+        self.assertIsNotNone(agent_tools._HTTP_CLIENT.timeout)
+        self.assertGreater(agent_tools._HTTP_CLIENT.timeout.connect, 0)
+        self.assertGreater(agent_tools._HTTP_CLIENT.timeout.read, 0)
 
 
 class TestSearchWebTool(unittest.TestCase):
