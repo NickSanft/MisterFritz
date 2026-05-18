@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}{{ user_id }} · Mister Fritz Admin{% endblock %}
+
+{% block body %}
+<p><a href="/users">← back to users</a></p>
+
+<div class="card">
+    <h2>{{ user_id }}</h2>
+    <table>
+        <tr><th>Workspace</th><td>
+            {% if data.workspace_path %}<code>{{ data.workspace_path }}</code>
+            {% else %}<span class="muted">none</span>{% endif %}
+        </td></tr>
+        <tr><th>Conversation checkpoints</th><td>{{ data.conversation_checkpoint_count }}</td></tr>
+        <tr><th>Memory entries</th><td>{{ data.memories | length }}</td></tr>
+        <tr><th>Schedules</th><td>{{ data.schedules | length }}</td></tr>
+    </table>
+</div>
+
+<div class="card">
+    <h2>Schedules</h2>
+    {% if data.schedules %}
+    <table>
+        <thead><tr><th>ID</th><th>Every</th><th>Prompt</th><th>Description</th></tr></thead>
+        <tbody>
+            {% for s in data.schedules %}
+            <tr>
+                <td><code>{{ s.id }}</code></td>
+                <td><code>{{ s.schedule }}</code></td>
+                <td>{{ s.prompt }}</td>
+                <td>{{ s.description or "" }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No schedules.</p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2>Memories ({{ data.memories | length }})</h2>
+    {% if data.memories %}
+    <table>
+        <thead><tr><th>Key</th><th>Content</th></tr></thead>
+        <tbody>
+            {% for m in data.memories %}
+            <tr>
+                <td><code>{{ m.id }}</code></td>
+                <td><code>{{ (m.content or "") | truncate(160) }}</code></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No memories stored.</p>
+    {% endif %}
+</div>
+{% endblock %}

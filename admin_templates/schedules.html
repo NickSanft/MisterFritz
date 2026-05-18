@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Schedules · Mister Fritz Admin{% endblock %}
+
+{% block body %}
+<div class="card">
+    <h2>All scheduled tasks <span class="pill">{{ schedules | length }}</span></h2>
+    {% if schedules %}
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th><th>User</th><th>Every</th>
+                <th>Prompt</th><th>Description</th><th>Created</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for s in schedules %}
+            <tr>
+                <td><code>{{ s.id }}</code></td>
+                <td><a href="/users/{{ s.user_id }}"><code>{{ s.user_id }}</code></a></td>
+                <td><code>{{ s.schedule }}</code></td>
+                <td>{{ s.prompt | truncate(80) }}</td>
+                <td>{{ s.description or "" }}</td>
+                <td class="muted">{{ s.created }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No schedules registered.</p>
+    {% endif %}
+</div>
+{% endblock %}

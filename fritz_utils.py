@@ -95,6 +95,11 @@ SCHEDULE_MIN_DELAY_MIN: int = int(os.environ.get("SCHEDULE_MIN_DELAY_MIN", "1"))
 # Max recurring schedules any single user may have at once. Abuse cap.
 MAX_SCHEDULES_PER_USER: int = int(os.environ.get("MAX_SCHEDULES_PER_USER", "10"))
 
+# Admin panel: shared password gate + local-only port. If ADMIN_PANEL_PASSWORD
+# is unset the panel won't start at all.
+ADMIN_PANEL_PASSWORD: str | None = os.environ.get("ADMIN_PANEL_PASSWORD") or None
+ADMIN_PANEL_PORT: int = int(os.environ.get("ADMIN_PANEL_PORT", "8001"))
+
 # ---------------------------------------------------------------------------
 # File-tool sandbox
 # ---------------------------------------------------------------------------

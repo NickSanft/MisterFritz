@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Documents · Mister Fritz Admin{% endblock %}
+
+{% block body %}
+<div class="card">
+    <h2>Documents in <code>{{ doc_folder }}</code> <span class="pill">{{ docs | length }}</span></h2>
+    {% if docs %}
+    <table>
+        <thead>
+            <tr><th>Name</th><th>Size</th><th>Modified</th></tr>
+        </thead>
+        <tbody>
+            {% for d in docs %}
+            <tr>
+                <td><code>{{ d.name }}</code></td>
+                <td class="muted">{{ d.size_bytes }} B</td>
+                <td class="muted">{{ d.mtime }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No documents found in <code>{{ doc_folder }}</code>.</p>
+    {% endif %}
+</div>
+{% endblock %}

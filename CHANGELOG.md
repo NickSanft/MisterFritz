@@ -36,6 +36,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - New `/export` command sends the user a JSON attachment of every memory, schedule, profile entry, workspace path, and conversation-checkpoint count Fritz has on them. 8 MB cap.
 - Every `/forget` and `/export` event appends an NDJSON line to `AUDIT_LOG_PATH` (default `./audit.log`) so deletions are reconstructable.
 - New `privacy` module centralises all per-user data ops so the upcoming web admin panel can reuse them.
+- **Phase 9a — read-only web admin panel.** New Starlette-based HTML admin UI at `http://127.0.0.1:8001/` (port configurable). HTTP Basic auth gated by `ADMIN_PANEL_PASSWORD`; if unset the panel doesn't start at all. Pages: overview (version/uptime/counters/errors), users list, per-user detail, all-schedules, document inventory, and a `/health` JSON route. Bound to localhost only — SSH-forward for remote access.
+- Reuses the existing Jinja2 + uvicorn deps; no new packages added (Starlette comes in transitively via the LLM stack).
 
 ## [0.1.0] — 2026-05-18
 

@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Overview · Mister Fritz Admin{% endblock %}
+
+{% block body %}
+<div class="card">
+    <h2>Bot</h2>
+    <table>
+        <tr><th>Version</th><td><code>{{ version }}</code></td></tr>
+        <tr><th>Uptime</th><td>{{ uptime_sec }}s</td></tr>
+    </table>
+</div>
+
+<div class="card">
+    <h2>Counters</h2>
+    {% if counters %}
+    <table>
+        <thead><tr><th>Name</th><th>Value</th></tr></thead>
+        <tbody>
+            {% for name, val in counters.items() | sort %}
+            <tr><td><code>{{ name }}</code></td><td>{{ val }}</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No counters recorded yet.</p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2>Errors</h2>
+    {% if errors %}
+    <table>
+        <thead><tr><th>Operation</th><th>Count</th></tr></thead>
+        <tbody>
+            {% for op, count in errors.items() | sort %}
+            <tr><td><code>{{ op }}</code></td><td>{{ count }}</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% if last_error %}
+    <p class="muted">Last error: <code>{{ last_error }}</code></p>
+    {% endif %}
+    {% else %}
+    <p class="muted">No errors recorded.</p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2>Latencies (rolling)</h2>
+    {% if latencies %}
+    <table>
+        <thead><tr><th>Operation</th><th>Avg (s)</th><th>Samples</th></tr></thead>
+        <tbody>
+            {% for op, info in latencies.items() | sort %}
+            <tr>
+                <td><code>{{ op }}</code></td>
+                <td>{{ "%.3f"|format(info.avg_sec) }}</td>
+                <td>{{ info.count }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No latency samples yet.</p>
+    {% endif %}
+</div>
+{% endblock %}

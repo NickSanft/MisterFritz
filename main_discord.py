@@ -7,6 +7,7 @@ import uuid
 import discord
 from discord.ext import commands
 
+from admin_panel import start_admin_panel
 from bot_adapters import split_into_chunks  # noqa: F401 — re-exported for tests
 from bot_commands import FritzCommands
 from fritz_utils import DISCORD_BOT_TOKEN, MessageSource, validate_config
@@ -102,6 +103,8 @@ async def on_ready():
         logger.info("TTS engine ready")
     schedule_manager = ScheduleManager(client)
     schedule_manager.start()
+    # Start the read-only admin panel (no-op if ADMIN_PANEL_PASSWORD is unset).
+    start_admin_panel(schedule_manager=schedule_manager)
     await client.add_cog(FritzCommands(client, sayer, schedule_manager))
     logger.info("Logged in as %s", client.user)
     try:

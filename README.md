@@ -197,6 +197,8 @@ All settings can be set as environment variables or in a `.env` file. See `.env.
 | `ADMIN_USERS` | — | Comma-separated additional admin usernames. Anyone listed gets the same powers as `ROOT_USER`. |
 | `WORKSPACES_ROOT` | `./workspaces` | Parent directory for per-user sandboxed workspaces created via `/workspace enable`. |
 | `AUDIT_LOG_PATH` | `audit.log` | Path to the append-only NDJSON audit log written on every `/forget` and `/export` event. |
+| `ADMIN_PANEL_PASSWORD` | — | Set to enable the read-only web admin panel. Leave unset to disable. |
+| `ADMIN_PANEL_PORT` | `8001` | Port for the admin panel. Bound to `127.0.0.1` only — use SSH port forwarding for remote access. |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama API endpoint |
 | `THINKING_OLLAMA_MODEL` | `gpt-oss` | Primary reasoning model |
 | `FAST_OLLAMA_MODEL` | `llama3.2` | Fast model for quick tasks |
@@ -277,6 +279,25 @@ The bot exposes a metrics server on port `8000` (configurable via `METRICS_PORT`
 | `misterfritz_uptime_seconds` | Gauge | — |
 
 The compose stack in `docker-compose.yml` includes Prometheus and Grafana with a pre-provisioned dashboard.
+
+---
+
+## Admin panel
+
+Set `ADMIN_PANEL_PASSWORD` in `.env` and the bot will start a read-only HTML admin panel at `http://127.0.0.1:8001/` (port configurable via `ADMIN_PANEL_PORT`). It's bound to localhost — for remote access, SSH-forward the port instead of exposing it.
+
+Auth is HTTP Basic; any username works, only the password matters. Pages:
+
+| Path | Purpose |
+|---|---|
+| `/` | Bot version, uptime, counters, error breakdown, latency summary |
+| `/users` | Every user with stored data and counts of memories / schedules / workspace |
+| `/users/<id>` | Per-user detail page — memories, schedules, conversation checkpoint count |
+| `/schedules` | All scheduled tasks across all users |
+| `/documents` | Files in `DOC_FOLDER` with sizes and modified times |
+| `/health` | Same JSON snapshot as `:8000/health`, served alongside |
+
+If `ADMIN_PANEL_PASSWORD` is unset the panel doesn't start at all.
 
 ---
 
