@@ -35,7 +35,7 @@ from fritz_utils import (
     SUMMARIZE_THRESHOLD,
     THINKING_OLLAMA_MODEL,
 )
-from observability import METRICS, init_logging
+from observability import init_logging
 from storage import SQLiteStore
 
 PLANNER_NODE = "planner"

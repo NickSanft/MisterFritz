@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 # Load .env file if present (silently ignored when absent)
 load_dotenv()
 
+__version__ = "0.1.0"
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers

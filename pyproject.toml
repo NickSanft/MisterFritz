@@ -1,0 +1,37 @@
+[tool.ruff]
+# Match the Python version we run on.
+target-version = "py312"
+
+# Don't lint third-party / generated / data directories.
+extend-exclude = [
+    ".venv",
+    "venv",
+    "chroma_store",
+    "input",
+    "output",
+    "modelfiles",
+    "infra",
+    "local-sim",
+    "skills",
+]
+
+# Long lines are a frequent cosmetic complaint that's not worth gating CI on
+# for this codebase right now. Bump rather than ignore so the rule still
+# nudges egregious cases.
+line-length = 160
+
+[tool.ruff.lint]
+# E = pycodestyle errors (actual bugs and style errors)
+# F = pyflakes (unused imports, undefined names, real bugs)
+# W = pycodestyle warnings (whitespace etc.)
+select = ["E", "F", "W"]
+
+# E501 (line-too-long) is mostly cosmetic; line-length above handles the
+# extreme cases. E701 (multiple statements on one line) is occasionally
+# useful in dense control flow.
+ignore = ["E501", "E701"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test files re-import modules under test through sys.modules manipulation;
+# unused-import warnings are noise there.
+"tests/*" = ["F401"]

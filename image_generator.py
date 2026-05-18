@@ -3,7 +3,7 @@ from datetime import datetime
 
 from diffusers import AutoPipelineForText2Image
 import torch
-import xformers
+import xformers  # noqa: F401  — registers optimised attention kernels in PyTorch on import
 
 output_directory = "output"
 method = "cpu"

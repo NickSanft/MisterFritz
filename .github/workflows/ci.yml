@@ -21,10 +21,13 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Install test/lint tools
-        run: pip install pytest pytest-cov pytest-asyncio
+        run: pip install pytest pytest-cov pytest-asyncio ruff
 
       - name: Compile all sources
         run: python -m compileall -q .
+
+      - name: Lint with ruff
+        run: ruff check .
 
       - name: Run tests with coverage
         run: |

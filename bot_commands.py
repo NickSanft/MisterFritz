@@ -9,13 +9,34 @@ from discord.ext import commands
 from bot_adapters import split_into_chunks
 from cards import draw_cards, get_remaining_card_number, reload_deck
 from document_engine import query_documents
-from fritz_utils import FFMPEG_PATH, ROOT_USER, MessageSource
+from fritz_utils import (
+    FAST_OLLAMA_MODEL,
+    FFMPEG_PATH,
+    MessageSource,
+    ROOT_USER,
+    THINKING_OLLAMA_MODEL,
+    __version__,
+)
 from image_generator import generate_image
 from mister_fritz import ask_stuff
 from observability import METRICS, format_health_text, get_health_snapshot
 from tts import TTSEngine
 
 logger = logging.getLogger(__name__)
+
+
+def _format_uptime(seconds: int) -> str:
+    """Render a seconds count as e.g. '2d 3h 17m' or '4m 12s'."""
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, sec = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {sec}s"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h {minutes}m"
+    days, hours = divmod(hours, 24)
+    return f"{days}d {hours}h {minutes}m"
 
 
 async def _require_root(interaction: discord.Interaction) -> bool:
@@ -159,6 +180,62 @@ class FritzCommands(commands.Cog):
     async def health_slash(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.health")
         await interaction.response.send_message(format_health_text(get_health_snapshot()))
+
+    @app_commands.command(name="help", description="Show what Mister Fritz can do")
+    async def help_slash(self, interaction: discord.Interaction):
+        METRICS.increment("discord_commands.help")
+        body = (
+            "**How to talk to me**\n"
+            "• DM me, or `@mention` me in a channel — I run the full agent.\n"
+            "• Attach an image and I will analyse it.\n"
+            "• Send a voice message and I will transcribe it.\n"
+            "\n"
+            "**Conversation tools I have access to**\n"
+            "• Web search and page scraping\n"
+            "• Local document RAG (drop files in the `input/` folder)\n"
+            "• Per-user persistent memory of past chats\n"
+            "• Image generation (Stable Diffusion XL)\n"
+            "• Image analysis (LLaVA vision model)\n"
+            "• Dice rolls, current time, scheduled reminders\n"
+            "\n"
+            "**Slash commands**\n"
+            "• `/lore <query>` — search local RAG documents\n"
+            "• `/gen <prompt>` — generate an image\n"
+            "• `/voice <message>` — synthesise speech\n"
+            "• `/join` / `/leave` — voice channel control\n"
+            "• `/draw <n>`, `/cards_remaining`, `/reload_deck` — card game\n"
+            "• `/schedule add|list|remove` — recurring scheduled prompts\n"
+            "• `/health`, `/about` — system info\n"
+            "• `/workspace <path>` — (admin) set the file-tools workspace\n"
+            "\n"
+            "Run `/about` for version and storage info."
+        )
+        await interaction.response.send_message(body, ephemeral=True)
+
+    @app_commands.command(name="about", description="Show version, models, and data storage info")
+    async def about_slash(self, interaction: discord.Interaction):
+        METRICS.increment("discord_commands.about")
+        snap = get_health_snapshot()
+        uptime_s = int(snap.get("uptime_seconds", 0))
+        uptime = _format_uptime(uptime_s)
+        body = (
+            f"**Mister Fritz v{__version__}**\n"
+            f"_An AI butler of impeccable bearing and barely-concealed weariness._\n"
+            "\n"
+            f"**Models**\n"
+            f"• Thinking: `{THINKING_OLLAMA_MODEL}`\n"
+            f"• Fast: `{FAST_OLLAMA_MODEL}`\n"
+            "\n"
+            f"**Uptime:** {uptime}\n"
+            "\n"
+            "**Data storage**\n"
+            "All conversation summaries, memories, and schedules are stored "
+            "locally on this server — nothing leaves the host. Documents you "
+            "drop in the `input/` folder are indexed into a local ChromaDB.\n"
+            "\n"
+            "Source: https://github.com/NickSanft/MisterFritz"
+        )
+        await interaction.response.send_message(body, ephemeral=True)
 
     # ── AI / content ──────────────────────────────────────────────────────────
 

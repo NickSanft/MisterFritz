@@ -7,7 +7,6 @@ import random
 import re
 import uuid
 from datetime import datetime
-from typing import Optional
 
 import httpx
 import ollama as _ollama_client
@@ -20,7 +19,7 @@ from langchain_core.tools import tool, BaseTool
 import document_engine
 import image_generator
 from file_tools import get_file_tools_description
-from fritz_utils import DOC_STORAGE_DESCRIPTION, FAST_OLLAMA_MODEL, ROOT_USER, VISION_MODEL
+from fritz_utils import DOC_STORAGE_DESCRIPTION, FAST_OLLAMA_MODEL, VISION_MODEL
 from observability import METRICS
 from storage import ChromaStore
 

@@ -1,6 +1,5 @@
 import atexit
 import os
-import sys
 import time
 import queue
 import threading
@@ -8,12 +7,14 @@ import json
 import logging
 from typing import List, Optional
 import io
-import msoffcrypto
-import openpyxl
+# msoffcrypto + openpyxl are pulled in by UnstructuredExcelLoader at runtime;
+# importing them here surfaces missing-dependency errors at startup instead of
+# the first xlsx ingest.
+import msoffcrypto  # noqa: F401  — capability probe for encrypted xlsx support
+import openpyxl  # noqa: F401  — capability probe for xlsx support
 
 # Concurrency imports
 import concurrent.futures
-import multiprocessing
 
 # Watchdog for Live Sync
 from watchdog.observers import Observer
@@ -515,8 +516,8 @@ class GradeDocuments(BaseModel):
 
 
 structured_llm_grader = fast_llm.with_structured_output(GradeDocuments)
-grader_system = """You are a grader assessing relevance of a retrieved document to a user question. 
-If the document contains keyword(s) or semantic meaning related to the user question, grade it as relevant. 
+grader_system = """You are a grader assessing relevance of a retrieved document to a user question.
+If the document contains keyword(s) or semantic meaning related to the user question, grade it as relevant.
 Give a binary score 'yes' or 'no' score to indicate whether the document is relevant to the question."""
 grader_prompt = ChatPromptTemplate.from_messages(
     [("system", grader_system), ("human", "Retrieved document: \n\n {document} \n\n User question: {question}")]
@@ -524,7 +525,7 @@ grader_prompt = ChatPromptTemplate.from_messages(
 grader_chain = grader_prompt | structured_llm_grader
 
 rag_system_prompt = """You are a helpful assistant. Answer the user's question based ONLY on the context provided below.
-The context is formatted as: 
+The context is formatted as:
 [Source: filename | Location: page or line number]
 Content...
 

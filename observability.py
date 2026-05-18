@@ -14,11 +14,9 @@ logger = logging.getLogger(__name__)
 # prometheus-client is listed in requirements.txt. If somehow absent, metrics
 # are still tracked internally; Prometheus scraping just won't be available.
 try:
-    import prometheus_client as _prom
     from prometheus_client import (
         Counter, Gauge, Histogram,
         CONTENT_TYPE_LATEST, generate_latest,
-        REGISTRY,
     )
 
     _PROM_TOOL_CALLS = Counter(
