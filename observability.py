@@ -230,6 +230,37 @@ def _format_duration(seconds: float) -> str:
     return f"{sec}s"
 
 
+# ── Audit log ────────────────────────────────────────────────────────────────
+# Append-only NDJSON log for actions admins might want to investigate later
+# (data deletion, user-data export, permission changes). Path is env-overridable.
+
+AUDIT_LOG_PATH = os.environ.get("AUDIT_LOG_PATH", "audit.log")
+_AUDIT_LOCK = threading.Lock()
+
+
+def audit_log(event: str, **fields) -> None:
+    """Append a single JSON event to AUDIT_LOG_PATH.
+
+    Best-effort: never raises. Used by /forget and /export so deletion
+    events are reconstructable even after the data itself is gone.
+    """
+    record = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "event": event,
+        **fields,
+    }
+    try:
+        line = json.dumps(record, default=str)
+    except Exception as e:
+        logger.warning("audit_log JSON encode failed (%s); event=%s", e, event)
+        return
+    try:
+        with _AUDIT_LOCK, open(AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError as e:
+        logger.warning("audit_log write failed: %s", e)
+
+
 def get_health_snapshot() -> dict:
     snapshot = METRICS.snapshot()
     now = time.time()

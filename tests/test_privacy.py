@@ -1,0 +1,238 @@
+"""
+Tests for the /forget and /export deletion + export helpers in privacy.py.
+
+We exercise each forget_* function with mocked back-end stores so the tests
+don't require a live Chroma or an APScheduler instance.
+"""
+import importlib
+import os
+import sqlite3
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+
+def _ensure_mock(name: str) -> MagicMock:
+    if name not in sys.modules:
+        sys.modules[name] = MagicMock()
+    return sys.modules[name]
+
+
+# Heavy modules stubbed so importing privacy → fritz_utils stays fast.
+_ensure_mock("ddgs")
+
+
+class TestSanitiseThreadId(unittest.TestCase):
+    def setUp(self):
+        import privacy
+        importlib.reload(privacy)
+        self.privacy = privacy
+
+    def test_strips_non_alphanumeric(self):
+        self.assertEqual(self.privacy._sanitise_thread_id("alice.smith_42"), "alicesmith42")
+
+    def test_empty_input_returns_empty(self):
+        self.assertEqual(self.privacy._sanitise_thread_id(""), "")
+        self.assertEqual(self.privacy._sanitise_thread_id(None), "")
+
+
+class TestForgetMemories(unittest.TestCase):
+    def setUp(self):
+        import privacy
+        importlib.reload(privacy)
+        self.privacy = privacy
+
+    def test_delegates_to_chroma_store(self):
+        fake_store = MagicMock()
+        fake_store.delete_namespace.return_value = 7
+        with patch("storage.ChromaStore", return_value=fake_store):
+            result = self.privacy.forget_memories("alice")
+        self.assertEqual(result, 7)
+        fake_store.delete_namespace.assert_called_once_with(("alice",))
+
+    def test_empty_user_returns_zero_without_touching_store(self):
+        with patch("storage.ChromaStore") as ctor:
+            result = self.privacy.forget_memories("")
+        self.assertEqual(result, 0)
+        ctor.assert_not_called()
+
+    def test_swallows_store_exceptions_returns_zero(self):
+        with patch("storage.ChromaStore", side_effect=RuntimeError("boom")):
+            result = self.privacy.forget_memories("alice")
+        self.assertEqual(result, 0)
+
+
+class TestForgetConversation(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.db_path = self.tmp / "chat.db"
+        # Build the minimal SqliteSaver schema by hand.
+        with sqlite3.connect(self.db_path) as c:
+            c.execute("CREATE TABLE checkpoints (thread_id TEXT, blob TEXT)")
+            c.execute("CREATE TABLE writes (thread_id TEXT, blob TEXT)")
+            c.executemany(
+                "INSERT INTO checkpoints VALUES (?, ?)",
+                [("alice", "a"), ("alice", "b"), ("bob", "c")],
+            )
+            c.executemany(
+                "INSERT INTO writes VALUES (?, ?)",
+                [("alice", "w1"), ("bob", "w2")],
+            )
+            c.commit()
+
+        import fritz_utils
+        self._patcher = patch.object(fritz_utils, "CHAT_DB_NAME", str(self.db_path))
+        self._patcher.start()
+        import privacy
+        importlib.reload(privacy)
+        self.privacy = privacy
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_deletes_users_checkpoints_and_writes(self):
+        count = self.privacy.forget_conversation("alice")
+        # 2 checkpoint rows + 1 writes row = 3 total
+        self.assertEqual(count, 3)
+        with sqlite3.connect(self.db_path) as c:
+            alice_remaining = c.execute(
+                "SELECT COUNT(*) FROM checkpoints WHERE thread_id = 'alice'"
+            ).fetchone()[0]
+            bob_remaining = c.execute(
+                "SELECT COUNT(*) FROM checkpoints WHERE thread_id = 'bob'"
+            ).fetchone()[0]
+        self.assertEqual(alice_remaining, 0)
+        self.assertEqual(bob_remaining, 1)  # Other users untouched.
+
+    def test_returns_zero_when_no_rows_match(self):
+        count = self.privacy.forget_conversation("nobody")
+        self.assertEqual(count, 0)
+
+    def test_count_conversation_checkpoints(self):
+        self.assertEqual(self.privacy.count_conversation_checkpoints("alice"), 2)
+        self.assertEqual(self.privacy.count_conversation_checkpoints("bob"), 1)
+        self.assertEqual(self.privacy.count_conversation_checkpoints("nobody"), 0)
+
+    def test_missing_tables_handled_gracefully(self):
+        # Drop the tables and confirm we get 0 instead of an exception.
+        with sqlite3.connect(self.db_path) as c:
+            c.execute("DROP TABLE checkpoints")
+            c.execute("DROP TABLE writes")
+            c.commit()
+        self.assertEqual(self.privacy.forget_conversation("alice"), 0)
+
+
+class TestForgetSchedules(unittest.TestCase):
+    def setUp(self):
+        import privacy
+        importlib.reload(privacy)
+        self.privacy = privacy
+
+    def test_delegates_to_schedule_manager(self):
+        manager = MagicMock()
+        manager.remove_all_for_user.return_value = 4
+        result = self.privacy.forget_schedules("alice", manager)
+        self.assertEqual(result, 4)
+        manager.remove_all_for_user.assert_called_once_with("alice")
+
+    def test_no_manager_returns_zero(self):
+        self.assertEqual(self.privacy.forget_schedules("alice", None), 0)
+
+
+class TestForgetWorkspace(unittest.TestCase):
+    def setUp(self):
+        import privacy
+        importlib.reload(privacy)
+        self.privacy = privacy
+
+    def test_delegates_to_workspace_store(self):
+        with patch("workspace_store.remove", return_value=True) as remove_mock:
+            result = self.privacy.forget_workspace("alice")
+        self.assertTrue(result)
+        remove_mock.assert_called_once_with("alice")
+
+
+class TestForgetAll(unittest.TestCase):
+    def setUp(self):
+        import privacy
+        importlib.reload(privacy)
+        self.privacy = privacy
+
+    def test_runs_every_sub_op_and_returns_counts(self):
+        manager = MagicMock()
+        manager.remove_all_for_user.return_value = 3
+
+        with patch.object(self.privacy, "forget_memories", return_value=10), \
+             patch.object(self.privacy, "forget_conversation", return_value=5), \
+             patch.object(self.privacy, "forget_workspace", return_value=True):
+            result = self.privacy.forget_all("alice", manager)
+
+        self.assertEqual(result, {
+            "memories": 10,
+            "conversation_rows": 5,
+            "schedules": 3,
+            "workspace_dropped": True,
+        })
+
+
+class TestExportUserData(unittest.TestCase):
+    def setUp(self):
+        import privacy
+        importlib.reload(privacy)
+        self.privacy = privacy
+
+    def test_aggregates_everything_into_one_dict(self):
+        manager = MagicMock()
+        manager.list_schedules.return_value = [{"id": "s1"}]
+
+        with patch.object(self.privacy, "export_memories",
+                          return_value=[{"id": "m1"}]), \
+             patch.object(self.privacy, "count_conversation_checkpoints",
+                          return_value=12), \
+             patch.object(self.privacy, "get_workspace_for_export",
+                          return_value="/tmp/workspaces/alice"):
+            result = self.privacy.export_user_data("alice", manager)
+
+        self.assertEqual(result["user_id"], "alice")
+        self.assertEqual(result["memories"], [{"id": "m1"}])
+        self.assertEqual(result["schedules"], [{"id": "s1"}])
+        self.assertEqual(result["conversation_checkpoint_count"], 12)
+        self.assertEqual(result["workspace_path"], "/tmp/workspaces/alice")
+
+
+class TestAuditLog(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.log_path = self.tmp / "audit.log"
+        import observability
+        self._patcher = patch.object(observability, "AUDIT_LOG_PATH", str(self.log_path))
+        self._patcher.start()
+        self.observability = observability
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_appends_json_line_per_event(self):
+        self.observability.audit_log("forget", user_id="alice", scope="memories", removed=3)
+        self.observability.audit_log("export", user_id="alice", bytes=512)
+        lines = self.log_path.read_text(encoding="utf-8").strip().splitlines()
+        self.assertEqual(len(lines), 2)
+        import json
+        first = json.loads(lines[0])
+        self.assertEqual(first["event"], "forget")
+        self.assertEqual(first["user_id"], "alice")
+        self.assertEqual(first["scope"], "memories")
+        self.assertEqual(first["removed"], 3)
+        self.assertIn("ts", first)
+
+    def test_does_not_raise_on_unwritable_path(self):
+        # Should swallow OSError silently — we don't want audit failures to
+        # abort the user's deletion.
+        with patch.object(self.observability, "AUDIT_LOG_PATH", "/nonexistent_dir/audit.log"):
+            self.observability.audit_log("forget", user_id="alice")  # must not raise
+
+
+if __name__ == "__main__":
+    unittest.main()

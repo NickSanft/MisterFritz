@@ -40,6 +40,8 @@ Mister Fritz is an AI-powered Discord bot with a sophisticated, sardonic persona
 | `/workspace enable` | Create a sandboxed workspace and turn on file tools for yourself |
 | `/workspace disable` / `status` | Manage your workspace |
 | `/workspace set <path>` | (Admin only) Register an arbitrary host path as your workspace |
+| `/forget memories` / `conversation` / `schedules` / `all` | Delete stored data Fritz has about you |
+| `/export` | Download a JSON snapshot of everything Fritz has stored about you |
 
 Direct messages or `@mentions` trigger the full agent with all tools.
 Attach images or Discord voice messages — Fritz can analyze both.
@@ -194,6 +196,7 @@ All settings can be set as environment variables or in a `.env` file. See `.env.
 | `ROOT_USER` | — | **Required.** Discord username with admin privileges (`/workspace set`, `/schedule add/remove`) |
 | `ADMIN_USERS` | — | Comma-separated additional admin usernames. Anyone listed gets the same powers as `ROOT_USER`. |
 | `WORKSPACES_ROOT` | `./workspaces` | Parent directory for per-user sandboxed workspaces created via `/workspace enable`. |
+| `AUDIT_LOG_PATH` | `audit.log` | Path to the append-only NDJSON audit log written on every `/forget` and `/export` event. |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama API endpoint |
 | `THINKING_OLLAMA_MODEL` | `gpt-oss` | Primary reasoning model |
 | `FAST_OLLAMA_MODEL` | `llama3.2` | Fast model for quick tasks |

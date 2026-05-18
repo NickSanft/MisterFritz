@@ -91,6 +91,22 @@ class SQLiteStore(BaseStore[str, Union[str, bytes]]):
         results = self._execute_query(sql_query, (namespace_str, limit))
         return [(key, json.loads(value)) for key, value in results]
 
+    def delete_namespace(self, namespace: Tuple[str, ...]) -> int:
+        """Delete every row in a namespace. Returns the row count that was removed."""
+        namespace_str = "/".join(namespace)
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute("DELETE FROM store WHERE namespace = ?", (namespace_str,))
+            conn.commit()
+            return cur.rowcount
+
+    def export_namespace(self, namespace: Tuple[str, ...]) -> List[Tuple[str, Dict[str, Any]]]:
+        """Return every (key, value) in a namespace. For /export."""
+        namespace_str = "/".join(namespace)
+        rows = self._execute_query(
+            "SELECT key, value FROM store WHERE namespace = ?", (namespace_str,),
+        )
+        return [(key, json.loads(value)) for key, value in rows]
+
 
 class ChromaStore(BaseStore[str, Union[str, bytes]]):
     """Vector-store backed KV store using ChromaDB with semantic search support."""
@@ -173,3 +189,37 @@ class ChromaStore(BaseStore[str, Union[str, bytes]]):
             filter={"namespace": namespace_str},
         )
         return [(doc.metadata.get("original_key"), doc.metadata) for doc in results]
+
+    def delete_namespace(self, namespace: Tuple[str, ...]) -> int:
+        """Delete every entry in a namespace. Returns the count removed."""
+        namespace_str = "/".join(namespace)
+        # First fetch the IDs so we can return a count and use the simpler
+        # delete-by-ids API (Chroma's where-delete is fussier across versions).
+        existing = self.vectorstore.get(
+            where={"namespace": namespace_str}, include=[]
+        )
+        ids = existing.get("ids", []) if existing else []
+        if ids:
+            self.vectorstore.delete(ids=ids)
+        return len(ids)
+
+    def export_namespace(self, namespace: Tuple[str, ...]) -> List[Dict[str, Any]]:
+        """Return every entry in a namespace as a list of dicts: id, content, metadata."""
+        namespace_str = "/".join(namespace)
+        result = self.vectorstore.get(
+            where={"namespace": namespace_str},
+            include=["documents", "metadatas"],
+        )
+        if not result or not result.get("ids"):
+            return []
+        out: List[Dict[str, Any]] = []
+        ids = result["ids"]
+        docs = result.get("documents") or [None] * len(ids)
+        metas = result.get("metadatas") or [None] * len(ids)
+        for i, doc_id in enumerate(ids):
+            out.append({
+                "id": doc_id,
+                "content": docs[i],
+                "metadata": metas[i],
+            })
+        return out

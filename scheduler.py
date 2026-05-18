@@ -204,6 +204,30 @@ class ScheduleManager:
             for r in rows
         ]
 
+    def remove_all_for_user(self, user_id: str) -> int:
+        """Delete every schedule belonging to user_id. Returns the count removed.
+
+        Used by /forget schedules. Also detaches the live APScheduler jobs.
+        """
+        with sqlite3.connect(SCHEDULE_DB) as conn:
+            rows = conn.execute(
+                "SELECT id FROM schedules WHERE user_id = ?", (user_id,),
+            ).fetchall()
+            ids = [r[0] for r in rows]
+            if ids:
+                placeholders = ",".join(["?"] * len(ids))
+                conn.execute(
+                    f"DELETE FROM schedules WHERE id IN ({placeholders})", ids,
+                )
+                conn.commit()
+
+        for sid in ids:
+            try:
+                self.scheduler.remove_job(sid)
+            except Exception as e:
+                logger.debug("remove_job(%s) raised on bulk removal: %s", sid, e)
+        return len(ids)
+
     def list_all_schedules(self) -> list[dict]:
         """Return every schedule across all users. Admin / observability use."""
         with sqlite3.connect(SCHEDULE_DB) as conn:

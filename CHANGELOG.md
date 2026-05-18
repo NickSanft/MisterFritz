@@ -28,6 +28,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - **Phase 7c — per-user schedules.** Dropped the Phase 2 admin gate on `/schedule add` and `/schedule remove`. Any user can manage their own schedules; the scheduler's per-user ownership check still prevents cross-user mutation.
 - New per-user cap: `MAX_SCHEDULES_PER_USER` (default 10). Hit it and you get a clear error pointing at `/schedule remove`.
 - New `/schedule list_all` admin subcommand for cross-user visibility.
+- **Phase 8 — privacy commands.** New `/forget` subcommand group lets any user delete data Fritz has stored about them:
+  - `/forget memories` — drops the user's Chroma namespace (memories + profile).
+  - `/forget conversation` — clears the LangGraph SqliteSaver state for the user's thread; next message starts fresh.
+  - `/forget schedules` — bulk-cancels every recurring task the user owns.
+  - `/forget all` — runs the above plus drops workspace registration. Requires confirmation via a 30-second button view.
+- New `/export` command sends the user a JSON attachment of every memory, schedule, profile entry, workspace path, and conversation-checkpoint count Fritz has on them. 8 MB cap.
+- Every `/forget` and `/export` event appends an NDJSON line to `AUDIT_LOG_PATH` (default `./audit.log`) so deletions are reconstructable.
+- New `privacy` module centralises all per-user data ops so the upcoming web admin panel can reuse them.
 
 ## [0.1.0] — 2026-05-18
 

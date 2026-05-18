@@ -1,3 +1,5 @@
+import io
+import json
 import logging
 import os
 from typing import Optional
@@ -19,7 +21,8 @@ from fritz_utils import (
 )
 from image_generator import generate_image
 from mister_fritz import ask_stuff
-from observability import METRICS, format_health_text, get_health_snapshot
+from observability import METRICS, audit_log, format_health_text, get_health_snapshot
+import privacy
 from tts import TTSEngine
 import workspace_store
 
@@ -38,6 +41,47 @@ def _format_uptime(seconds: int) -> str:
         return f"{hours}h {minutes}m"
     days, hours = divmod(hours, 24)
     return f"{days}d {hours}h {minutes}m"
+
+
+class _ForgetConfirmView(discord.ui.View):
+    """30-second confirmation view for /forget all.
+
+    Only the user who triggered the command can press Confirm — other users
+    clicking the buttons get an ephemeral rejection. After the timeout, the
+    buttons disable.
+    """
+
+    def __init__(self, requester: str, schedule_manager):
+        super().__init__(timeout=30.0)
+        self.requester = requester
+        self.schedule_manager = schedule_manager
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.name != self.requester:
+            await interaction.response.send_message(
+                "This confirmation isn't for you.", ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        result = privacy.forget_all(self.requester, self.schedule_manager)
+        audit_log("forget", user_id=self.requester, scope="all", result=result)
+        await interaction.response.edit_message(
+            content=(
+                "✅ All data removed:\n"
+                f"• memories: {result['memories']}\n"
+                f"• conversation rows: {result['conversation_rows']}\n"
+                f"• schedules: {result['schedules']}\n"
+                f"• workspace dropped: {result['workspace_dropped']}"
+            ),
+            view=None,
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Aborted. Nothing was deleted.", view=None)
 
 
 async def _require_admin(interaction: discord.Interaction) -> bool:
@@ -172,6 +216,88 @@ class FritzCommands(commands.Cog):
         await interaction.response.send_message(chunks[0], ephemeral=True)
         for chunk in chunks[1:]:
             await interaction.followup.send(chunk, ephemeral=True)
+
+    # ── Privacy: /forget and /export ─────────────────────────────────────────
+
+    forget = app_commands.Group(name="forget", description="Delete data Fritz has stored about you")
+
+    @forget.command(name="memories", description="Delete every memory and profile entry Fritz has saved about you")
+    async def forget_memories_slash(self, interaction: discord.Interaction):
+        METRICS.increment("discord_commands.forget.memories")
+        user_id = interaction.user.name
+        count = privacy.forget_memories(user_id)
+        audit_log("forget", user_id=user_id, scope="memories", removed=count)
+        await interaction.response.send_message(
+            f"✅ Removed {count} memory entry(ies).", ephemeral=True,
+        )
+
+    @forget.command(name="conversation", description="Reset your conversation thread — next message starts fresh")
+    async def forget_conversation_slash(self, interaction: discord.Interaction):
+        METRICS.increment("discord_commands.forget.conversation")
+        user_id = interaction.user.name
+        count = privacy.forget_conversation(user_id)
+        audit_log("forget", user_id=user_id, scope="conversation", removed=count)
+        await interaction.response.send_message(
+            f"✅ Cleared {count} checkpoint row(s). Your next message starts a fresh thread.",
+            ephemeral=True,
+        )
+
+    @forget.command(name="schedules", description="Cancel every scheduled task you have")
+    async def forget_schedules_slash(self, interaction: discord.Interaction):
+        METRICS.increment("discord_commands.forget.schedules")
+        user_id = interaction.user.name
+        count = privacy.forget_schedules(user_id, self.schedule_manager)
+        audit_log("forget", user_id=user_id, scope="schedules", removed=count)
+        await interaction.response.send_message(
+            f"✅ Cancelled {count} schedule(s).", ephemeral=True,
+        )
+
+    @forget.command(
+        name="all",
+        description="Delete EVERYTHING Fritz has stored about you (memories, conversation, schedules, workspace)",
+    )
+    async def forget_all_slash(self, interaction: discord.Interaction):
+        METRICS.increment("discord_commands.forget.all")
+        user_id = interaction.user.name
+        # Two-step confirmation: present a confirm/cancel view to the user.
+        view = _ForgetConfirmView(user_id, self.schedule_manager)
+        await interaction.response.send_message(
+            "⚠️ This will permanently delete:\n"
+            "• all stored memories and your profile\n"
+            "• your conversation history checkpoint\n"
+            "• every scheduled task you have\n"
+            "• your workspace registration (files on disk are kept)\n"
+            "\nClick **Confirm** within 30 seconds to proceed.",
+            view=view, ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="export",
+        description="Download a JSON snapshot of all data Fritz has stored about you",
+    )
+    async def export_slash(self, interaction: discord.Interaction):
+        METRICS.increment("discord_commands.export")
+        user_id = interaction.user.name
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        data = privacy.export_user_data(user_id, self.schedule_manager)
+        payload = json.dumps(data, indent=2, default=str).encode("utf-8")
+        # Discord's free-tier per-message attachment cap is 25 MB; we cap at 8 MB
+        # as a comfortable safety margin since exports should be tiny.
+        if len(payload) > 8 * 1024 * 1024:
+            await interaction.followup.send(
+                f"❌ Export is too large ({len(payload) / 1024 / 1024:.1f} MB). "
+                "Please run `/forget memories` first to trim, then try again.",
+                ephemeral=True,
+            )
+            return
+        audit_log("export", user_id=user_id, bytes=len(payload))
+        attachment = discord.File(
+            io.BytesIO(payload), filename=f"misterfritz_export_{user_id}.json",
+        )
+        await interaction.followup.send(
+            "Here's your data. Stored locally on this server — nothing was sent to a third party.",
+            file=attachment, ephemeral=True,
+        )
 
     # ── Card game ─────────────────────────────────────────────────────────────
 
