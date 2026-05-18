@@ -64,6 +64,30 @@ THINKING_OLLAMA_MODEL = os.environ.get("THINKING_OLLAMA_MODEL", "gpt-oss")
 FAST_OLLAMA_MODEL = os.environ.get("FAST_OLLAMA_MODEL", "llama3.2")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "mxbai-embed-large")
 VISION_MODEL = os.environ.get("VISION_MODEL", "llava")
+# Hard cap on a single Ollama request. Prevents a hung model from wedging the bot.
+OLLAMA_TIMEOUT: float = float(os.environ.get("OLLAMA_TIMEOUT", "120"))
+
+# ---------------------------------------------------------------------------
+# File-tool sandbox
+# ---------------------------------------------------------------------------
+
+# Allowlist for the `execute_command` file tool. Only argv[0] values listed here
+# are permitted. Override with EXEC_ALLOWED_COMMANDS as a comma-separated list.
+# Keep it tight by default — this is ROOT_USER-gated, but defence-in-depth.
+_DEFAULT_EXEC_ALLOWED = (
+    "ls,dir,pwd,cd,echo,cat,type,head,tail,wc,"
+    "python,python3,pip,pytest,"
+    "node,npm,npx,"
+    "git,"
+    "go,cargo,"
+    "make,"
+    "grep,find,where"
+)
+EXEC_ALLOWED_COMMANDS: frozenset[str] = frozenset(
+    cmd.strip().lower()
+    for cmd in os.environ.get("EXEC_ALLOWED_COMMANDS", _DEFAULT_EXEC_ALLOWED).split(",")
+    if cmd.strip()
+)
 
 # ---------------------------------------------------------------------------
 # Discord

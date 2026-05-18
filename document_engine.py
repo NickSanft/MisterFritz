@@ -1,3 +1,4 @@
+import atexit
 import os
 import sys
 import time
@@ -38,7 +39,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import END, StateGraph, START
 
 from fritz_utils import CHROMA_DB_PATH, INDEXED_FILES_PATH, CHROMA_COLLECTION_NAME, DOC_FOLDER, FAST_OLLAMA_MODEL, \
-    THINKING_OLLAMA_MODEL, EMBEDDING_MODEL
+    OLLAMA_TIMEOUT, THINKING_OLLAMA_MODEL, EMBEDDING_MODEL
 from observability import init_logging, METRICS
 
 # Define supported file extensions
@@ -47,8 +48,17 @@ SUPPORTED_EXTENSIONS = ('.docx', '.pdf', '.xlsx', '.csv', '.txt', '.md')
 # --- GLOBAL VARS ---
 # Changed from GLOBAL_RETRIEVER to GLOBAL_VECTORSTORE to allow add/delete operations
 GLOBAL_VECTORSTORE: Optional[Chroma] = None
+# Guards reads/writes of GLOBAL_VECTORSTORE. The watchdog worker thread and the
+# main thread both touch it; without a lock, an in-flight initialize_vectorstore()
+# could race with an ingestion event and leave the reference dangling.
+VECTORSTORE_LOCK = threading.RLock()
 INGESTION_QUEUE = queue.Queue()
 MANIFEST_LOCK = threading.Lock()
+
+# Sentinel pushed onto INGESTION_QUEUE during shutdown to unblock the worker.
+_SHUTDOWN_SENTINEL = ("__shutdown__", None)
+_OBSERVER = None
+_WORKER_THREAD: Optional[threading.Thread] = None
 
 init_logging()
 logger = logging.getLogger(__name__)
@@ -256,9 +266,8 @@ def ingestion_worker():
     """
     Background daemon that consumes the queue.
     Handles 'add', 'update', and 'delete' operations on the global VectorStore.
+    Exits cleanly when it receives _SHUTDOWN_SENTINEL.
     """
-    global GLOBAL_VECTORSTORE
-
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=200,
@@ -268,12 +277,20 @@ def ingestion_worker():
     while True:
         try:
             # Block until an item is available
-            action, file_path = INGESTION_QUEUE.get()
+            item = INGESTION_QUEUE.get()
+            if item == _SHUTDOWN_SENTINEL:
+                INGESTION_QUEUE.task_done()
+                logger.info("Ingestion worker received shutdown signal; exiting")
+                return
+            action, file_path = item
 
             # Wait briefly to let file writes settle (debounce)
             time.sleep(1.0)
 
-            if GLOBAL_VECTORSTORE is None:
+            with VECTORSTORE_LOCK:
+                vectorstore = GLOBAL_VECTORSTORE
+
+            if vectorstore is None:
                 INGESTION_QUEUE.task_done()
                 continue
 
@@ -281,7 +298,7 @@ def ingestion_worker():
 
             if action == "delete":
                 try:
-                    GLOBAL_VECTORSTORE.delete(where={"source": file_path})
+                    vectorstore.delete(where={"source": file_path})
                     _update_manifest("delete", file_path)
                     logger.info("   - Removed chunks for %s", os.path.basename(file_path))
                 except Exception as e:
@@ -289,12 +306,13 @@ def ingestion_worker():
                     logger.warning("   - Error deleting %s: %s", file_path, e)
 
             elif action in ["add", "update"]:
-                # For update, we delete first to avoid duplicates
+                # For update, we delete first to avoid duplicates. A miss here
+                # is expected on first ingest of a file, hence debug-level only.
                 if action == "update":
                     try:
-                        GLOBAL_VECTORSTORE.delete(where={"source": file_path})
-                    except:
-                        pass  # Might not exist yet
+                        vectorstore.delete(where={"source": file_path})
+                    except Exception as e:
+                        logger.debug("   - Pre-update delete miss for %s: %s", file_path, e)
 
                 # Load and Ingest
                 try:
@@ -303,7 +321,7 @@ def ingestion_worker():
                         splits = text_splitter.split_documents(docs)
                         splits = filter_complex_metadata(splits)
                         if splits:
-                            GLOBAL_VECTORSTORE.add_documents(splits)
+                            vectorstore.add_documents(splits)
                             _update_manifest("add", file_path)
                             logger.info("   - Added %d chunks for %s", len(splits), os.path.basename(file_path))
                 except Exception as e:
@@ -324,7 +342,7 @@ def initialize_vectorstore():
     Ingests documents using Multiprocessing and returns the VectorStore.
     Also starts the background Watchdog observer.
     """
-    global GLOBAL_VECTORSTORE
+    global GLOBAL_VECTORSTORE, _OBSERVER, _WORKER_THREAD
 
     embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
 
@@ -340,7 +358,8 @@ def initialize_vectorstore():
         embedding_function=embeddings,
         collection_name=CHROMA_COLLECTION_NAME
     )
-    GLOBAL_VECTORSTORE = vectorstore
+    with VECTORSTORE_LOCK:
+        GLOBAL_VECTORSTORE = vectorstore
 
     # 2. Identify New Files
     manifest = _load_index_manifest()
@@ -389,8 +408,9 @@ def initialize_vectorstore():
         for file_path in updated_files:
             try:
                 vectorstore.delete(where={"source": file_path})
-            except Exception:
-                pass
+            except Exception as e:
+                # Miss is expected if the file was never indexed before.
+                logger.debug("Pre-update delete miss for %s: %s", file_path, e)
 
         docs = []
 
@@ -431,25 +451,51 @@ def initialize_vectorstore():
     logger.info("--- STARTING LIVE DOC WATCHER ---")
 
     # Start Worker Thread
-    worker_thread = threading.Thread(target=ingestion_worker, daemon=True)
-    worker_thread.start()
+    _WORKER_THREAD = threading.Thread(target=ingestion_worker, name="ingestion-worker", daemon=True)
+    _WORKER_THREAD.start()
 
     # Start Observer
     event_handler = DocumentEventHandler()
-    observer = Observer()
-    observer.schedule(event_handler, DOC_FOLDER, recursive=True)
-    observer.start()
+    _OBSERVER = Observer()
+    _OBSERVER.schedule(event_handler, DOC_FOLDER, recursive=True)
+    _OBSERVER.start()
 
     return vectorstore
 
 
+def shutdown(timeout: float = 5.0) -> None:
+    """Stop the watchdog observer and ingestion worker cleanly.
+
+    Safe to call multiple times. Intended for bot shutdown or atexit.
+    """
+    global _OBSERVER, _WORKER_THREAD
+
+    if _OBSERVER is not None:
+        try:
+            _OBSERVER.stop()
+            _OBSERVER.join(timeout=timeout)
+        except Exception as e:
+            logger.warning("Error stopping watchdog observer: %s", e)
+        _OBSERVER = None
+
+    if _WORKER_THREAD is not None and _WORKER_THREAD.is_alive():
+        INGESTION_QUEUE.put(_SHUTDOWN_SENTINEL)
+        _WORKER_THREAD.join(timeout=timeout)
+        if _WORKER_THREAD.is_alive():
+            logger.warning("Ingestion worker did not exit within %.1fs", timeout)
+    _WORKER_THREAD = None
+
+
 def get_retriever(k=2):
     """Returns a retriever interface from the current global vectorstore."""
-    global GLOBAL_VECTORSTORE
-    if GLOBAL_VECTORSTORE is None:
+    with VECTORSTORE_LOCK:
+        vectorstore = GLOBAL_VECTORSTORE
+    if vectorstore is None:
         initialize_vectorstore()
+        with VECTORSTORE_LOCK:
+            vectorstore = GLOBAL_VECTORSTORE
 
-    return GLOBAL_VECTORSTORE.as_retriever(
+    return vectorstore.as_retriever(
         search_type="mmr",
         search_kwargs={"k": k, "fetch_k": 20, "lambda_mult": 0.5}
     )
@@ -458,8 +504,8 @@ def get_retriever(k=2):
 # --- PART 2: MODELS & PROMPTS ---
 
 # Initialize LLMs
-thinking_llm = ChatOllama(model=THINKING_OLLAMA_MODEL, temperature=0)
-fast_llm = ChatOllama(model=FAST_OLLAMA_MODEL, temperature=0)
+thinking_llm = ChatOllama(model=THINKING_OLLAMA_MODEL, temperature=0, client_kwargs={"timeout": OLLAMA_TIMEOUT})
+fast_llm = ChatOllama(model=FAST_OLLAMA_MODEL, temperature=0, client_kwargs={"timeout": OLLAMA_TIMEOUT})
 
 
 # Grader
@@ -643,7 +689,9 @@ def query_documents(user_input: str, include_sources: bool = False):
     # Run the graph
     config = {"recursion_limit": 25}
     # Ensure DB is initialized before first query
-    if GLOBAL_VECTORSTORE is None:
+    with VECTORSTORE_LOCK:
+        needs_init = GLOBAL_VECTORSTORE is None
+    if needs_init:
         initialize_vectorstore()
 
     try:
@@ -689,3 +737,6 @@ def query_documents(user_input: str, include_sources: bool = False):
 
 with open("document_engine_diagram.png", "wb") as binary_file:
     binary_file.write(app.get_graph().draw_mermaid_png())
+
+# Ensure watchdog observer and ingestion worker exit cleanly on interpreter shutdown.
+atexit.register(shutdown)

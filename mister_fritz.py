@@ -26,7 +26,7 @@ from agent_tools import (
     search_memories_internal,
     update_user_profile,
 )
-from fritz_utils import CHAT_DB_NAME, FAST_OLLAMA_MODEL, MessageSource, ROOT_USER, THINKING_OLLAMA_MODEL
+from fritz_utils import CHAT_DB_NAME, FAST_OLLAMA_MODEL, MessageSource, OLLAMA_TIMEOUT, ROOT_USER, THINKING_OLLAMA_MODEL
 from observability import METRICS, init_logging
 from storage import SQLiteStore
 
@@ -596,8 +596,8 @@ CACHED_SYSTEM_PROMPT = get_system_description(_conversation_tools_desc)
 store = SQLiteStore(CHAT_DB_NAME)
 exit_stack = ExitStack()
 checkpointer = exit_stack.enter_context(SqliteSaver.from_conn_string(CHAT_DB_NAME))
-ollama_instance = ChatOllama(model=THINKING_OLLAMA_MODEL)
-fast_ollama_instance = ChatOllama(model=FAST_OLLAMA_MODEL)
+ollama_instance = ChatOllama(model=THINKING_OLLAMA_MODEL, client_kwargs={"timeout": OLLAMA_TIMEOUT})
+fast_ollama_instance = ChatOllama(model=FAST_OLLAMA_MODEL, client_kwargs={"timeout": OLLAMA_TIMEOUT})
 
 _conversation_react_agent = None
 

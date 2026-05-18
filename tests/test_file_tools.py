@@ -263,6 +263,42 @@ class TestExecuteCommand(unittest.TestCase):
             )
         self.assertIn("capped", result)
 
+    def test_command_not_in_allowlist_rejected(self):
+        # `rm` is not in the default allowlist.
+        with patch.object(file_tools, "ROOT_USER", _ROOT):
+            result = execute_command.invoke(
+                {"command": "rm -rf /tmp/foo", "timeout": 5},
+                config=_config(self.tmp),
+            )
+        self.assertIn("allowlist", result.lower())
+
+    def test_argument_with_parent_traversal_rejected(self):
+        with patch.object(file_tools, "ROOT_USER", _ROOT):
+            result = execute_command.invoke(
+                {"command": "cat ../../../etc/passwd", "timeout": 5},
+                config=_config(self.tmp),
+            )
+        self.assertIn("..", result)
+        self.assertIn("not allowed", result.lower())
+
+    def test_absolute_path_outside_workspace_rejected(self):
+        with patch.object(file_tools, "ROOT_USER", _ROOT):
+            result = execute_command.invoke(
+                {"command": "cat /etc/passwd", "timeout": 5},
+                config=_config(self.tmp),
+            )
+        self.assertIn("outside the workspace", result.lower())
+
+    def test_shell_metacharacters_not_interpreted(self):
+        # With argv mode, `echo a && rm b` is parsed as: echo a "&&" rm b — no chained rm.
+        with patch.object(file_tools, "ROOT_USER", _ROOT):
+            result = execute_command.invoke(
+                {"command": "echo a && echo b", "timeout": 5},
+                config=_config(self.tmp),
+            )
+        # The literal "&&" should appear in echo's output, proving no shell evaluation.
+        self.assertIn("&&", result)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,13 +2,14 @@ import fnmatch
 import logging
 import os
 import re
+import shlex
 import subprocess
 from typing import Optional
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
-from fritz_utils import ROOT_USER
+from fritz_utils import EXEC_ALLOWED_COMMANDS, ROOT_USER
 from observability import METRICS
 
 logger = logging.getLogger(__name__)
@@ -333,14 +334,60 @@ def search_files(config: RunnableConfig, pattern: str, path: str = ".", file_glo
 MAX_EXEC_TIMEOUT = 30
 
 
+def _validate_command_argv(argv: list[str], workspace: str) -> Optional[str]:
+    """Validate a parsed argv list. Returns an error message if rejected, else None.
+
+    Enforces:
+      - argv[0] (basename, lowercased) must be in EXEC_ALLOWED_COMMANDS.
+      - No argument may contain '..' as a path component or be an absolute path
+        that escapes the workspace.
+    """
+    if not argv:
+        return "Error: Empty command."
+
+    program = os.path.basename(argv[0]).lower()
+    # Strip Windows .exe / .cmd / .bat suffixes for the allowlist check.
+    for suffix in (".exe", ".cmd", ".bat", ".ps1"):
+        if program.endswith(suffix):
+            program = program[: -len(suffix)]
+            break
+
+    if program not in EXEC_ALLOWED_COMMANDS:
+        return (
+            f"Error: Command '{program}' is not in the allowlist. "
+            f"Allowed: {', '.join(sorted(EXEC_ALLOWED_COMMANDS))}."
+        )
+
+    workspace_norm = os.path.normpath(os.path.abspath(workspace))
+    for arg in argv[1:]:
+        # Reject explicit parent traversal as a path segment.
+        # Split on both separators so we catch ../ and ..\ on either platform.
+        segments = re.split(r"[\\/]+", arg)
+        if ".." in segments:
+            return f"Error: Argument '{arg}' contains '..' which is not allowed."
+
+        # If the arg looks like an absolute path, ensure it stays within the workspace.
+        if os.path.isabs(arg):
+            resolved = os.path.normpath(os.path.abspath(arg))
+            if resolved != workspace_norm and not resolved.startswith(workspace_norm + os.sep):
+                return f"Error: Argument '{arg}' resolves outside the workspace."
+
+    return None
+
+
 @tool(parse_docstring=True)
 def execute_command(config: RunnableConfig, command: str, timeout: int = 30) -> str:
-    """Executes a shell command in the workspace directory and returns the output.
+    """Executes a command in the workspace directory and returns the output.
     The command runs with the workspace as the current working directory.
+
+    Only commands whose program name is in the allowlist (see EXEC_ALLOWED_COMMANDS
+    env var) are permitted. Shell metacharacters are not interpreted — this runs
+    via argv, not a shell. Arguments with '..' or absolute paths outside the
+    workspace are rejected.
 
     Args:
         config: The RunnableConfig containing workspace_root and user_id in metadata.
-        command: The shell command to execute.
+        command: The command to execute (parsed with shlex; no shell interpretation).
         timeout: Maximum seconds to wait for the command to finish. Defaults to 30, max 30.
 
     Returns:
@@ -351,11 +398,22 @@ def execute_command(config: RunnableConfig, command: str, timeout: int = 30) -> 
 
     timeout = min(timeout, MAX_EXEC_TIMEOUT)
 
-    logger.info("Executing command in %s: %s", workspace, command)
+    try:
+        # posix=True works on Windows too for our purposes; we don't want cmd.exe semantics.
+        argv = shlex.split(command, posix=True)
+    except ValueError as e:
+        return f"Error: Could not parse command: {e}"
+
+    rejection = _validate_command_argv(argv, workspace)
+    if rejection is not None:
+        logger.warning("Rejected command in %s: %s (%s)", workspace, command, rejection)
+        return rejection
+
+    logger.info("Executing command in %s: %s", workspace, argv)
     try:
         result = subprocess.run(
-            command,
-            shell=True,
+            argv,
+            shell=False,
             cwd=workspace,
             capture_output=True,
             text=True,
@@ -377,6 +435,8 @@ def execute_command(config: RunnableConfig, command: str, timeout: int = 30) -> 
 
         return output
 
+    except FileNotFoundError:
+        return f"Error: Program '{argv[0]}' not found in PATH."
     except subprocess.TimeoutExpired:
         return f"Error: Command timed out after {timeout} seconds."
     except Exception as e:
