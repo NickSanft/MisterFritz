@@ -127,7 +127,20 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**Configure the bot** — copy `.env.example` to `.env` and fill in your values:
+**Configure the bot.** The fastest path is the interactive setup wizard, which
+pings Ollama, creates/pulls the four required models, validates your Discord
+token against the Discord API, and writes a complete `.env` for you:
+
+```bash
+python scripts/setup.py
+```
+
+It's idempotent — safe to re-run if you only need to update one value. It uses
+only the Python standard library so you can run it before `pip install`.
+
+If you'd rather configure by hand, copy the template and fill in the required
+fields:
+
 ```bash
 cp .env.example .env
 ```
