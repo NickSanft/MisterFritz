@@ -350,8 +350,8 @@ The first run downloads Stable Diffusion XL (~7 GB). GPU (CUDA) is strongly reco
 **OCR not working for scanned PDFs**
 Install optional deps: `pip install easyocr PyMuPDF pillow`.
 
-**Schedule commands say "permission denied"**
-`/schedule add` and `/schedule remove` are restricted to admins (`ROOT_USER` plus anyone in `ADMIN_USERS`). `/schedule list` is open to all users. Set `ROOT_USER=<your discord username>` in `.env`, or add yourself to `ADMIN_USERS` if you only need additional admins.
+**`/schedule add` says I have too many schedules**
+There's a per-user cap (default 10) set by `MAX_SCHEDULES_PER_USER`. Use `/schedule list` to see yours, `/schedule remove <id>` to free a slot, or raise the cap in `.env`. Admins can view everyone's schedules with `/schedule list_all`.
 
 ---
 

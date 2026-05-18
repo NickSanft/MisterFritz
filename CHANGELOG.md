@@ -25,6 +25,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - `/workspace` is now a subcommand group: `/workspace status` (anyone), `/workspace enable` (anyone, creates sandbox), `/workspace disable` (anyone), `/workspace set <path>` (admin only, registers arbitrary host path). **Breaking change** to the prior `/workspace [path]` shape.
 - `file_tools._authorize` now gates on "workspace is set", not "user is admin". The shell allowlist and `_resolve_safe_path` keep each user inside their own directory.
 - New `WORKSPACES_ROOT` env var (default `./workspaces`).
+- **Phase 7c — per-user schedules.** Dropped the Phase 2 admin gate on `/schedule add` and `/schedule remove`. Any user can manage their own schedules; the scheduler's per-user ownership check still prevents cross-user mutation.
+- New per-user cap: `MAX_SCHEDULES_PER_USER` (default 10). Hit it and you get a clear error pointing at `/schedule remove`.
+- New `/schedule list_all` admin subcommand for cross-user visibility.
 
 ## [0.1.0] — 2026-05-18
 

@@ -92,6 +92,9 @@ EXEC_OUTPUT_TRUNCATE: int = int(os.environ.get("EXEC_OUTPUT_TRUNCATE", "10000"))
 # "schedule in 0 minutes" foot-guns.
 SCHEDULE_MIN_DELAY_MIN: int = int(os.environ.get("SCHEDULE_MIN_DELAY_MIN", "1"))
 
+# Max recurring schedules any single user may have at once. Abuse cap.
+MAX_SCHEDULES_PER_USER: int = int(os.environ.get("MAX_SCHEDULES_PER_USER", "10"))
+
 # ---------------------------------------------------------------------------
 # File-tool sandbox
 # ---------------------------------------------------------------------------

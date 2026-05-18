@@ -81,8 +81,6 @@ class FritzCommands(commands.Cog):
         description: Optional[str] = None,
     ):
         METRICS.increment("discord_commands.schedule_add")
-        if not await _require_admin(interaction):
-            return
         if self.schedule_manager is None:
             await interaction.response.send_message(
                 "Scheduler is not available.", ephemeral=True
@@ -131,8 +129,6 @@ class FritzCommands(commands.Cog):
     @app_commands.describe(schedule_id="The schedule ID shown in /schedule list")
     async def schedule_remove(self, interaction: discord.Interaction, schedule_id: str):
         METRICS.increment("discord_commands.schedule_remove")
-        if not await _require_admin(interaction):
-            return
         if self.schedule_manager is None:
             await interaction.response.send_message("Scheduler is not available.", ephemeral=True)
             return
@@ -151,6 +147,31 @@ class FritzCommands(commands.Cog):
         except Exception as e:
             logger.exception("Failed to remove schedule %s", schedule_id)
             await interaction.response.send_message(f"❌ Failed to remove schedule: {e}", ephemeral=True)
+
+    @schedule.command(name="list_all", description="(Admin) List scheduled tasks across all users")
+    async def schedule_list_all(self, interaction: discord.Interaction):
+        METRICS.increment("discord_commands.schedule_list_all")
+        if not await _require_admin(interaction):
+            return
+        if self.schedule_manager is None:
+            await interaction.response.send_message("Scheduler is not available.", ephemeral=True)
+            return
+        schedules = self.schedule_manager.list_all_schedules()
+        if not schedules:
+            await interaction.response.send_message("No schedules registered.", ephemeral=True)
+            return
+        lines = [f"**All scheduled tasks ({len(schedules)}):**"]
+        for s in schedules:
+            label = f" — {s['description']}" if s["description"] else ""
+            lines.append(
+                f"`{s['id']}` (@{s['user_id']}) every `{s['schedule']}`{label}\n  _{s['prompt']}_"
+            )
+        body = "\n".join(lines)
+        # Long lists chunk into multiple ephemeral replies to respect the 2000-char limit.
+        chunks = split_into_chunks(body)
+        await interaction.response.send_message(chunks[0], ephemeral=True)
+        for chunk in chunks[1:]:
+            await interaction.followup.send(chunk, ephemeral=True)
 
     # ── Card game ─────────────────────────────────────────────────────────────
 

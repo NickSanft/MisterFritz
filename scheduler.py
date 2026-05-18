@@ -22,7 +22,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from fritz_utils import SCHEDULE_DB, SCHEDULE_MIN_DELAY_MIN, MessageSource
+from fritz_utils import MAX_SCHEDULES_PER_USER, SCHEDULE_DB, SCHEDULE_MIN_DELAY_MIN, MessageSource
 
 logger = logging.getLogger(__name__)
 
@@ -130,12 +130,25 @@ class ScheduleManager:
         schedule_expr: str,
         description: str = "",
     ) -> str:
-        """Register a new schedule. Returns the short schedule ID."""
+        """Register a new schedule. Returns the short schedule ID.
+
+        Raises ValueError on bad schedule_expr or when the user is already at
+        MAX_SCHEDULES_PER_USER.
+        """
         trigger = self._parse_trigger(schedule_expr)  # raises ValueError on invalid
-        schedule_id = str(uuid.uuid4())[:8]
-        now = datetime.now(timezone.utc).isoformat()
 
         with sqlite3.connect(SCHEDULE_DB) as conn:
+            (existing,) = conn.execute(
+                "SELECT COUNT(*) FROM schedules WHERE user_id = ?", (user_id,),
+            ).fetchone()
+            if existing >= MAX_SCHEDULES_PER_USER:
+                raise ValueError(
+                    f"You already have {existing} schedules (max {MAX_SCHEDULES_PER_USER}). "
+                    "Remove one with /schedule remove before adding another."
+                )
+
+            schedule_id = str(uuid.uuid4())[:8]
+            now = datetime.now(timezone.utc).isoformat()
             conn.execute(
                 "INSERT INTO schedules VALUES (?,?,?,?,?,?,?,?)",
                 (schedule_id, user_id, channel_id, guild_id, prompt,
@@ -187,6 +200,25 @@ class ScheduleManager:
                 "schedule": r[2],
                 "created": r[3],
                 "description": r[4] or "",
+            }
+            for r in rows
+        ]
+
+    def list_all_schedules(self) -> list[dict]:
+        """Return every schedule across all users. Admin / observability use."""
+        with sqlite3.connect(SCHEDULE_DB) as conn:
+            rows = conn.execute(
+                "SELECT id, user_id, prompt, schedule_expr, created_at, description "
+                "FROM schedules ORDER BY created_at"
+            ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "user_id": r[1],
+                "prompt": r[2],
+                "schedule": r[3],
+                "created": r[4],
+                "description": r[5] or "",
             }
             for r in rows
         ]

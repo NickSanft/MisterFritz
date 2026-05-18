@@ -88,49 +88,60 @@ class TestRequireAdmin(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(kwargs.get("ephemeral"))
 
 
-class TestScheduleAddGating(unittest.IsolatedAsyncioTestCase):
-    async def test_non_admin_blocked_from_schedule_add(self):
-        manager = MagicMock()
-        cog = _make_cog(schedule_manager=manager)
-        with _patch_admins():
-            interaction = _fake_interaction("not_root")
-            await cog.schedule_add.callback(
-                cog, interaction, every="1h", prompt="hello", description=None
-            )
-        interaction.response.send_message.assert_called_once()
-        manager.add_schedule.assert_not_called()
+class TestScheduleAddOpenToAll(unittest.IsolatedAsyncioTestCase):
+    """Phase 7c: any user can add their own schedules."""
 
-    async def test_root_user_can_schedule_add(self):
+    async def test_non_admin_can_schedule_add(self):
         manager = MagicMock()
         manager.add_schedule.return_value = "abc12345"
         cog = _make_cog(schedule_manager=manager)
         with _patch_admins():
-            interaction = _fake_interaction(ROOT_NAME)
+            interaction = _fake_interaction("regular_user")
             await cog.schedule_add.callback(
-                cog, interaction, every="1h", prompt="hello", description="my reminder"
+                cog, interaction, every="1h", prompt="hello", description=None
             )
         manager.add_schedule.assert_called_once()
-        interaction.response.send_message.assert_called_once()
+        # Ownership is keyed by the caller's name, not by ROOT.
+        _, kwargs = manager.add_schedule.call_args
+        self.assertEqual(kwargs.get("user_id"), "regular_user")
 
-
-class TestScheduleRemoveGating(unittest.IsolatedAsyncioTestCase):
-    async def test_non_admin_blocked_from_schedule_remove(self):
+    async def test_value_error_surfaces_as_user_message(self):
+        # Schedule cap exceeded, bad cron, etc. all raise ValueError.
         manager = MagicMock()
+        manager.add_schedule.side_effect = ValueError("max 10 schedules")
         cog = _make_cog(schedule_manager=manager)
         with _patch_admins():
-            interaction = _fake_interaction("not_root")
-            await cog.schedule_remove.callback(cog, interaction, schedule_id="abc12345")
+            interaction = _fake_interaction("regular_user")
+            await cog.schedule_add.callback(
+                cog, interaction, every="1h", prompt="hello", description=None
+            )
         interaction.response.send_message.assert_called_once()
-        manager.remove_schedule.assert_not_called()
+        args, _ = interaction.response.send_message.call_args
+        self.assertIn("max 10", args[0])
 
-    async def test_root_user_can_remove_schedule(self):
+
+class TestScheduleRemoveOpenToAll(unittest.IsolatedAsyncioTestCase):
+    """Phase 7c: any user can remove their own schedules. The scheduler
+    enforces per-user ownership via remove_schedule's PermissionError."""
+
+    async def test_non_admin_can_remove_own_schedule(self):
         manager = MagicMock()
         manager.remove_schedule.return_value = True
         cog = _make_cog(schedule_manager=manager)
         with _patch_admins():
-            interaction = _fake_interaction(ROOT_NAME)
+            interaction = _fake_interaction("regular_user")
             await cog.schedule_remove.callback(cog, interaction, schedule_id="abc12345")
-        manager.remove_schedule.assert_called_once_with("abc12345", ROOT_NAME)
+        manager.remove_schedule.assert_called_once_with("abc12345", "regular_user")
+
+    async def test_permission_error_surfaces_to_caller(self):
+        # Attempting to remove another user's schedule.
+        manager = MagicMock()
+        manager.remove_schedule.side_effect = PermissionError("not your schedule")
+        cog = _make_cog(schedule_manager=manager)
+        with _patch_admins():
+            interaction = _fake_interaction("regular_user")
+            await cog.schedule_remove.callback(cog, interaction, schedule_id="abc12345")
+        interaction.response.send_message.assert_called_once()
 
 
 class TestScheduleListOpenToAll(unittest.IsolatedAsyncioTestCase):
@@ -143,6 +154,34 @@ class TestScheduleListOpenToAll(unittest.IsolatedAsyncioTestCase):
             await cog.schedule_list.callback(cog, interaction)
         # list_schedules is read-only and per-user, so it's open by design.
         manager.list_schedules.assert_called_once_with("regular_user")
+
+
+class TestScheduleListAllAdminOnly(unittest.IsolatedAsyncioTestCase):
+    """Phase 7c: /schedule list_all shows every user's schedules — admin only."""
+
+    async def test_non_admin_blocked_from_list_all(self):
+        manager = MagicMock()
+        cog = _make_cog(schedule_manager=manager)
+        with _patch_admins():
+            interaction = _fake_interaction("regular_user")
+            await cog.schedule_list_all.callback(cog, interaction)
+        interaction.response.send_message.assert_called_once()
+        manager.list_all_schedules.assert_not_called()
+
+    async def test_admin_can_view_all_schedules(self):
+        manager = MagicMock()
+        manager.list_all_schedules.return_value = [
+            {"id": "id1", "user_id": "alice", "prompt": "p1", "schedule": "1h",
+             "description": "", "created": "now"},
+            {"id": "id2", "user_id": "bob", "prompt": "p2", "schedule": "2h",
+             "description": "weather", "created": "now"},
+        ]
+        cog = _make_cog(schedule_manager=manager)
+        with _patch_admins():
+            interaction = _fake_interaction(ROOT_NAME)
+            await cog.schedule_list_all.callback(cog, interaction)
+        manager.list_all_schedules.assert_called_once()
+        interaction.response.send_message.assert_called_once()
 
 
 class TestWorkspaceEnableOpenToAll(unittest.IsolatedAsyncioTestCase):
