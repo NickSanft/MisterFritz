@@ -43,6 +43,31 @@ Attach images or Discord voice messages — Fritz can analyze both.
 
 ---
 
+## System Requirements
+
+Mister Fritz runs the LLMs locally via Ollama, so hardware is the dominant cost.
+
+| Model | Approx VRAM | Approx RAM (CPU mode) | Notes |
+|---|---|---|---|
+| `gpt-oss` (thinking model) | ~14 GB | ~20 GB | Primary reasoning model. CPU inference is usable but slow (~10 s/token range). |
+| `llama3.2` (fast model) | ~4 GB | ~6 GB | Used for planning, summarisation, memory extraction. CPU mode is comfortable. |
+| `llava` (vision) | ~5 GB | ~8 GB | Only loaded when an image is analysed. |
+| `mxbai-embed-large` (embeddings) | ~1 GB | ~2 GB | Always loaded for RAG and memory. |
+| Stable Diffusion XL (image gen) | ~8 GB | not viable on CPU | First run downloads ~7 GB of weights. |
+| Coqui XTTS v2 (TTS) | ~2 GB | ~4 GB | First run downloads ~2 GB of weights. |
+
+**Recommended baseline for the full feature set:**
+- GPU with ≥ 16 GB VRAM (RTX 4080/4090, or two smaller GPUs)
+- 32 GB system RAM
+- 20 GB free disk for models and Chroma data
+
+**Minimum for text-only operation (no image gen, no GPU):**
+- 16 GB RAM
+- Use `FAST_OLLAMA_MODEL` for both thinking and fast roles (set both env vars to `llama3.2`)
+- Disable image generation by not pulling Stable Diffusion
+
+---
+
 ## Prerequisites
 
 ### 1. Python 3.12+
@@ -199,10 +224,13 @@ The test suite covers:
 - `fritz_utils` — config loading, env var overrides, `validate_config`
 - `sqlite_store` — CRUD, namespace isolation, prefix search
 - `deck_of_cards` — Card logic, Deck, draw/reload/remaining
-- `file_tools` — all 6 tools, authorization, path traversal prevention
+- `file_tools` — all 6 tools, authorization, path traversal prevention, `execute_command` allowlist + sandbox rejections
 - `observability` — counters, latency rolling window, error tracking, health text
-- `agent_tools` — `get_current_time`, `format_prompt`, `scrape_web` (mocked), `search_web` (mocked), `roll_dice`
+- `agent_tools` — `get_current_time`, `format_prompt`, `scrape_web` (mocked httpx), `search_web` (mocked), `roll_dice`
 - `discord_commands` — `split_into_chunks`, `StreamingMessageHandler` rate limiting
+- `bot_commands` — ROOT_USER gating on `schedule_add` / `schedule_remove`, open access on `schedule_list`
+- `mister_fritz` — planner JSON parsing (code fences, surrounding text, malformed input, exception fallback)
+- `document_engine` — `VECTORSTORE_LOCK` held during ingest, `_SHUTDOWN_SENTINEL` exits worker, `shutdown()` idempotency
 
 CI runs on every push via GitHub Actions (see `.github/workflows/ci.yml`).
 
@@ -269,7 +297,19 @@ The CI workflow (`.github/workflows/release.yml`) builds the image on tag push, 
 ## Troubleshooting
 
 **"Ollama connection refused"**
-Make sure Ollama is running: `ollama serve`. Check models with `ollama list`.
+Make sure Ollama is running: `ollama serve`. Check models with `ollama list`. Confirm `OLLAMA_HOST` matches the URL Ollama is listening on (`http://127.0.0.1:11434` for a local native install, `http://host.docker.internal:11434` when the bot runs in Docker on Mac/Windows, `http://172.17.0.1:11434` on Linux Docker). Quick connectivity check: `curl $OLLAMA_HOST/api/tags`.
+
+**Ollama out-of-memory / model fails to load**
+Symptoms: Ollama logs show `model requires more memory than available` or your machine swaps to disk. Use a smaller model — switch `THINKING_OLLAMA_MODEL` to `llama3.2` (or a 7B variant), or close other GPU consumers. With multiple models in play, Ollama keeps the most-recently-used one resident; set `OLLAMA_KEEP_ALIVE=0` to evict immediately after each request and trade latency for memory headroom.
+
+**Very slow first response, fast subsequent responses**
+This is normal — Ollama loads the model on the first request. If the wait is too long, the bot has a configurable hard timeout: set `OLLAMA_TIMEOUT=300` (seconds) in `.env` for very large models on CPU.
+
+**Hung requests / bot stops responding**
+Phase 1 added an Ollama request timeout (default 120s). If it trips, you'll see the agent return an error instead of hanging. Lower it (`OLLAMA_TIMEOUT=30`) to fail faster while you debug, or raise it for slow CPU inference. Check `:8000/health` for the bot's error rate and p99 latency snapshot.
+
+**`execute_command` rejects a command**
+The file-tools shell sandbox uses an allowlist (Phase 1). Allowed programs are listed in `EXEC_ALLOWED_COMMANDS` (see `.env.example`). To allow additional programs, override that env var. Shell features (pipes, `&&`, redirects) are not interpreted — the agent must run separate commands instead.
 
 **Missing `DISCORD_BOT_TOKEN` error on startup**
 Copy `.env.example` → `.env` and fill in the required values.
@@ -280,11 +320,20 @@ Ensure "Message Content Intent" is enabled in the [Discord Developer Portal](htt
 **No documents found by `/lore`**
 Add supported files (`.pdf`, `.docx`, `.xlsx`, `.csv`, `.txt`, `.md`) to the `input/` folder. The engine watches for changes and indexes automatically.
 
+**Chroma DB "database is locked" or "could not acquire lock"**
+Another process is holding the Chroma store — usually a previous bot instance that didn't exit cleanly. Stop all `python main_discord.py` processes, then restart. If it persists, delete `chroma_store/chroma.sqlite3-wal` and `chroma.sqlite3-shm` (the WAL files) — the main DB is safe.
+
+**ffmpeg / ffprobe not found**
+Set `FFMPEG_PATH` and `FFPROBE_PATH` in `.env` to the absolute paths of your installs, or put them on `PATH`. On Linux/macOS use `which ffmpeg` to find the path. On Windows the repo ships `ffmpeg.exe`/`ffprobe.exe` as a fallback for native runs.
+
 **Image generation is slow or fails**
 The first run downloads Stable Diffusion XL (~7 GB). GPU (CUDA) is strongly recommended. Check: `python -c "import torch; print(torch.cuda.is_available())"`.
 
 **OCR not working for scanned PDFs**
 Install optional deps: `pip install easyocr PyMuPDF pillow`.
+
+**Schedule commands say "permission denied"**
+`/schedule add` and `/schedule remove` are restricted to `ROOT_USER` (Phase 2). `/schedule list` is open to all users. Set `ROOT_USER=<your discord username>` in `.env`.
 
 ---
 

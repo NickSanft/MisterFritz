@@ -735,8 +735,13 @@ def query_documents(user_input: str, include_sources: bool = False):
         }
     return final_answer
 
-with open("document_engine_diagram.png", "wb") as binary_file:
-    binary_file.write(app.get_graph().draw_mermaid_png())
+try:
+    with open("document_engine_diagram.png", "wb") as binary_file:
+        binary_file.write(app.get_graph().draw_mermaid_png())
+except Exception as _diagram_err:
+    # draw_mermaid_png hits a remote service; we don't want import to fail
+    # in offline or sandboxed environments.
+    logger.debug("Could not write document_engine diagram (non-fatal): %s", _diagram_err)
 
 # Ensure watchdog observer and ingestion worker exit cleanly on interpreter shutdown.
 atexit.register(shutdown)
