@@ -297,6 +297,14 @@ Auth is HTTP Basic; any username works, only the password matters. Pages:
 | `/documents` | Files in `DOC_FOLDER` with sizes and modified times |
 | `/health` | Same JSON snapshot as `:8000/health`, served alongside |
 
+Mutating actions (POST-only, JS-confirmed in the UI):
+- **Forget everything about a user** (user detail page) — runs the same op as `/forget all`.
+- **Disable workspace** (user detail page) — drops the registration; files on disk are kept.
+- **Cancel** (next to each row on `/schedules`) — bypasses ownership check since an admin is acting.
+- **Re-index** (next to each row on `/documents`) — re-enqueues the file for ingestion.
+
+Every mutating action writes a line to `AUDIT_LOG_PATH` with the Basic-auth username, the target, and the result.
+
 If `ADMIN_PANEL_PASSWORD` is unset the panel doesn't start at all.
 
 ---

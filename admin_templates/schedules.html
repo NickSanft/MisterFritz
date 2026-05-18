@@ -9,7 +9,7 @@
         <thead>
             <tr>
                 <th>ID</th><th>User</th><th>Every</th>
-                <th>Prompt</th><th>Description</th><th>Created</th>
+                <th>Prompt</th><th>Description</th><th>Created</th><th></th>
             </tr>
         </thead>
         <tbody>
@@ -21,6 +21,12 @@
                 <td>{{ s.prompt | truncate(80) }}</td>
                 <td>{{ s.description or "" }}</td>
                 <td class="muted">{{ s.created }}</td>
+                <td>
+                    <form class="inline" method="post" action="/schedules/{{ s.id }}/cancel"
+                          onsubmit="return confirm('Cancel schedule {{ s.id }} for {{ s.user_id }}?');">
+                        <button type="submit" class="danger">Cancel</button>
+                    </form>
+                </td>
             </tr>
             {% endfor %}
         </tbody>

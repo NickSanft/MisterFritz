@@ -54,6 +54,18 @@
             background: #ecebe5; font-size: 0.8rem; color: var(--muted);
         }
         a { color: var(--accent); }
+        button {
+            font-family: inherit; font-size: 0.85rem;
+            padding: 0.25rem 0.6rem; border-radius: 3px;
+            border: 1px solid var(--border); background: #ecebe5;
+            color: var(--fg); cursor: pointer;
+        }
+        button:hover { background: #e0dfd9; }
+        button.danger {
+            border-color: var(--danger); color: var(--danger); background: #fff;
+        }
+        button.danger:hover { background: var(--danger); color: #fff; }
+        form.inline { display: inline; margin: 0; }
     </style>
 </head>
 <body>

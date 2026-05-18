@@ -25,7 +25,7 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 from starlette.templating import Jinja2Templates
 
@@ -37,7 +37,7 @@ from fritz_utils import (
     DOC_FOLDER,
     __version__,
 )
-from observability import get_health_snapshot
+from observability import audit_log, get_health_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +68,13 @@ class _BasicAuthMiddleware(BaseHTTPMiddleware):
             return _unauthorized()
         if ":" not in decoded:
             return _unauthorized()
-        _, _, password = decoded.partition(":")
+        username, _, password = decoded.partition(":")
         if not secrets.compare_digest(password, self._password):
             return _unauthorized()
+        # Stash the supplied username for audit log attribution. Shared password
+        # means anyone could enter any name; we still record what they typed so
+        # admins can distinguish each other in practice.
+        request.state.admin_username = username or "(unset)"
         return await call_next(request)
 
 
@@ -188,6 +192,95 @@ async def health_json(request: Request) -> JSONResponse:
     return JSONResponse(get_health_snapshot())
 
 
+# ── Mutating actions (Phase 9b) ──────────────────────────────────────────────
+# These are POST-only so a stray GET (link prefetch, browser preview, etc.)
+# can't trigger destructive actions. Every action writes an entry to the
+# audit log with the admin's Basic-auth username and the target resource.
+
+def _admin(request: Request) -> str:
+    return getattr(request.state, "admin_username", "(unknown)")
+
+
+async def forget_user_action(request: Request) -> Response:
+    user_id = request.path_params["user_id"]
+    schedule_manager = _schedule_manager_from_request(request)
+    result = privacy.forget_all(user_id, schedule_manager)
+    audit_log(
+        "admin_forget_all", admin=_admin(request),
+        target_user=user_id, result=result,
+    )
+    return RedirectResponse(url="/users", status_code=303)
+
+
+async def disable_workspace_action(request: Request) -> Response:
+    user_id = request.path_params["user_id"]
+    removed = privacy.forget_workspace(user_id)
+    audit_log(
+        "admin_disable_workspace", admin=_admin(request),
+        target_user=user_id, removed=removed,
+    )
+    return RedirectResponse(url=f"/users/{user_id}", status_code=303)
+
+
+async def cancel_schedule_action(request: Request) -> Response:
+    schedule_id = request.path_params["schedule_id"]
+    schedule_manager = _schedule_manager_from_request(request)
+    removed = False
+    target_user = None
+    if schedule_manager is not None:
+        # Find the owner so we can delete via the normal API (which goes through
+        # APScheduler too, not just the DB row).
+        for s in schedule_manager.list_all_schedules():
+            if s["id"] == schedule_id:
+                target_user = s["user_id"]
+                break
+        if target_user is not None:
+            try:
+                removed = schedule_manager.remove_schedule(schedule_id, target_user)
+            except Exception as e:
+                logger.warning("admin cancel_schedule(%s) failed: %s", schedule_id, e)
+    audit_log(
+        "admin_cancel_schedule", admin=_admin(request),
+        schedule_id=schedule_id, target_user=target_user, removed=removed,
+    )
+    return RedirectResponse(url="/schedules", status_code=303)
+
+
+async def reindex_document_action(request: Request) -> Response:
+    """Re-enqueue a document so the watchdog worker re-ingests it.
+
+    Imports document_engine lazily so admin_panel can be imported in tests
+    without dragging in the entire LLM stack.
+    """
+    form = await request.form()
+    doc_name = (form.get("name") or "").strip()
+    if not doc_name:
+        audit_log("admin_reindex_document", admin=_admin(request), error="missing-name")
+        return RedirectResponse(url="/documents", status_code=303)
+    full_path = os.path.abspath(os.path.join(DOC_FOLDER, doc_name))
+    # Defence-in-depth: the path must stay inside DOC_FOLDER.
+    doc_folder_abs = os.path.abspath(DOC_FOLDER)
+    if not full_path.startswith(doc_folder_abs + os.sep) and full_path != doc_folder_abs:
+        audit_log(
+            "admin_reindex_document", admin=_admin(request),
+            error="path-escape", attempted=doc_name,
+        )
+        return RedirectResponse(url="/documents", status_code=303)
+    enqueued = False
+    if os.path.isfile(full_path):
+        try:
+            import document_engine
+            document_engine.INGESTION_QUEUE.put(("update", full_path))
+            enqueued = True
+        except Exception as e:
+            logger.warning("admin reindex(%s) failed: %s", full_path, e)
+    audit_log(
+        "admin_reindex_document", admin=_admin(request),
+        document=doc_name, enqueued=enqueued,
+    )
+    return RedirectResponse(url="/documents", status_code=303)
+
+
 # ── App factory + server boot ───────────────────────────────────────────────
 
 def create_app(password: str, schedule_manager=None) -> Starlette:
@@ -200,6 +293,15 @@ def create_app(password: str, schedule_manager=None) -> Starlette:
         Route("/schedules", schedules_list, name="schedules"),
         Route("/documents", documents_list, name="documents"),
         Route("/health", health_json, name="health"),
+        # Mutating actions (POST only).
+        Route("/users/{user_id}/forget", forget_user_action,
+              methods=["POST"], name="forget_user"),
+        Route("/users/{user_id}/workspace/disable", disable_workspace_action,
+              methods=["POST"], name="disable_workspace"),
+        Route("/schedules/{schedule_id}/cancel", cancel_schedule_action,
+              methods=["POST"], name="cancel_schedule"),
+        Route("/documents/reindex", reindex_document_action,
+              methods=["POST"], name="reindex_document"),
     ]
     app = Starlette(
         routes=routes,

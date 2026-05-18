@@ -38,6 +38,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - New `privacy` module centralises all per-user data ops so the upcoming web admin panel can reuse them.
 - **Phase 9a — read-only web admin panel.** New Starlette-based HTML admin UI at `http://127.0.0.1:8001/` (port configurable). HTTP Basic auth gated by `ADMIN_PANEL_PASSWORD`; if unset the panel doesn't start at all. Pages: overview (version/uptime/counters/errors), users list, per-user detail, all-schedules, document inventory, and a `/health` JSON route. Bound to localhost only — SSH-forward for remote access.
 - Reuses the existing Jinja2 + uvicorn deps; no new packages added (Starlette comes in transitively via the LLM stack).
+- **Phase 9b — mutating admin actions.** POST-only routes wired up to buttons on the existing pages:
+  - "Forget everything about <user>" on the user detail page (runs `privacy.forget_all`).
+  - "Disable workspace" on the user detail page.
+  - "Cancel" next to each row on `/schedules` (admin override — bypasses the per-user ownership check).
+  - "Re-index" next to each row on `/documents` (re-enqueues the file for ingestion; rejects paths outside `DOC_FOLDER`).
+- Every mutating action writes an `admin_*` event to `AUDIT_LOG_PATH` with the admin's Basic-auth username, the target resource, and the result.
 
 ## [0.1.0] — 2026-05-18
 

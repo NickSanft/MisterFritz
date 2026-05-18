@@ -7,7 +7,7 @@
     {% if docs %}
     <table>
         <thead>
-            <tr><th>Name</th><th>Size</th><th>Modified</th></tr>
+            <tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr>
         </thead>
         <tbody>
             {% for d in docs %}
@@ -15,6 +15,12 @@
                 <td><code>{{ d.name }}</code></td>
                 <td class="muted">{{ d.size_bytes }} B</td>
                 <td class="muted">{{ d.mtime }}</td>
+                <td>
+                    <form class="inline" method="post" action="/documents/reindex">
+                        <input type="hidden" name="name" value="{{ d.name }}">
+                        <button type="submit">Re-index</button>
+                    </form>
+                </td>
             </tr>
             {% endfor %}
         </tbody>

@@ -189,5 +189,135 @@ class TestStartAdminPanelGate(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TestForgetUserMutation(unittest.TestCase):
+    def test_post_calls_forget_all_and_redirects(self):
+        manager = MagicMock()
+        client = _build_client(schedule_manager=manager)
+        fake_result = {"memories": 3, "conversation_rows": 1, "schedules": 2, "workspace_dropped": True}
+        with patch.object(privacy, "forget_all", return_value=fake_result) as forget, \
+             patch.object(admin_panel, "audit_log") as audit:
+            r = client.post("/users/alice/forget", headers=_auth_header(),
+                            follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(r.headers["location"], "/users")
+        forget.assert_called_once_with("alice", manager)
+        audit.assert_called_once()
+        kwargs = audit.call_args.kwargs
+        self.assertEqual(kwargs.get("target_user"), "alice")
+        self.assertEqual(kwargs.get("result"), fake_result)
+
+    def test_get_on_mutation_route_returns_405(self):
+        client = _build_client()
+        r = client.get("/users/alice/forget", headers=_auth_header())
+        self.assertEqual(r.status_code, 405)
+
+    def test_unauthed_post_still_returns_401(self):
+        client = _build_client()
+        r = client.post("/users/alice/forget", follow_redirects=False)
+        self.assertEqual(r.status_code, 401)
+
+
+class TestDisableWorkspaceMutation(unittest.TestCase):
+    def test_post_drops_workspace_and_redirects_to_user(self):
+        client = _build_client()
+        with patch.object(privacy, "forget_workspace", return_value=True) as fw, \
+             patch.object(admin_panel, "audit_log"):
+            r = client.post("/users/alice/workspace/disable", headers=_auth_header(),
+                            follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(r.headers["location"], "/users/alice")
+        fw.assert_called_once_with("alice")
+
+
+class TestCancelScheduleMutation(unittest.TestCase):
+    def test_post_cancels_schedule_via_manager(self):
+        manager = MagicMock()
+        manager.list_all_schedules.return_value = [
+            {"id": "sid1", "user_id": "alice", "prompt": "p", "schedule": "1h",
+             "description": "", "created": "now"},
+        ]
+        manager.remove_schedule.return_value = True
+        client = _build_client(schedule_manager=manager)
+        with patch.object(admin_panel, "audit_log") as audit:
+            r = client.post("/schedules/sid1/cancel", headers=_auth_header(),
+                            follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(r.headers["location"], "/schedules")
+        manager.remove_schedule.assert_called_once_with("sid1", "alice")
+        self.assertEqual(audit.call_args.kwargs.get("target_user"), "alice")
+
+    def test_unknown_schedule_id_does_not_call_remove(self):
+        manager = MagicMock()
+        manager.list_all_schedules.return_value = []
+        client = _build_client(schedule_manager=manager)
+        with patch.object(admin_panel, "audit_log"):
+            r = client.post("/schedules/sid_missing/cancel", headers=_auth_header(),
+                            follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        manager.remove_schedule.assert_not_called()
+
+
+class TestReindexDocumentMutation(unittest.TestCase):
+    def test_post_enqueues_existing_document(self):
+        client = _build_client()
+        fake_queue = MagicMock()
+        fake_document_engine = MagicMock()
+        fake_document_engine.INGESTION_QUEUE = fake_queue
+        with patch.dict(sys.modules, {"document_engine": fake_document_engine}), \
+             patch.object(admin_panel, "audit_log"):
+            r = client.post("/documents/reindex",
+                            data={"name": "alpha.txt"},
+                            headers=_auth_header(), follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(r.headers["location"], "/documents")
+        fake_queue.put.assert_called_once()
+        action, path = fake_queue.put.call_args.args[0]
+        self.assertEqual(action, "update")
+        self.assertTrue(path.endswith("alpha.txt"))
+
+    def test_rejects_path_outside_doc_folder(self):
+        client = _build_client()
+        fake_queue = MagicMock()
+        fake_document_engine = MagicMock()
+        fake_document_engine.INGESTION_QUEUE = fake_queue
+        with patch.dict(sys.modules, {"document_engine": fake_document_engine}), \
+             patch.object(admin_panel, "audit_log") as audit:
+            r = client.post("/documents/reindex",
+                            data={"name": "../../../etc/passwd"},
+                            headers=_auth_header(), follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        fake_queue.put.assert_not_called()
+        self.assertEqual(audit.call_args.kwargs.get("error"), "path-escape")
+
+    def test_missing_name_field_audits_error_and_does_not_enqueue(self):
+        client = _build_client()
+        fake_queue = MagicMock()
+        fake_document_engine = MagicMock()
+        fake_document_engine.INGESTION_QUEUE = fake_queue
+        with patch.dict(sys.modules, {"document_engine": fake_document_engine}), \
+             patch.object(admin_panel, "audit_log") as audit:
+            r = client.post("/documents/reindex",
+                            data={"name": ""},
+                            headers=_auth_header(), follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        fake_queue.put.assert_not_called()
+        self.assertEqual(audit.call_args.kwargs.get("error"), "missing-name")
+
+
+class TestAdminUsernameInAudit(unittest.TestCase):
+    def test_basic_auth_username_appears_in_audit_log(self):
+        manager = MagicMock()
+        client = _build_client(schedule_manager=manager)
+        with patch.object(privacy, "forget_all", return_value={}), \
+             patch.object(admin_panel, "audit_log") as audit:
+            # Build a custom header with a specific username.
+            encoded = base64.b64encode(f"nick:{PASSWORD}".encode()).decode()
+            r = client.post("/users/alice/forget",
+                            headers={"Authorization": f"Basic {encoded}"},
+                            follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(audit.call_args.kwargs.get("admin"), "nick")
+
+
 if __name__ == "__main__":
     unittest.main()
