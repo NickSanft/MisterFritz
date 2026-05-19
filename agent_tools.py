@@ -28,7 +28,7 @@ from fritz_utils import (
     VISION_MODEL,
 )
 from observability import METRICS, time_tool
-from storage import ChromaStore
+from storage import get_default_chroma_store
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +41,13 @@ _HTTP_CLIENT = httpx.Client(
     headers={"User-Agent": "MisterFritz/1.0 (+scrape_web)"},
 )
 
-_chroma_store = None
+def _get_chroma_store():
+    """Thin wrapper over storage.get_default_chroma_store for backwards compat.
 
-
-def _get_chroma_store() -> ChromaStore:
-    global _chroma_store
-    if _chroma_store is None:
-        _chroma_store = ChromaStore()
-    return _chroma_store
+    Kept so plugins that imported _get_chroma_store keep working. New code
+    should call storage.get_default_chroma_store directly.
+    """
+    return get_default_chroma_store()
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

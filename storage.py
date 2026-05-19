@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import threading
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 from langchain_chroma import Chroma
@@ -223,3 +224,29 @@ class ChromaStore(BaseStore[str, Union[str, bytes]]):
                 "metadata": metas[i],
             })
         return out
+
+
+# ── Shared ChromaStore singleton ─────────────────────────────────────────────
+# Constructing a ChromaStore boots the OllamaEmbeddings client and re-opens the
+# persist directory — non-trivial cost. Phase 13 makes everyone (agent_tools,
+# privacy) share a single instance so that cost is paid once per process.
+
+_default_chroma_store: Optional["ChromaStore"] = None
+_default_chroma_lock = threading.Lock()
+
+
+def get_default_chroma_store() -> "ChromaStore":
+    """Return the process-wide ChromaStore singleton, constructing it on first call."""
+    global _default_chroma_store
+    if _default_chroma_store is None:
+        with _default_chroma_lock:
+            if _default_chroma_store is None:
+                _default_chroma_store = ChromaStore()
+    return _default_chroma_store
+
+
+def reset_default_chroma_store_for_tests() -> None:
+    """Clear the singleton — only call from tests that need isolation."""
+    global _default_chroma_store
+    with _default_chroma_lock:
+        _default_chroma_store = None

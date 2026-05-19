@@ -41,8 +41,16 @@ class TestSanitiseThreadId(unittest.TestCase):
 class TestForgetMemories(unittest.TestCase):
     def setUp(self):
         import privacy
+        import storage
         importlib.reload(privacy)
+        # Phase 13: the Chroma client is a process-wide singleton — reset
+        # between tests so each one gets a clean ChromaStore() call.
+        storage.reset_default_chroma_store_for_tests()
         self.privacy = privacy
+        self.storage = storage
+
+    def tearDown(self):
+        self.storage.reset_default_chroma_store_for_tests()
 
     def test_delegates_to_chroma_store(self):
         fake_store = MagicMock()

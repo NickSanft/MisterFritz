@@ -176,8 +176,11 @@ class TestScheduleManagerDB(unittest.TestCase):
         # Reset the mock call count before calling start().
         self.manager.scheduler.reset_mock()
         self.manager.start()
-        # add_job called once per restored schedule.
-        self.assertEqual(self.manager.scheduler.add_job.call_count, 2)
+        # 2 user schedules + 1 internal WAL checkpoint job = 3 add_job calls.
+        self.assertEqual(self.manager.scheduler.add_job.call_count, 3)
+        # User-supplied IDs are restored.
+        ids_passed = {c.kwargs.get("id") for c in self.manager.scheduler.add_job.call_args_list}
+        self.assertIn("_internal_wal_checkpoint", ids_passed)
 
     def test_start_skips_corrupt_schedule_gracefully(self):
         # Insert a row with an invalid schedule_expr directly.
@@ -187,9 +190,29 @@ class TestScheduleManagerDB(unittest.TestCase):
                 ("badid123", "user1", 111, 999, "ping", "INVALID", None, "2024-01-01T00:00:00+00:00"),
             )
         self.manager.scheduler.reset_mock()
-        # Should not raise — bad rows are warned and skipped.
+        # Should not raise — bad rows are warned and skipped. The internal
+        # WAL checkpoint job still registers (it's not from the DB).
         self.manager.start()
-        self.manager.scheduler.add_job.assert_not_called()
+        ids_passed = {c.kwargs.get("id") for c in self.manager.scheduler.add_job.call_args_list}
+        self.assertEqual(ids_passed, {"_internal_wal_checkpoint"})
+
+    # ── WAL checkpoint ──────────────────────────────────────────────────────
+
+    def test_wal_checkpoint_runs_pragma_against_schedule_db(self):
+        # _wal_checkpoint just executes a PRAGMA on the configured DB.
+        # We can't easily inspect the result of TRUNCATE on a tiny test DB,
+        # but the method must not raise.
+        self.manager.add_schedule("user1", 111, 999, "ping", "1h")
+        self.manager._wal_checkpoint()  # must not raise
+
+    def test_wal_checkpoint_internal_job_is_not_in_list_all(self):
+        # The internal job lives only in APScheduler, not the schedules table.
+        # list_all_schedules() queries the DB, so it should never surface
+        # the internal job's ID.
+        self.manager.start()  # registers the internal job
+        all_schedules = self.manager.list_all_schedules()
+        ids = {s["id"] for s in all_schedules}
+        self.assertNotIn("_internal_wal_checkpoint", ids)
 
 
 class TestParseTrigger(unittest.TestCase):

@@ -290,8 +290,36 @@ class ScheduleManager:
             except Exception as e:
                 logger.warning("Could not restore schedule %s: %s", schedule_id, e)
 
+        # Internal daily job to keep the WAL file from growing unbounded.
+        # Runs at 03:00 UTC. The job ID prefix `_internal_` is excluded from
+        # any future user-facing schedule listings if we add filtering there.
+        try:
+            self.scheduler.add_job(
+                self._wal_checkpoint,
+                trigger=CronTrigger(hour=3, minute=0),
+                id="_internal_wal_checkpoint",
+                replace_existing=True,
+            )
+        except Exception as e:
+            logger.warning("Could not register WAL checkpoint job: %s", e)
+
         self.scheduler.start()
         logger.info("Scheduler started, %d job(s) restored", restored)
+
+    def _wal_checkpoint(self) -> None:
+        """Truncate the SQLite WAL file. Called daily by an internal APScheduler job.
+
+        Under WAL mode + heavy writes, the WAL file can grow into hundreds of
+        MB before SQLite checkpoints on its own. `wal_checkpoint(TRUNCATE)`
+        forces a checkpoint and shrinks the WAL back to zero bytes.
+        """
+        try:
+            with sqlite3.connect(SCHEDULE_DB) as conn:
+                cur = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                result = cur.fetchone()
+            logger.info("WAL checkpoint on %s complete: %s", SCHEDULE_DB, result)
+        except Exception as e:
+            logger.warning("WAL checkpoint failed for %s: %s", SCHEDULE_DB, e)
 
     def stop(self):
         self.scheduler.shutdown(wait=False)

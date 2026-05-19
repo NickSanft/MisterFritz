@@ -124,5 +124,81 @@ class TestSQLiteStoreCRUD(unittest.TestCase):
         self.assertNotIn("ns2_val", ns1_vals)
 
 
+class TestSQLiteDeleteAndExportNamespace(unittest.TestCase):
+    """Phase 8 added delete_namespace/export_namespace — confirm they
+    work end-to-end against a real file-backed SQLiteStore."""
+
+    def setUp(self):
+        fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.store = SQLiteStore(self.db_path)
+
+    def tearDown(self):
+        try:
+            os.unlink(self.db_path)
+        except OSError:
+            pass
+
+    def test_delete_namespace_returns_row_count(self):
+        self.store.put(("alice",), "k1", {"v": 1})
+        self.store.put(("alice",), "k2", {"v": 2})
+        self.store.put(("bob",), "k1", {"v": 99})
+        removed = self.store.delete_namespace(("alice",))
+        self.assertEqual(removed, 2)
+        # Bob's row survives.
+        self.assertEqual(self.store.search(("bob",), limit=10)[0][1]["v"], 99)
+
+    def test_export_namespace_returns_every_row(self):
+        self.store.put(("alice",), "k1", {"v": 1})
+        self.store.put(("alice",), "k2", {"v": 2})
+        exported = self.store.export_namespace(("alice",))
+        keys = {key for key, _ in exported}
+        self.assertEqual(keys, {"k1", "k2"})
+
+
+class TestDefaultChromaStoreSingleton(unittest.TestCase):
+    """Phase 13: get_default_chroma_store returns the same instance every call."""
+
+    def setUp(self):
+        # The real ChromaStore boots OllamaEmbeddings on first construction,
+        # which we can't do without a running Ollama. Replace ChromaStore
+        # with a sentinel-returning stub for the duration of the test.
+        import storage
+        storage.reset_default_chroma_store_for_tests()
+        self._orig = storage.ChromaStore
+        self._construct_count = 0
+
+        sentinel = object()
+        outer = self
+
+        class _Stub:
+            def __new__(cls, *a, **kw):
+                outer._construct_count += 1
+                return sentinel
+
+        storage.ChromaStore = _Stub
+        self.storage = storage
+        self.sentinel = sentinel
+
+    def tearDown(self):
+        self.storage.ChromaStore = self._orig
+        self.storage.reset_default_chroma_store_for_tests()
+
+    def test_returns_same_instance_across_calls(self):
+        a = self.storage.get_default_chroma_store()
+        b = self.storage.get_default_chroma_store()
+        c = self.storage.get_default_chroma_store()
+        self.assertIs(a, self.sentinel)
+        self.assertIs(b, self.sentinel)
+        self.assertIs(c, self.sentinel)
+        self.assertEqual(self._construct_count, 1)
+
+    def test_reset_for_tests_clears_singleton(self):
+        self.storage.get_default_chroma_store()
+        self.storage.reset_default_chroma_store_for_tests()
+        self.storage.get_default_chroma_store()
+        self.assertEqual(self._construct_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

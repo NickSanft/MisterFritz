@@ -19,6 +19,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   - New `prewarm.py` fires a 1-token request to every configured Ollama model (thinking, fast, vision, embedding) in a background daemon thread on `on_ready`. Eliminates the cold-load wait on the first user DM after a restart.
   - New `OLLAMA_KEEP_ALIVE` env var (default `"5m"`, matching Ollama's own default) controls how long Ollama keeps a model resident. Set to `"-1"` to pin forever for fastest response at the cost of permanent VRAM use.
   - The keep-alive value is wired into both `ChatOllama` instances (in `mister_fritz` and `document_engine`) and the raw `ollama.chat()` calls (in `agent_tools._extract_and_store_memories` and `analyze_image`).
+- **Phase 13 — storage hygiene.**
+  - New `storage.get_default_chroma_store()` singleton accessor. Previously `privacy.forget_memories` / `export_memories` constructed a fresh `ChromaStore()` per call, each one reloading `OllamaEmbeddings` and re-opening the persist directory. Both privacy helpers and `agent_tools._get_chroma_store` now go through the singleton so the cost is paid once per process.
+  - New internal APScheduler job `_internal_wal_checkpoint` runs `PRAGMA wal_checkpoint(TRUNCATE)` against `SCHEDULE_DB` daily at 03:00 UTC. Keeps the SQLite WAL file from growing unbounded under heavy schedule / workspace / store write load. The internal job lives only in APScheduler — it doesn't show up in `/schedule list_all` or the admin panel's schedule list.
 
 ### Added
 - `/help` slash command listing capabilities and slash commands.

@@ -34,10 +34,11 @@ def forget_memories(user_id: str) -> int:
     """
     if not user_id:
         return 0
-    from storage import ChromaStore  # lazy import — ChromaStore boots embeddings
+    # Lazy import: ChromaStore boots embeddings on first construction, and
+    # we go through the singleton so the cost is paid once per process.
+    from storage import get_default_chroma_store
     try:
-        store = ChromaStore()
-        return store.delete_namespace((str(user_id),))
+        return get_default_chroma_store().delete_namespace((str(user_id),))
     except Exception as e:
         logger.warning("forget_memories failed for %s: %s", user_id, e)
         return 0
@@ -47,10 +48,9 @@ def export_memories(user_id: str) -> list[dict]:
     """Return every memory + profile entry for user_id, ready to JSON-serialise."""
     if not user_id:
         return []
-    from storage import ChromaStore
+    from storage import get_default_chroma_store
     try:
-        store = ChromaStore()
-        return store.export_namespace((str(user_id),))
+        return get_default_chroma_store().export_namespace((str(user_id),))
     except Exception as e:
         logger.warning("export_memories failed for %s: %s", user_id, e)
         return []
