@@ -35,3 +35,10 @@ ignore = ["E501", "E701"]
 # Test files re-import modules under test through sys.modules manipulation;
 # unused-import warnings are noise there.
 "tests/*" = ["F401"]
+
+[tool.pytest.ini_options]
+# Add the repo root to sys.path so test files can do `from mister_fritz import ...`
+# without requiring `python -m pytest` (which auto-adds cwd). Plain `pytest` from
+# the CI workflow now resolves the project modules the same way.
+pythonpath = ["."]
+testpaths = ["tests"]
