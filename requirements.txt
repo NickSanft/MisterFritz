@@ -283,3 +283,8 @@ faster-whisper>=1.0.0
 python-telegram-bot>=20.0
 prometheus-client>=0.20.0
 APScheduler>=3.10.0
+# Admin panel (Phase 9a) — Starlette is sometimes pulled in transitively by the
+# langchain stack, but not always; pin explicitly. python-multipart powers the
+# POST form handling in Phase 9b.
+starlette>=0.46
+python-multipart>=0.0.22
