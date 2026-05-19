@@ -1,4 +1,5 @@
 import fnmatch
+import functools
 import logging
 import os
 import re
@@ -15,13 +16,26 @@ from fritz_utils import (
     MAX_FILE_SIZE_BYTES,
     MAX_READ_LINES,
 )
-from observability import METRICS
+from observability import METRICS, time_tool
 
 logger = logging.getLogger(__name__)
 
 # Backwards-compatible aliases — the test suite and other modules may still
 # import these names. The values are now sourced from fritz_utils.
 MAX_FILE_SIZE = MAX_FILE_SIZE_BYTES
+
+
+def _timed(name: str):
+    """Decorator: wrap the function in time_tool so counter + latency are
+    both recorded. Stack BEFORE @tool so LangChain wraps an already-timed fn.
+    """
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            with time_tool(name):
+                return fn(*args, **kwargs)
+        return wrapper
+    return deco
 # File extensions to include in search by default
 TEXT_EXTENSIONS = {
     '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.c', '.cpp', '.h', '.hpp',
@@ -88,6 +102,7 @@ def _is_text_file(file_path: str) -> bool:
 
 
 @tool(parse_docstring=True)
+@_timed("list_directory")
 def list_directory(config: RunnableConfig, path: str = ".", include_hidden: bool = False) -> str:
     """Lists files and directories at the given path within the workspace.
 
@@ -99,7 +114,6 @@ def list_directory(config: RunnableConfig, path: str = ".", include_hidden: bool
     Returns:
         A formatted listing of directory contents with type indicators.
     """
-    METRICS.increment("tool.list_directory")
     workspace = _get_workspace(config)
     target = _resolve_safe_path(workspace, path)
 
@@ -141,6 +155,7 @@ def list_directory(config: RunnableConfig, path: str = ".", include_hidden: bool
 
 
 @tool(parse_docstring=True)
+@_timed("read_file")
 def read_file(config: RunnableConfig, path: str, offset: int = 0, limit: Optional[int] = None) -> str:
     """Reads the contents of a file within the workspace.
 
@@ -153,7 +168,6 @@ def read_file(config: RunnableConfig, path: str, offset: int = 0, limit: Optiona
     Returns:
         The file contents with line numbers.
     """
-    METRICS.increment("tool.read_file")
     workspace = _get_workspace(config)
     target = _resolve_safe_path(workspace, path)
 
@@ -192,6 +206,7 @@ def read_file(config: RunnableConfig, path: str, offset: int = 0, limit: Optiona
 
 
 @tool(parse_docstring=True)
+@_timed("write_file")
 def write_file(config: RunnableConfig, path: str, content: str) -> str:
     """Writes content to a file within the workspace. Creates the file if it doesn't exist,
     or overwrites it if it does. Creates parent directories as needed.
@@ -204,7 +219,6 @@ def write_file(config: RunnableConfig, path: str, content: str) -> str:
     Returns:
         A confirmation message.
     """
-    METRICS.increment("tool.write_file")
     workspace = _get_workspace(config)
     target = _resolve_safe_path(workspace, path)
 
@@ -226,6 +240,7 @@ def write_file(config: RunnableConfig, path: str, content: str) -> str:
 
 
 @tool(parse_docstring=True)
+@_timed("edit_file")
 def edit_file(config: RunnableConfig, path: str, old_text: str, new_text: str) -> str:
     """Performs a targeted text replacement in a file within the workspace.
     Replaces the first occurrence of old_text with new_text.
@@ -239,7 +254,6 @@ def edit_file(config: RunnableConfig, path: str, old_text: str, new_text: str) -
     Returns:
         A confirmation message showing the edit was applied.
     """
-    METRICS.increment("tool.edit_file")
     workspace = _get_workspace(config)
     target = _resolve_safe_path(workspace, path)
 
@@ -271,6 +285,7 @@ def edit_file(config: RunnableConfig, path: str, old_text: str, new_text: str) -
 
 
 @tool(parse_docstring=True)
+@_timed("search_files")
 def search_files(config: RunnableConfig, pattern: str, path: str = ".", file_glob: str = "*") -> str:
     """Searches for a text pattern across files in the workspace, similar to grep.
 
@@ -283,7 +298,6 @@ def search_files(config: RunnableConfig, pattern: str, path: str = ".", file_glo
     Returns:
         Matching lines with file paths and line numbers.
     """
-    METRICS.increment("tool.search_files")
     workspace = _get_workspace(config)
     target = _resolve_safe_path(workspace, path)
 
@@ -387,6 +401,7 @@ def _validate_command_argv(argv: list[str], workspace: str) -> Optional[str]:
 
 
 @tool(parse_docstring=True)
+@_timed("execute_command")
 def execute_command(config: RunnableConfig, command: str, timeout: int = 30) -> str:
     """Executes a command in the workspace directory and returns the output.
     The command runs with the workspace as the current working directory.
@@ -404,7 +419,6 @@ def execute_command(config: RunnableConfig, command: str, timeout: int = 30) -> 
     Returns:
         The combined stdout and stderr output from the command.
     """
-    METRICS.increment("tool.execute_command")
     workspace = _get_workspace(config)
 
     timeout = min(timeout, MAX_EXEC_TIMEOUT)

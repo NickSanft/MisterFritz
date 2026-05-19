@@ -101,6 +101,52 @@ class TestMetricsErrors(unittest.TestCase):
         self.assertEqual(self.m.snapshot()["errors"]["op"], 2)
 
 
+class TestMetricsTimeBlock(unittest.TestCase):
+    """Phase 11: time_block context manager records counter + latency
+    + errors atomically around a block."""
+
+    def setUp(self):
+        self.m = Metrics()
+
+    def test_records_counter_and_latency_on_success(self):
+        with self.m.time_block("op"):
+            time.sleep(0.01)
+        snap = self.m.snapshot()
+        self.assertEqual(snap["counters"]["op"], 1)
+        self.assertEqual(len(snap["latencies"]["op"]), 1)
+        self.assertGreater(snap["latencies"]["op"][0], 0)
+
+    def test_records_error_and_latency_when_block_raises(self):
+        with self.assertRaises(ValueError):
+            with self.m.time_block("op"):
+                raise ValueError("boom")
+        snap = self.m.snapshot()
+        self.assertEqual(snap["counters"]["op"], 1)        # still incremented
+        self.assertEqual(snap["errors"]["op"], 1)          # error recorded
+        self.assertEqual(len(snap["latencies"]["op"]), 1)  # latency still observed
+
+    def test_nested_blocks_record_independently(self):
+        with self.m.time_block("outer"):
+            with self.m.time_block("inner"):
+                pass
+        snap = self.m.snapshot()
+        self.assertEqual(snap["counters"]["outer"], 1)
+        self.assertEqual(snap["counters"]["inner"], 1)
+
+
+class TestTimeToolHelper(unittest.TestCase):
+    """Phase 11: time_tool() auto-prefixes the metric name with 'tool.'."""
+
+    def test_prefixes_with_tool_namespace(self):
+        from observability import METRICS, time_tool
+        # Stash a baseline so other tests don't pollute the count assertion.
+        before = METRICS.snapshot()["counters"].get("tool.unit_test_sample", 0)
+        with time_tool("unit_test_sample"):
+            pass
+        after = METRICS.snapshot()["counters"]["tool.unit_test_sample"]
+        self.assertEqual(after - before, 1)
+
+
 class TestFormatDuration(unittest.TestCase):
     def test_seconds_only(self):
         self.assertEqual(_format_duration(45), "45s")

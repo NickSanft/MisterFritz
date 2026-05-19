@@ -26,7 +26,7 @@ from fritz_utils import (
     MEMORY_EXTRACT_MIN_USER_CHARS,
     VISION_MODEL,
 )
-from observability import METRICS
+from observability import METRICS, time_tool
 from storage import ChromaStore
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,9 @@ def _get_chroma_store() -> ChromaStore:
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
+# _record_tool kept as a thin re-export so existing callers in skills/ etc.
+# continue to work. Prefer `with time_tool("name"):` for new code — it also
+# records latency.
 def _record_tool(name: str) -> None:
     METRICS.increment(f"tool.{name}")
 
@@ -217,8 +220,8 @@ def get_current_time(timezone_name: str = "US/Central") -> str:
         timezone_name: IANA timezone name e.g. "America/Chicago", "America/New_York",
                        "Europe/London", "Asia/Tokyo". Defaults to US/Central.
     """
-    _record_tool("get_current_time")
-    return get_current_time_internal(timezone_name)
+    with time_tool("get_current_time"):
+        return get_current_time_internal(timezone_name)
 
 
 @tool(parse_docstring=True)
@@ -233,17 +236,18 @@ def scrape_web(url: str):
     string: The readable text from the website.
     """
     try:
-        _record_tool("scrape_web")
-        response = _HTTP_CLIENT.get(url)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        for element in soup(['script', 'style', 'head', 'title', 'meta', '[document]']):
-            element.extract()
-        text = soup.get_text(' ')
-        clean_text = re.sub(r'\s+', ' ', text).strip()
-        return clean_text
+        with time_tool("scrape_web"):
+            response = _HTTP_CLIENT.get(url)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for element in soup(['script', 'style', 'head', 'title', 'meta', '[document]']):
+                element.extract()
+            text = soup.get_text(' ')
+            clean_text = re.sub(r'\s+', ' ', text).strip()
+            return clean_text
     except Exception as e:
-        METRICS.record_error("scrape_web", e)
+        # time_tool already recorded the error; this branch produces the
+        # user-facing message and squashes the exception so the agent sees a string.
         logger.warning("Scrape web error: %s", e)
         return f"Error: {e}"
 
@@ -259,10 +263,10 @@ def search_web(text_to_search: str):
     Returns:
     list: A list of dictionaries, each containing string keys and string values representing the search results.
     """
-    _record_tool("search_web")
-    results = DDGS().text(text_to_search, max_results=5)
-    logger.debug("Search web results count: %s", len(results) if results else 0)
-    return results
+    with time_tool("search_web"):
+        results = DDGS().text(text_to_search, max_results=5)
+        logger.debug("Search web results count: %s", len(results) if results else 0)
+        return results
 
 
 @tool(parse_docstring=True)
@@ -278,12 +282,12 @@ def roll_dice(num_dice: int, num_sides: int, config: RunnableConfig):
     Returns:
     list: A list containing the result of each die roll.
     """
-    _record_tool("roll_dice")
-    user_id = config.get("metadata").get("user_id")
-    if num_dice <= 0 or num_sides <= 0:
-        raise ValueError("Both number of dice and number of sides must be positive integers.")
-    rolls = [random.randint(1, num_sides) for _ in range(num_dice)]
-    return f"Here are the results: {user_id}. {rolls}"
+    with time_tool("roll_dice"):
+        user_id = config.get("metadata").get("user_id")
+        if num_dice <= 0 or num_sides <= 0:
+            raise ValueError("Both number of dice and number of sides must be positive integers.")
+        rolls = [random.randint(1, num_sides) for _ in range(num_dice)]
+        return f"Here are the results: {user_id}. {rolls}"
 
 
 @tool(parse_docstring=True)
@@ -297,8 +301,8 @@ def generate_image(prompt: str):
     Returns:
     string: The path of the image.
     """
-    _record_tool("generate_image")
-    return image_generator.generate_image(prompt)
+    with time_tool("generate_image"):
+        return image_generator.generate_image(prompt)
 
 
 @tool(parse_docstring=True)
@@ -312,8 +316,8 @@ def search_documents(query: str):
     Returns:
     string: The answer derived from the documents.
     """
-    _record_tool("search_documents")
-    return document_engine.query_documents(query)
+    with time_tool("search_documents"):
+        return document_engine.query_documents(query)
 
 
 @tool(parse_docstring=True)
@@ -324,8 +328,8 @@ def search_memories(config: RunnableConfig, query: str):
         config: The RunnableConfig.
         query: The keywords do to a semantic search for.
     """
-    _record_tool("search_memories")
-    return search_memories_internal(config, query)
+    with time_tool("search_memories"):
+        return search_memories_internal(config, query)
 
 
 @tool(parse_docstring=True)
@@ -344,10 +348,10 @@ def save_memory(config: RunnableConfig, fact: str):
     Returns:
         string: Confirmation that the memory was saved.
     """
-    _record_tool("save_memory")
-    user_id = config.get("metadata", {}).get("user_id", "unknown")
-    key = f"fact_{fact[:50].replace(' ', '_').lower()}"
-    return add_memory(user_id, key, fact)
+    with time_tool("save_memory"):
+        user_id = config.get("metadata", {}).get("user_id", "unknown")
+        key = f"fact_{fact[:50].replace(' ', '_').lower()}"
+        return add_memory(user_id, key, fact)
 
 
 @tool(parse_docstring=True)
@@ -364,43 +368,42 @@ def analyze_image(config: RunnableConfig, question: str = "What is in this image
     """
     metadata = config.get("metadata", {})
     user_images = metadata.get("user_image_paths", [])
-    _record_tool("analyze_image")
     logger.debug("User images: %s", user_images)
 
     if not user_images:
         return "No images were attached to analyze. Please ask the user to attach an image."
 
-    try:
-        encoded_images = []
-        for img_path in user_images:
-            try:
-                with open(img_path, "rb") as image_file:
-                    encoded_images.append(base64.b64encode(image_file.read()).decode("utf-8"))
-            except Exception as e:
-                METRICS.record_error("analyze_image.read", e)
-                logger.warning("Error reading image %s: %s", img_path, e)
+    with time_tool("analyze_image"):
+        try:
+            encoded_images = []
+            for img_path in user_images:
+                try:
+                    with open(img_path, "rb") as image_file:
+                        encoded_images.append(base64.b64encode(image_file.read()).decode("utf-8"))
+                except Exception as e:
+                    METRICS.record_error("analyze_image.read", e)
+                    logger.warning("Error reading image %s: %s", img_path, e)
 
-        if not encoded_images:
-            return "Could not read the attached images. Please try again."
+            if not encoded_images:
+                return "Could not read the attached images. Please try again."
 
-        logger.info("Analyzing %d image(s) with %s", len(encoded_images), VISION_MODEL)
-        response = _ollama_client.chat(
-            model=VISION_MODEL,
-            messages=[{
-                'role': 'user',
-                'content': question,
-                'images': encoded_images,
-            }]
-        )
-        analysis = response['message']['content']
-        logger.info("Vision analysis complete: %d chars", len(analysis))
-        return analysis
-
-    except Exception as e:
-        METRICS.record_error("analyze_image", e)
-        error_msg = f"Error analyzing image: {str(e)}"
-        logger.warning(error_msg)
-        return error_msg
+            logger.info("Analyzing %d image(s) with %s", len(encoded_images), VISION_MODEL)
+            response = _ollama_client.chat(
+                model=VISION_MODEL,
+                messages=[{
+                    'role': 'user',
+                    'content': question,
+                    'images': encoded_images,
+                }]
+            )
+            analysis = response['message']['content']
+            logger.info("Vision analysis complete: %d chars", len(analysis))
+            return analysis
+        except Exception as e:
+            # time_tool already recorded the error; squash it into a user-facing string.
+            error_msg = f"Error analyzing image: {str(e)}"
+            logger.warning(error_msg)
+            return error_msg
 
 
 # ── Skill auto-loader ─────────────────────────────────────────────────────────

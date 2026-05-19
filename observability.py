@@ -1,3 +1,4 @@
+import contextlib
 import json
 import logging
 import os
@@ -128,6 +129,26 @@ class Metrics:
         if _PROMETHEUS_AVAILABLE:
             _PROM_ERRORS.labels(operation=name).inc()
 
+    @contextlib.contextmanager
+    def time_block(self, name: str):
+        """Increment a counter, time the wrapped block, record any raised
+        exception. Use as:
+
+            with METRICS.time_block("tool.scrape_web"):
+                ...
+
+        Latency is recorded whether the block succeeded or raised.
+        """
+        self.increment(name)
+        start = time.perf_counter()
+        try:
+            yield
+        except Exception as e:
+            self.record_error(name, e)
+            raise
+        finally:
+            self.record_latency(name, time.perf_counter() - start)
+
     def snapshot(self) -> dict:
         with self._lock:
             counters = dict(self._counters)
@@ -145,6 +166,15 @@ class Metrics:
 
 
 METRICS = Metrics()
+
+
+def time_tool(name: str):
+    """Context manager that records counter + latency + errors for a tool call.
+
+    Auto-prefixes the metric name with 'tool.' so callers can pass the bare
+    tool name (e.g. 'scrape_web' → metric 'tool.scrape_web').
+    """
+    return METRICS.time_block(f"tool.{name}")
 
 
 # ── HTTP servers (metrics + health) ──────────────────────────────────────────

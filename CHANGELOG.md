@@ -11,6 +11,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - **Phase 10 — quick wins.**
   - `config.json` parse is now cached via `functools.lru_cache`. Repeated key lookups during import no longer re-open the file.
   - Automatic memory extraction now skips trivial turns (user message < `MEMORY_EXTRACT_MIN_USER_CHARS` or reply < `MEMORY_EXTRACT_MIN_REPLY_CHARS`). Saves an LLM call + embedding writes on "hi" / "lol" turns. Skipped turns increment the `memory_extract_skipped` counter so the rate is visible in `/health`.
+- **Phase 11 — per-tool latency observability.**
+  - New `Metrics.time_block(name)` context manager: increments a counter, records latency, and tracks errors as a single atomic operation around a block.
+  - New `time_tool(name)` helper that auto-prefixes with `tool.` for the canonical tool-call metric namespace.
+  - All `agent_tools` tools and `file_tools` tools now record latency, not just call count. The admin overview page surfaces the per-tool average automatically, so it's now possible to see which tool is dragging response times.
 
 ### Added
 - `/help` slash command listing capabilities and slash commands.
