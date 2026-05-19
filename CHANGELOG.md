@@ -7,6 +7,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Performance
+- **Phase 10 — quick wins.**
+  - `config.json` parse is now cached via `functools.lru_cache`. Repeated key lookups during import no longer re-open the file.
+  - Automatic memory extraction now skips trivial turns (user message < `MEMORY_EXTRACT_MIN_USER_CHARS` or reply < `MEMORY_EXTRACT_MIN_REPLY_CHARS`). Saves an LLM call + embedding writes on "hi" / "lol" turns. Skipped turns increment the `memory_extract_skipped` counter so the rate is visible in `/health`.
+
 ### Added
 - `/help` slash command listing capabilities and slash commands.
 - `/about` slash command showing bot version, active models, uptime, and a brief data-storage disclosure.

@@ -19,7 +19,13 @@ from langchain_core.tools import tool, BaseTool
 import document_engine
 import image_generator
 from file_tools import get_file_tools_description
-from fritz_utils import DOC_STORAGE_DESCRIPTION, FAST_OLLAMA_MODEL, VISION_MODEL
+from fritz_utils import (
+    DOC_STORAGE_DESCRIPTION,
+    FAST_OLLAMA_MODEL,
+    MEMORY_EXTRACT_MIN_REPLY_CHARS,
+    MEMORY_EXTRACT_MIN_USER_CHARS,
+    VISION_MODEL,
+)
 from observability import METRICS
 from storage import ChromaStore
 
@@ -96,6 +102,18 @@ _EXTRACTION_PROMPT = (
 def _extract_and_store_memories(user_id: str, user_message: str, assistant_response: str) -> None:
     """Run a fast LLM pass to pull facts from the turn and persist them. Non-blocking caller."""
     if not user_message or not assistant_response:
+        return
+    # Trivial turns ("hi", "lol", "thanks") almost never carry memorable facts.
+    # Gating them out skips a wasted LLM call + N embedding writes per turn.
+    if (
+        len(user_message.strip()) < MEMORY_EXTRACT_MIN_USER_CHARS
+        or len(assistant_response.strip()) < MEMORY_EXTRACT_MIN_REPLY_CHARS
+    ):
+        METRICS.increment("memory_extract_skipped")
+        logger.debug(
+            "Skipping memory extraction for %s (user=%d chars, reply=%d chars)",
+            user_id, len(user_message), len(assistant_response),
+        )
         return
     prompt = _EXTRACTION_PROMPT.format(
         user_msg=user_message[:600],

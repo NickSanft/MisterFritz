@@ -1,3 +1,4 @@
+import functools
 import json
 import os
 import shutil
@@ -15,17 +16,27 @@ __version__ = "0.1.0"
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+@functools.lru_cache(maxsize=1)
+def _load_config_json() -> dict:
+    """Parse config.json once and cache the result.
+
+    Legacy fallback path — modern config comes from env vars. The cache is
+    safe because the bot doesn't reload config.json mid-run; values are
+    consumed at import time only.
+    """
+    try:
+        with open("config.json", "r") as file:
+            data = json.load(file)
+            return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except (json.JSONDecodeError, Exception):
+        return {}
+
+
 def _get_key_from_json_config_file(key_name: str) -> str | None:
     """Read a key from config.json (legacy fallback — prefer env vars)."""
-    file_path = "config.json"
-    try:
-        with open(file_path, 'r') as file:
-            data = json.load(file)
-            return data.get(key_name)
-    except FileNotFoundError:
-        return None
-    except (json.JSONDecodeError, Exception):
-        return None
+    return _load_config_json().get(key_name)
 
 
 # Keep the public name so existing callers (e.g. main_discord.py) don't break
@@ -94,6 +105,12 @@ SCHEDULE_MIN_DELAY_MIN: int = int(os.environ.get("SCHEDULE_MIN_DELAY_MIN", "1"))
 
 # Max recurring schedules any single user may have at once. Abuse cap.
 MAX_SCHEDULES_PER_USER: int = int(os.environ.get("MAX_SCHEDULES_PER_USER", "10"))
+
+# Memory-extraction skip thresholds. Conversation turns shorter than these
+# (e.g. "hi", "lol") trigger a wasted LLM call + N embedding writes for
+# zero useful signal. Lower these if you're losing valid short facts.
+MEMORY_EXTRACT_MIN_USER_CHARS: int = int(os.environ.get("MEMORY_EXTRACT_MIN_USER_CHARS", "20"))
+MEMORY_EXTRACT_MIN_REPLY_CHARS: int = int(os.environ.get("MEMORY_EXTRACT_MIN_REPLY_CHARS", "40"))
 
 # Admin panel: shared password gate + local-only port. If ADMIN_PANEL_PASSWORD
 # is unset the panel won't start at all.

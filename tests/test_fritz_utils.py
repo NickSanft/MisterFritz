@@ -7,6 +7,13 @@ import fritz_utils as fu
 
 
 class TestGetKeyFromJsonConfig(unittest.TestCase):
+    def setUp(self):
+        # The cache is shared across all callers, so each test must start fresh.
+        fu._load_config_json.cache_clear()
+
+    def tearDown(self):
+        fu._load_config_json.cache_clear()
+
     def test_returns_value_for_existing_key(self):
         data = json.dumps({"my_key": "my_value"})
         with patch("builtins.open", mock_open(read_data=data)):
@@ -28,6 +35,35 @@ class TestGetKeyFromJsonConfig(unittest.TestCase):
         with patch("builtins.open", mock_open(read_data="not valid json {{{")):
             result = fu.get_key_from_json_config_file("key")
         self.assertIsNone(result)
+
+
+class TestConfigJsonCaching(unittest.TestCase):
+    """The parsed dict is memoised — repeat key lookups must not re-open the file."""
+
+    def setUp(self):
+        fu._load_config_json.cache_clear()
+
+    def tearDown(self):
+        fu._load_config_json.cache_clear()
+
+    def test_file_is_opened_at_most_once_per_cache_lifetime(self):
+        data = json.dumps({"a": "1", "b": "2", "c": "3"})
+        m = mock_open(read_data=data)
+        with patch("builtins.open", m):
+            self.assertEqual(fu.get_key_from_json_config_file("a"), "1")
+            self.assertEqual(fu.get_key_from_json_config_file("b"), "2")
+            self.assertEqual(fu.get_key_from_json_config_file("c"), "3")
+        # 3 key lookups but only 1 file open.
+        self.assertEqual(m.call_count, 1)
+
+    def test_cache_clear_resumes_file_reads(self):
+        data = json.dumps({"k": "v"})
+        m = mock_open(read_data=data)
+        with patch("builtins.open", m):
+            fu.get_key_from_json_config_file("k")
+            fu._load_config_json.cache_clear()
+            fu.get_key_from_json_config_file("k")
+        self.assertEqual(m.call_count, 2)
 
 
 class TestValidateConfig(unittest.TestCase):

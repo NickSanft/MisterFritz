@@ -176,5 +176,42 @@ class TestRollDiceTool(unittest.TestCase):
             self._invoke(2, 0)
 
 
+class TestMemoryExtractionSkipGuard(unittest.TestCase):
+    """Phase 10: trivial turns ("hi", "lol") shouldn't trigger an LLM call."""
+
+    def test_short_user_message_skips_extraction(self):
+        with patch("agent_tools._ollama_client") as mock_client:
+            agent_tools._extract_and_store_memories(
+                user_id="alice",
+                user_message="hi",
+                assistant_response="Hello there, how can I help you today?",
+            )
+        mock_client.chat.assert_not_called()
+
+    def test_short_reply_skips_extraction(self):
+        with patch("agent_tools._ollama_client") as mock_client:
+            agent_tools._extract_and_store_memories(
+                user_id="alice",
+                user_message="What is the meaning of life, the universe, and everything?",
+                assistant_response="42.",
+            )
+        mock_client.chat.assert_not_called()
+
+    def test_substantial_turn_still_calls_llm(self):
+        with patch("agent_tools._ollama_client") as mock_client:
+            mock_resp = MagicMock()
+            mock_resp.message.content = "[]"
+            mock_client.chat.return_value = mock_resp
+            agent_tools._extract_and_store_memories(
+                user_id="alice",
+                user_message="I work as a backend engineer at a fintech startup in Berlin.",
+                assistant_response=(
+                    "Excellent. I shall make a note of your profession and location. "
+                    "Berlin is a fine city for the trade."
+                ),
+            )
+        mock_client.chat.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
