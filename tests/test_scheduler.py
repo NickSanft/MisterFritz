@@ -74,35 +74,38 @@ class TestScheduleManagerDB(unittest.TestCase):
         self.manager.add_schedule("user1", 111, 999, "ping", "1h")
         self.manager.scheduler.add_job.assert_called_once()
 
+    def _manager_with_cap(self, cap: int):
+        """Reload scheduler with both SCHEDULE_DB (so we stay on the temp DB)
+        and MAX_SCHEDULES_PER_USER patched. Returns a fresh manager with the
+        APScheduler stubbed out.
+        """
+        import fritz_utils
+        import importlib
+        with patch.object(fritz_utils, "SCHEDULE_DB", self.db_path), \
+             patch.object(fritz_utils, "MAX_SCHEDULES_PER_USER", cap):
+            importlib.reload(self.sched_mod)
+            mgr = self.sched_mod.ScheduleManager(MagicMock())
+            mgr.scheduler = MagicMock()
+        return mgr
+
     def test_add_schedule_enforces_per_user_cap(self):
         # Phase 7c: MAX_SCHEDULES_PER_USER caps abuse. Patch low to keep the test
         # fast; the production default is 10.
-        import fritz_utils
-        with patch.object(fritz_utils, "MAX_SCHEDULES_PER_USER", 2):
-            # Re-import to pick up the patched constant at module scope.
-            import importlib
-            importlib.reload(self.sched_mod)
-            mgr = self.sched_mod.ScheduleManager(MagicMock())
-            mgr.scheduler = MagicMock()
-            mgr.add_schedule("user1", 111, 999, "p1", "1h")
-            mgr.add_schedule("user1", 111, 999, "p2", "1h")
-            with self.assertRaises(ValueError) as ctx:
-                mgr.add_schedule("user1", 111, 999, "p3", "1h")
-            self.assertIn("max", str(ctx.exception).lower())
+        mgr = self._manager_with_cap(2)
+        mgr.add_schedule("user1", 111, 999, "p1", "1h")
+        mgr.add_schedule("user1", 111, 999, "p2", "1h")
+        with self.assertRaises(ValueError) as ctx:
+            mgr.add_schedule("user1", 111, 999, "p3", "1h")
+        self.assertIn("max", str(ctx.exception).lower())
 
     def test_per_user_cap_is_per_user_not_global(self):
         # user1 hitting their cap doesn't stop user2 from adding their own.
-        import fritz_utils
-        with patch.object(fritz_utils, "MAX_SCHEDULES_PER_USER", 1):
-            import importlib
-            importlib.reload(self.sched_mod)
-            mgr = self.sched_mod.ScheduleManager(MagicMock())
-            mgr.scheduler = MagicMock()
-            mgr.add_schedule("user1", 111, 999, "p1", "1h")
-            with self.assertRaises(ValueError):
-                mgr.add_schedule("user1", 111, 999, "p2", "1h")
-            # user2 still gets their first slot.
-            mgr.add_schedule("user2", 222, 999, "p3", "1h")
+        mgr = self._manager_with_cap(1)
+        mgr.add_schedule("user1", 111, 999, "p1", "1h")
+        with self.assertRaises(ValueError):
+            mgr.add_schedule("user1", 111, 999, "p2", "1h")
+        # user2 still gets their first slot.
+        mgr.add_schedule("user2", 222, 999, "p3", "1h")
 
     # ── list_all_schedules ──────────────────────────────────────────────────
 
