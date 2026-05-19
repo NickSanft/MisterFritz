@@ -263,11 +263,56 @@ def _update_manifest(action: str, file_path: str) -> None:
             _write_index_manifest(manifest)
 
 
+def _process_one_ingestion(vectorstore, action: str, file_path: str, text_splitter) -> None:
+    """Apply a single (action, file_path) to the vectorstore.
+
+    Extracted from ingestion_worker so the coalescing logic above stays
+    readable and testable.
+    """
+    logger.info("--- SYNC WORKER: Processing %s for %s ---", action, os.path.basename(file_path))
+
+    if action == "delete":
+        try:
+            vectorstore.delete(where={"source": file_path})
+            _update_manifest("delete", file_path)
+            logger.info("   - Removed chunks for %s", os.path.basename(file_path))
+        except Exception as e:
+            METRICS.record_error("document_engine.delete", e)
+            logger.warning("   - Error deleting %s: %s", file_path, e)
+        return
+
+    if action in ("add", "update"):
+        # For update, delete first so we don't accumulate duplicate chunks.
+        # A miss is expected on first ingest of a file, so debug-level only.
+        if action == "update":
+            try:
+                vectorstore.delete(where={"source": file_path})
+            except Exception as e:
+                logger.debug("   - Pre-update delete miss for %s: %s", file_path, e)
+        try:
+            docs = load_document_by_extension(file_path)
+            if docs:
+                splits = text_splitter.split_documents(docs)
+                splits = filter_complex_metadata(splits)
+                if splits:
+                    vectorstore.add_documents(splits)
+                    _update_manifest("add", file_path)
+                    logger.info("   - Added %d chunks for %s", len(splits), os.path.basename(file_path))
+        except Exception as e:
+            METRICS.record_error("document_engine.ingest", e)
+            logger.warning("   - Error ingesting %s: %s", file_path, e)
+
+
 def ingestion_worker():
     """
     Background daemon that consumes the queue.
     Handles 'add', 'update', and 'delete' operations on the global VectorStore.
     Exits cleanly when it receives _SHUTDOWN_SENTINEL.
+
+    Phase 14: after pulling the first event, the worker waits ~1s for the
+    burst to settle, then drains every queued event and coalesces by
+    file_path (last-write-wins). A LibreOffice save that emits 4 'modified'
+    events for one file now produces a single ingest instead of four.
     """
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
@@ -277,59 +322,52 @@ def ingestion_worker():
 
     while True:
         try:
-            # Block until an item is available
-            item = INGESTION_QUEUE.get()
-            if item == _SHUTDOWN_SENTINEL:
-                INGESTION_QUEUE.task_done()
-                logger.info("Ingestion worker received shutdown signal; exiting")
-                return
-            action, file_path = item
+            # Block until at least one event arrives.
+            first_item = INGESTION_QUEUE.get()
 
-            # Wait briefly to let file writes settle (debounce)
+            # Brief debounce — let burst events arrive.
             time.sleep(1.0)
+
+            # Drain everything currently in the queue. Non-blocking — we just
+            # take whatever's already there at this moment.
+            items = [first_item]
+            while True:
+                try:
+                    items.append(INGESTION_QUEUE.get_nowait())
+                except queue.Empty:
+                    break
+
+            shutdown = any(i == _SHUTDOWN_SENTINEL for i in items)
+            real_items = [i for i in items if i != _SHUTDOWN_SENTINEL]
+
+            # Coalesce by file_path. Last action wins per path. The previous
+            # implementation processed every event in arrival order; this is
+            # equivalent for the common "save the same file 4 times" case and
+            # dramatically faster.
+            pending: dict[str, str] = {}
+            for action, file_path in real_items:
+                pending[file_path] = action
+
+            coalesced = len(real_items) - len(pending)
+            if coalesced > 0:
+                METRICS.increment("tool.ingest_coalesced", value=coalesced)
+                logger.debug("Coalesced %d duplicate ingest event(s) across %d path(s)",
+                             coalesced, len(pending))
 
             with VECTORSTORE_LOCK:
                 vectorstore = GLOBAL_VECTORSTORE
 
-            if vectorstore is None:
+            if vectorstore is not None:
+                for file_path, action in pending.items():
+                    _process_one_ingestion(vectorstore, action, file_path, text_splitter)
+
+            # Mark every consumed item done so queue.join() works.
+            for _ in items:
                 INGESTION_QUEUE.task_done()
-                continue
 
-            logger.info("--- SYNC WORKER: Processing %s for %s ---", action, os.path.basename(file_path))
-
-            if action == "delete":
-                try:
-                    vectorstore.delete(where={"source": file_path})
-                    _update_manifest("delete", file_path)
-                    logger.info("   - Removed chunks for %s", os.path.basename(file_path))
-                except Exception as e:
-                    METRICS.record_error("document_engine.delete", e)
-                    logger.warning("   - Error deleting %s: %s", file_path, e)
-
-            elif action in ["add", "update"]:
-                # For update, we delete first to avoid duplicates. A miss here
-                # is expected on first ingest of a file, hence debug-level only.
-                if action == "update":
-                    try:
-                        vectorstore.delete(where={"source": file_path})
-                    except Exception as e:
-                        logger.debug("   - Pre-update delete miss for %s: %s", file_path, e)
-
-                # Load and Ingest
-                try:
-                    docs = load_document_by_extension(file_path)
-                    if docs:
-                        splits = text_splitter.split_documents(docs)
-                        splits = filter_complex_metadata(splits)
-                        if splits:
-                            vectorstore.add_documents(splits)
-                            _update_manifest("add", file_path)
-                            logger.info("   - Added %d chunks for %s", len(splits), os.path.basename(file_path))
-                except Exception as e:
-                    METRICS.record_error("document_engine.ingest", e)
-                    logger.warning("   - Error ingesting %s: %s", file_path, e)
-
-            INGESTION_QUEUE.task_done()
+            if shutdown:
+                logger.info("Ingestion worker received shutdown signal; exiting")
+                return
 
         except Exception as e:
             METRICS.record_error("document_engine.worker", e)

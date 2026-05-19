@@ -22,6 +22,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - **Phase 13 — storage hygiene.**
   - New `storage.get_default_chroma_store()` singleton accessor. Previously `privacy.forget_memories` / `export_memories` constructed a fresh `ChromaStore()` per call, each one reloading `OllamaEmbeddings` and re-opening the persist directory. Both privacy helpers and `agent_tools._get_chroma_store` now go through the singleton so the cost is paid once per process.
   - New internal APScheduler job `_internal_wal_checkpoint` runs `PRAGMA wal_checkpoint(TRUNCATE)` against `SCHEDULE_DB` daily at 03:00 UTC. Keeps the SQLite WAL file from growing unbounded under heavy schedule / workspace / store write load. The internal job lives only in APScheduler — it doesn't show up in `/schedule list_all` or the admin panel's schedule list.
+- **Phase 14 — smarter watchdog debounce.**
+  - The document ingestion worker no longer processes events one-at-a-time with a hardcoded 1 s sleep between them. After the first event arrives, it waits 1 s for the burst to settle, drains every queued event with `queue.get_nowait()`, then coalesces by file path (last-write-wins). A LibreOffice save that emits four `modified` events for the same file now produces one ingest instead of four.
+  - The per-event processing was extracted into a new `_process_one_ingestion(vectorstore, action, file_path, text_splitter)` helper so the coalescing loop stays small and the per-event behaviour is unit-testable.
+  - New `tool.ingest_coalesced` counter tracks how many duplicate events were dropped per burst, so the impact is visible in `/health` and the admin overview.
 
 ### Added
 - `/help` slash command listing capabilities and slash commands.
