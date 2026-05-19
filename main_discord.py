@@ -10,9 +10,19 @@ from discord.ext import commands
 from admin_panel import start_admin_panel
 from bot_adapters import split_into_chunks  # noqa: F401 — re-exported for tests
 from bot_commands import FritzCommands
-from fritz_utils import DISCORD_BOT_TOKEN, MessageSource, validate_config
+from fritz_utils import (
+    DISCORD_BOT_TOKEN,
+    EMBEDDING_MODEL,
+    FAST_OLLAMA_MODEL,
+    MessageSource,
+    OLLAMA_KEEP_ALIVE,
+    THINKING_OLLAMA_MODEL,
+    VISION_MODEL,
+    validate_config,
+)
 from mister_fritz import ask_stuff
 from observability import METRICS, init_logging, start_metrics_server
+from prewarm import prewarm_models
 from scheduler import ScheduleManager
 from stt import transcribe as _whisper_transcribe
 from tts import TTSEngine
@@ -105,6 +115,12 @@ async def on_ready():
     schedule_manager.start()
     # Start the read-only admin panel (no-op if ADMIN_PANEL_PASSWORD is unset).
     start_admin_panel(schedule_manager=schedule_manager)
+    # Pre-warm Ollama in a daemon thread so the first DM doesn't pay model-load lag.
+    prewarm_models(
+        chat_models=(THINKING_OLLAMA_MODEL, FAST_OLLAMA_MODEL, VISION_MODEL),
+        embedding_models=(EMBEDDING_MODEL,),
+        keep_alive=OLLAMA_KEEP_ALIVE,
+    )
     await client.add_cog(FritzCommands(client, sayer, schedule_manager))
     logger.info("Logged in as %s", client.user)
     try:

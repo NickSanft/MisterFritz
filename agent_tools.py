@@ -24,6 +24,7 @@ from fritz_utils import (
     FAST_OLLAMA_MODEL,
     MEMORY_EXTRACT_MIN_REPLY_CHARS,
     MEMORY_EXTRACT_MIN_USER_CHARS,
+    OLLAMA_KEEP_ALIVE,
     VISION_MODEL,
 )
 from observability import METRICS, time_tool
@@ -126,6 +127,7 @@ def _extract_and_store_memories(user_id: str, user_message: str, assistant_respo
         response = _ollama_client.chat(
             model=FAST_OLLAMA_MODEL,
             messages=[{"role": "user", "content": prompt}],
+            keep_alive=OLLAMA_KEEP_ALIVE,
         )
         content = response.message.content.strip()
         match = re.search(r'\[.*?\]', content, re.DOTALL)
@@ -394,7 +396,8 @@ def analyze_image(config: RunnableConfig, question: str = "What is in this image
                     'role': 'user',
                     'content': question,
                     'images': encoded_images,
-                }]
+                }],
+                keep_alive=OLLAMA_KEEP_ALIVE,
             )
             analysis = response['message']['content']
             logger.info("Vision analysis complete: %d chars", len(analysis))

@@ -40,7 +40,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import END, StateGraph, START
 
 from fritz_utils import CHROMA_DB_PATH, INDEXED_FILES_PATH, CHROMA_COLLECTION_NAME, DOC_FOLDER, FAST_OLLAMA_MODEL, \
-    OLLAMA_TIMEOUT, THINKING_OLLAMA_MODEL, EMBEDDING_MODEL
+    OLLAMA_KEEP_ALIVE, OLLAMA_TIMEOUT, THINKING_OLLAMA_MODEL, EMBEDDING_MODEL
 from observability import init_logging, METRICS
 
 # Define supported file extensions
@@ -505,8 +505,16 @@ def get_retriever(k=2):
 # --- PART 2: MODELS & PROMPTS ---
 
 # Initialize LLMs
-thinking_llm = ChatOllama(model=THINKING_OLLAMA_MODEL, temperature=0, client_kwargs={"timeout": OLLAMA_TIMEOUT})
-fast_llm = ChatOllama(model=FAST_OLLAMA_MODEL, temperature=0, client_kwargs={"timeout": OLLAMA_TIMEOUT})
+thinking_llm = ChatOllama(
+    model=THINKING_OLLAMA_MODEL, temperature=0,
+    keep_alive=OLLAMA_KEEP_ALIVE,
+    client_kwargs={"timeout": OLLAMA_TIMEOUT},
+)
+fast_llm = ChatOllama(
+    model=FAST_OLLAMA_MODEL, temperature=0,
+    keep_alive=OLLAMA_KEEP_ALIVE,
+    client_kwargs={"timeout": OLLAMA_TIMEOUT},
+)
 
 
 # Grader

@@ -353,7 +353,7 @@ Make sure Ollama is running: `ollama serve`. Check models with `ollama list`. Co
 Symptoms: Ollama logs show `model requires more memory than available` or your machine swaps to disk. Use a smaller model — switch `THINKING_OLLAMA_MODEL` to `llama3.2` (or a 7B variant), or close other GPU consumers. With multiple models in play, Ollama keeps the most-recently-used one resident; set `OLLAMA_KEEP_ALIVE=0` to evict immediately after each request and trade latency for memory headroom.
 
 **Very slow first response, fast subsequent responses**
-This is normal — Ollama loads the model on the first request. If the wait is too long, the bot has a configurable hard timeout: set `OLLAMA_TIMEOUT=300` (seconds) in `.env` for very large models on CPU.
+The bot now pre-warms every configured model in a background thread at startup, so the first DM shouldn't pay the cold-load tax anymore. If you still see latency on the first response, Ollama is unloading models between requests — increase `OLLAMA_KEEP_ALIVE` in `.env` (default `5m`, set to `-1` to pin models forever at the cost of permanent VRAM use). For very large models on CPU, also raise `OLLAMA_TIMEOUT=300`.
 
 **Hung requests / bot stops responding**
 Phase 1 added an Ollama request timeout (default 120s). If it trips, you'll see the agent return an error instead of hanging. Lower it (`OLLAMA_TIMEOUT=30`) to fail faster while you debug, or raise it for slow CPU inference. Check `:8000/health` for the bot's error rate and p99 latency snapshot.

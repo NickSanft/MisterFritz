@@ -15,6 +15,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   - New `Metrics.time_block(name)` context manager: increments a counter, records latency, and tracks errors as a single atomic operation around a block.
   - New `time_tool(name)` helper that auto-prefixes with `tool.` for the canonical tool-call metric namespace.
   - All `agent_tools` tools and `file_tools` tools now record latency, not just call count. The admin overview page surfaces the per-tool average automatically, so it's now possible to see which tool is dragging response times.
+- **Phase 12 — Ollama latency.**
+  - New `prewarm.py` fires a 1-token request to every configured Ollama model (thinking, fast, vision, embedding) in a background daemon thread on `on_ready`. Eliminates the cold-load wait on the first user DM after a restart.
+  - New `OLLAMA_KEEP_ALIVE` env var (default `"5m"`, matching Ollama's own default) controls how long Ollama keeps a model resident. Set to `"-1"` to pin forever for fastest response at the cost of permanent VRAM use.
+  - The keep-alive value is wired into both `ChatOllama` instances (in `mister_fritz` and `document_engine`) and the raw `ollama.chat()` calls (in `agent_tools._extract_and_store_memories` and `analyze_image`).
 
 ### Added
 - `/help` slash command listing capabilities and slash commands.

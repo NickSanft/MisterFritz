@@ -83,6 +83,12 @@ VISION_MODEL = os.environ.get("VISION_MODEL", "llava")
 # Hard cap on a single Ollama request. Prevents a hung model from wedging the bot.
 OLLAMA_TIMEOUT: float = float(os.environ.get("OLLAMA_TIMEOUT", "120"))
 
+# How long Ollama keeps a model resident in memory after the last request.
+# Conservative default matches Ollama's own ("5m"). Set to "-1" to pin models
+# forever — fastest, but VRAM stays consumed. Accepted formats are anything
+# Ollama parses (e.g. "30s", "5m", "1h", "-1").
+OLLAMA_KEEP_ALIVE: str = os.environ.get("OLLAMA_KEEP_ALIVE", "5m")
+
 # ---------------------------------------------------------------------------
 # Tunables (formerly magic numbers in module bodies)
 # ---------------------------------------------------------------------------

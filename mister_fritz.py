@@ -30,6 +30,7 @@ from fritz_utils import (
     CHAT_DB_NAME,
     FAST_OLLAMA_MODEL,
     MessageSource,
+    OLLAMA_KEEP_ALIVE,
     OLLAMA_TIMEOUT,
     SUMMARIZE_THRESHOLD,
     THINKING_OLLAMA_MODEL,
@@ -603,8 +604,16 @@ CACHED_SYSTEM_PROMPT = get_system_description(_conversation_tools_desc)
 store = SQLiteStore(CHAT_DB_NAME)
 exit_stack = ExitStack()
 checkpointer = exit_stack.enter_context(SqliteSaver.from_conn_string(CHAT_DB_NAME))
-ollama_instance = ChatOllama(model=THINKING_OLLAMA_MODEL, client_kwargs={"timeout": OLLAMA_TIMEOUT})
-fast_ollama_instance = ChatOllama(model=FAST_OLLAMA_MODEL, client_kwargs={"timeout": OLLAMA_TIMEOUT})
+ollama_instance = ChatOllama(
+    model=THINKING_OLLAMA_MODEL,
+    keep_alive=OLLAMA_KEEP_ALIVE,
+    client_kwargs={"timeout": OLLAMA_TIMEOUT},
+)
+fast_ollama_instance = ChatOllama(
+    model=FAST_OLLAMA_MODEL,
+    keep_alive=OLLAMA_KEEP_ALIVE,
+    client_kwargs={"timeout": OLLAMA_TIMEOUT},
+)
 
 _conversation_react_agent = None
 
