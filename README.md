@@ -196,7 +196,7 @@ All settings can be set as environment variables or in a `.env` file. See `.env.
 | `ROOT_USER` | — | **Required.** Discord username with admin privileges (`/workspace set`, `/schedule add/remove`) |
 | `ADMIN_USERS` | — | Comma-separated additional admin usernames. Anyone listed gets the same powers as `ROOT_USER`. |
 | `WORKSPACES_ROOT` | `./workspaces` | Parent directory for per-user sandboxed workspaces created via `/workspace enable`. |
-| `AUDIT_LOG_PATH` | `audit.log` | Path to the append-only NDJSON audit log written on every `/forget` and `/export` event. |
+| `AUDIT_LOG_PATH` | `audit.log` | Path to the append-only NDJSON audit log. Captures `/forget`, `/export`, admin-panel mutations, and every file-tool write / edit / shell-exec. |
 | `ADMIN_PANEL_PASSWORD` | — | Set to enable the read-only web admin panel. Leave unset to disable. |
 | `ADMIN_PANEL_PORT` | `8001` | Port for the admin panel. Bound to `127.0.0.1` only — use SSH port forwarding for remote access. |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama API endpoint |

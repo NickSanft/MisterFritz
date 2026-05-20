@@ -316,5 +316,103 @@ class TestExecuteCommand(unittest.TestCase):
         self.assertIn("&&", result)
 
 
+class TestFileToolAuditLog(unittest.TestCase):
+    """Item #8: write_file, edit_file, and execute_command write to the audit
+    log so admins can reconstruct who-did-what after the fact."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def _invoke_capturing_audit(self, fn, payload):
+        with patch.object(file_tools, "audit_log") as audit:
+            fn.invoke(payload, config=_config(self.tmp))
+        return audit
+
+    def test_write_file_success_emits_audit_entry(self):
+        audit = self._invoke_capturing_audit(
+            write_file,
+            {"path": "new.txt", "content": "hello world"},
+        )
+        audit.assert_called_once()
+        args, kwargs = audit.call_args
+        self.assertEqual(args[0], "file_write")
+        self.assertEqual(kwargs["user_id"], _ROOT)
+        self.assertEqual(kwargs["path"], "new.txt")
+        self.assertEqual(kwargs["bytes"], len("hello world"))
+        self.assertEqual(kwargs["result"], "ok")
+        self.assertFalse(kwargs["existed"])  # fresh file
+
+    def test_write_file_records_existed_flag_on_overwrite(self):
+        target = os.path.join(self.tmp, "exists.txt")
+        with open(target, "w") as f:
+            f.write("old")
+        audit = self._invoke_capturing_audit(
+            write_file,
+            {"path": "exists.txt", "content": "new"},
+        )
+        kwargs = audit.call_args.kwargs
+        self.assertTrue(kwargs["existed"])
+
+    def test_edit_file_success_emits_audit_entry(self):
+        target = os.path.join(self.tmp, "src.txt")
+        with open(target, "w") as f:
+            f.write("alpha beta gamma")
+        audit = self._invoke_capturing_audit(
+            edit_file,
+            {"path": "src.txt", "old_text": "beta", "new_text": "BETA"},
+        )
+        audit.assert_called_once()
+        args, kwargs = audit.call_args
+        self.assertEqual(args[0], "file_edit")
+        self.assertEqual(kwargs["path"], "src.txt")
+        self.assertEqual(kwargs["old_len"], 4)
+        self.assertEqual(kwargs["new_len"], 4)
+        self.assertEqual(kwargs["replaced"], 1)
+        self.assertEqual(kwargs["result"], "ok")
+
+    def test_execute_command_success_records_argv_and_exit_code(self):
+        audit = self._invoke_capturing_audit(
+            execute_command,
+            {"command": "echo hello", "timeout": 5},
+        )
+        audit.assert_called_once()
+        args, kwargs = audit.call_args
+        self.assertEqual(args[0], "exec")
+        self.assertEqual(kwargs["argv"], ["echo", "hello"])
+        self.assertEqual(kwargs["exit_code"], 0)
+        self.assertEqual(kwargs["result"], "ok")
+
+    def test_execute_command_rejection_is_audited(self):
+        audit = self._invoke_capturing_audit(
+            execute_command,
+            {"command": "rm -rf /tmp", "timeout": 5},  # rm not in allowlist
+        )
+        audit.assert_called_once()
+        args, kwargs = audit.call_args
+        self.assertEqual(args[0], "exec")
+        self.assertEqual(kwargs["result"], "rejected")
+        self.assertIn("allowlist", kwargs["reason"].lower())
+
+    def test_execute_command_parse_error_is_audited(self):
+        # An unbalanced quote makes shlex.split raise ValueError.
+        audit = self._invoke_capturing_audit(
+            execute_command,
+            {"command": 'echo "unclosed', "timeout": 5},
+        )
+        audit.assert_called_once()
+        kwargs = audit.call_args.kwargs
+        self.assertEqual(kwargs["result"], "parse_error")
+
+    def test_read_file_does_not_emit_audit_entry(self):
+        # Reads are intentionally not audited (would be too noisy).
+        target = os.path.join(self.tmp, "rfile.txt")
+        with open(target, "w") as f:
+            f.write("content")
+        with patch.object(file_tools, "audit_log") as audit:
+            from file_tools import read_file as read_file_tool
+            read_file_tool.invoke({"path": "rfile.txt"}, config=_config(self.tmp))
+        audit.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -16,7 +16,7 @@ from fritz_utils import (
     MAX_FILE_SIZE_BYTES,
     MAX_READ_LINES,
 )
-from observability import METRICS, time_tool
+from observability import METRICS, audit_log, time_tool
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,17 @@ def _timed(name: str):
                 return fn(*args, **kwargs)
         return wrapper
     return deco
+
+
+def _audit_identity(config: RunnableConfig) -> tuple[str, str]:
+    """Pull user_id + workspace_root out of the agent config for audit logging.
+    Defaults are safe placeholders so a malformed config doesn't crash the audit
+    write — the helper is best-effort and never raises."""
+    metadata = (config or {}).get("metadata", {}) or {}
+    return (
+        str(metadata.get("user_id") or "(unknown)"),
+        str(metadata.get("workspace_root") or "(no-workspace)"),
+    )
 # File extensions to include in search by default
 TEXT_EXTENSIONS = {
     '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.c', '.cpp', '.h', '.hpp',
@@ -228,15 +239,25 @@ def write_file(config: RunnableConfig, path: str, content: str) -> str:
         os.makedirs(parent, exist_ok=True)
 
     existed = os.path.isfile(target)
+    user_id, workspace_root = _audit_identity(config)
+    bytes_written = len(content.encode('utf-8'))
     try:
         with open(target, 'w', encoding='utf-8') as f:
             f.write(content)
     except PermissionError:
+        audit_log(
+            "file_write", user_id=user_id, workspace=workspace_root,
+            path=path, bytes=bytes_written, existed=existed, result="permission_denied",
+        )
         return f"Error: Permission denied writing to '{path}'."
 
+    audit_log(
+        "file_write", user_id=user_id, workspace=workspace_root,
+        path=path, bytes=bytes_written, existed=existed, result="ok",
+    )
     line_count = content.count('\n') + (1 if content and not content.endswith('\n') else 0)
     action = "Updated" if existed else "Created"
-    return f"{action} '{path}' ({line_count} lines, {_format_size(len(content.encode('utf-8')))})"
+    return f"{action} '{path}' ({line_count} lines, {_format_size(bytes_written)})"
 
 
 @tool(parse_docstring=True)
@@ -256,6 +277,7 @@ def edit_file(config: RunnableConfig, path: str, old_text: str, new_text: str) -
     """
     workspace = _get_workspace(config)
     target = _resolve_safe_path(workspace, path)
+    user_id, workspace_root = _audit_identity(config)
 
     if not os.path.isfile(target):
         return f"Error: '{path}' does not exist."
@@ -276,8 +298,17 @@ def edit_file(config: RunnableConfig, path: str, old_text: str, new_text: str) -
         with open(target, 'w', encoding='utf-8') as f:
             f.write(new_content)
     except PermissionError:
+        audit_log(
+            "file_edit", user_id=user_id, workspace=workspace_root,
+            path=path, old_len=len(old_text), new_len=len(new_text), result="permission_denied",
+        )
         return f"Error: Permission denied writing to '{path}'."
 
+    audit_log(
+        "file_edit", user_id=user_id, workspace=workspace_root,
+        path=path, old_len=len(old_text), new_len=len(new_text),
+        replaced=1, remaining_occurrences=max(0, occurrences - 1), result="ok",
+    )
     info = f"Edited '{path}': replaced 1 occurrence"
     if occurrences > 1:
         info += f" ({occurrences - 1} additional occurrence(s) remain)"
@@ -420,6 +451,7 @@ def execute_command(config: RunnableConfig, command: str, timeout: int = 30) -> 
         The combined stdout and stderr output from the command.
     """
     workspace = _get_workspace(config)
+    user_id, workspace_root = _audit_identity(config)
 
     timeout = min(timeout, MAX_EXEC_TIMEOUT)
 
@@ -427,11 +459,19 @@ def execute_command(config: RunnableConfig, command: str, timeout: int = 30) -> 
         # posix=True works on Windows too for our purposes; we don't want cmd.exe semantics.
         argv = shlex.split(command, posix=True)
     except ValueError as e:
+        audit_log(
+            "exec", user_id=user_id, workspace=workspace_root,
+            command=command, result="parse_error",
+        )
         return f"Error: Could not parse command: {e}"
 
     rejection = _validate_command_argv(argv, workspace)
     if rejection is not None:
         logger.warning("Rejected command in %s: %s (%s)", workspace, command, rejection)
+        audit_log(
+            "exec", user_id=user_id, workspace=workspace_root,
+            argv=argv, result="rejected", reason=rejection,
+        )
         return rejection
 
     logger.info("Executing command in %s: %s", workspace, argv)
@@ -458,14 +498,30 @@ def execute_command(config: RunnableConfig, command: str, timeout: int = 30) -> 
         if len(output) > EXEC_OUTPUT_TRUNCATE:
             output = output[:EXEC_OUTPUT_TRUNCATE] + "\n... (output truncated)"
 
+        audit_log(
+            "exec", user_id=user_id, workspace=workspace_root,
+            argv=argv, exit_code=result.returncode, result="ok",
+        )
         return output
 
     except FileNotFoundError:
+        audit_log(
+            "exec", user_id=user_id, workspace=workspace_root,
+            argv=argv, result="not_found",
+        )
         return f"Error: Program '{argv[0]}' not found in PATH."
     except subprocess.TimeoutExpired:
+        audit_log(
+            "exec", user_id=user_id, workspace=workspace_root,
+            argv=argv, timeout=timeout, result="timeout",
+        )
         return f"Error: Command timed out after {timeout} seconds."
     except Exception as e:
         METRICS.record_error("execute_command", e)
+        audit_log(
+            "exec", user_id=user_id, workspace=workspace_root,
+            argv=argv, result="error", error=str(e),
+        )
         return f"Error executing command: {e}"
 
 
