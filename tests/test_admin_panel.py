@@ -458,5 +458,118 @@ class TestChatSend(unittest.TestCase):
         fake_module.ask_stuff.assert_not_called()
 
 
+# ── /chat/stream (Phase web-chat-2: SSE streaming) ──────────────────────────
+
+def _parse_sse(text: str):
+    """Parse a raw SSE response body into a list of (event, data) tuples."""
+    events = []
+    for block in text.strip().split("\n\n"):
+        if not block.strip():
+            continue
+        event_name = None
+        data_lines = []
+        for line in block.splitlines():
+            if line.startswith("event:"):
+                event_name = line[len("event:"):].strip()
+            elif line.startswith("data:"):
+                # SSE protocol: strip exactly one leading space if present.
+                d = line[len("data:"):]
+                if d.startswith(" "):
+                    d = d[1:]
+                data_lines.append(d)
+        if event_name or data_lines:
+            events.append((event_name, "\n".join(data_lines)))
+    return events
+
+
+class TestChatStreamUnauthed(unittest.TestCase):
+    def test_no_cookie_returns_401(self):
+        client = _build_client()
+        r = client.post("/chat/stream", data={"message": "hi"})
+        self.assertEqual(r.status_code, 401)
+
+
+class TestChatStreamSuccess(unittest.TestCase):
+    def test_streams_token_events_then_done(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+
+        # Fake ask_stuff calls its streaming_callback a few times, then returns.
+        def fake_ask_stuff(message, source, user, *,
+                          streaming_callback=None, schedule_manager=None, **_):
+            assert streaming_callback is not None
+            streaming_callback("Very")
+            streaming_callback("Very well")
+            streaming_callback("Very well, sir.")
+            return {"text": "Very well, sir.", "image_paths": [], "timestamp": "now"}
+
+        fake_module = MagicMock()
+        fake_module.ask_stuff = fake_ask_stuff
+        with patch.dict(sys.modules, {"mister_fritz": fake_module}), \
+             patch.object(admin_panel, "audit_log"):
+            r = client.post("/chat/stream", data={"message": "hello"})
+
+        self.assertEqual(r.status_code, 200)
+        events = _parse_sse(r.text)
+        tokens = [d for ev, d in events if ev == "token"]
+        dones = [d for ev, d in events if ev == "done"]
+        self.assertEqual(tokens, ["Very", "Very well", "Very well, sir."])
+        self.assertEqual(dones, ["Very well, sir."])
+
+    def test_audit_log_records_streamed_message(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+
+        def fake_ask_stuff(message, source, user, *,
+                          streaming_callback=None, **_):
+            streaming_callback("ok")
+            return {"text": "ok", "image_paths": [], "timestamp": "now"}
+
+        fake_module = MagicMock()
+        fake_module.ask_stuff = fake_ask_stuff
+        with patch.dict(sys.modules, {"mister_fritz": fake_module}), \
+             patch.object(admin_panel, "audit_log") as audit:
+            client.post("/chat/stream", data={"message": "ping"})
+
+        calls = [c for c in audit.call_args_list if c.args and c.args[0] == "chat_message"]
+        self.assertEqual(len(calls), 1)
+        kwargs = calls[0].kwargs
+        self.assertEqual(kwargs["user_id"], "alice")
+        self.assertEqual(kwargs["result"], "ok")
+        self.assertTrue(kwargs.get("streamed"))
+
+
+class TestChatStreamError(unittest.TestCase):
+    def test_agent_exception_yields_error_event(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+
+        def fake_ask_stuff(message, source, user, **_):
+            raise RuntimeError("ollama down")
+
+        fake_module = MagicMock()
+        fake_module.ask_stuff = fake_ask_stuff
+        with patch.dict(sys.modules, {"mister_fritz": fake_module}), \
+             patch.object(admin_panel, "audit_log"):
+            r = client.post("/chat/stream", data={"message": "hello"})
+
+        self.assertEqual(r.status_code, 200)
+        events = _parse_sse(r.text)
+        errors = [d for ev, d in events if ev == "error"]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("ollama down", errors[0])
+        # No 'done' event when the agent failed.
+        dones = [d for ev, d in events if ev == "done"]
+        self.assertEqual(dones, [])
+
+
+class TestChatStreamEmptyMessage(unittest.TestCase):
+    def test_empty_message_returns_400(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+        r = client.post("/chat/stream", data={"message": "   "})
+        self.assertEqual(r.status_code, 400)
+
+
 if __name__ == "__main__":
     unittest.main()

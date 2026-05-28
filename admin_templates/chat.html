@@ -16,6 +16,11 @@
         background: #fff; border: 1px solid var(--border); color: var(--fg);
         margin-right: 4rem;
     }
+    .chat-bubble.fritz.streaming::after {
+        content: "▌"; opacity: 0.5; margin-left: 2px;
+        animation: blink 1s steps(2, start) infinite;
+    }
+    @keyframes blink { to { visibility: hidden; } }
     .chat-bubble .role {
         display: block; font-size: 0.7rem; color: var(--muted);
         text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.3rem;
@@ -38,7 +43,12 @@
         text-align: center; color: var(--muted); padding: 3rem 1rem;
         font-style: italic;
     }
+    .chat-error {
+        color: var(--danger); font-style: italic; padding: 0.5rem 0;
+    }
 </style>
+
+<script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
 
 <div class="chat-shell">
     <div class="chat-header">
@@ -49,24 +59,129 @@
     </div>
 
     <div class="card">
-        {% if messages %}
-            {% for m in messages %}
-            <div class="chat-bubble {{ m.role }}">
-                <span class="role">{{ "you" if m.role == "user" else "mister fritz" }}</span>
-                {{ m.content }}
-            </div>
-            {% endfor %}
-        {% else %}
-            <div class="chat-empty">
-                Say hello to Fritz. He'll be delighted, in his own theatrical way.
-            </div>
-        {% endif %}
+        <div id="chat-messages">
+            {% if messages %}
+                {% for m in messages %}
+                <div class="chat-bubble {{ m.role }}">
+                    <span class="role">{{ "you" if m.role == "user" else "mister fritz" }}</span>
+                    {{ m.content }}
+                </div>
+                {% endfor %}
+            {% else %}
+                <div class="chat-empty">
+                    Say hello to Fritz. He'll be delighted, in his own theatrical way.
+                </div>
+            {% endif %}
+        </div>
 
-        <form class="chat-input-row" method="post" action="/chat/send">
+        <form class="chat-input-row" id="chat-form" method="post" action="/chat/send">
             <textarea name="message" placeholder="Type a message..." required
                       autofocus rows="2"></textarea>
             <button type="submit">Send</button>
         </form>
     </div>
 </div>
+
+<script>
+// Hijack the form submit to use SSE streaming. If JavaScript is disabled or
+// fails to load, the form still POSTs to /chat/send (sync fallback).
+(function() {
+    const form = document.getElementById("chat-form");
+    const list = document.getElementById("chat-messages");
+    if (!form || !list) return;
+
+    function newBubble(role, content) {
+        const div = document.createElement("div");
+        div.className = "chat-bubble " + role;
+        const roleSpan = document.createElement("span");
+        roleSpan.className = "role";
+        roleSpan.textContent = role === "user" ? "you" : "mister fritz";
+        div.appendChild(roleSpan);
+        const body = document.createElement("div");
+        body.className = "bubble-body";
+        body.textContent = content;
+        div.appendChild(body);
+        return div;
+    }
+
+    function clearEmptyState() {
+        const empty = list.querySelector(".chat-empty");
+        if (empty) empty.remove();
+    }
+
+    form.addEventListener("submit", function(ev) {
+        ev.preventDefault();
+        const textarea = form.querySelector("textarea[name=message]");
+        const message = textarea.value.trim();
+        if (!message) return;
+
+        clearEmptyState();
+        list.appendChild(newBubble("user", message));
+
+        const fritzBubble = newBubble("fritz", "");
+        fritzBubble.classList.add("streaming");
+        list.appendChild(fritzBubble);
+        const body = fritzBubble.querySelector(".bubble-body");
+
+        textarea.value = "";
+        textarea.disabled = true;
+        form.querySelector("button[type=submit]").disabled = true;
+
+        const fd = new FormData();
+        fd.append("message", message);
+
+        // EventSource doesn't accept a body, so we use fetch + ReadableStream.
+        fetch("/chat/stream", { method: "POST", body: fd, credentials: "same-origin" })
+            .then(async (resp) => {
+                if (!resp.ok) {
+                    body.textContent = "Error: HTTP " + resp.status;
+                    fritzBubble.classList.remove("streaming");
+                    return;
+                }
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let buf = "";
+                let lastEvent = "message";
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    buf += decoder.decode(value, { stream: true });
+                    let idx;
+                    while ((idx = buf.indexOf("\n\n")) !== -1) {
+                        const block = buf.slice(0, idx);
+                        buf = buf.slice(idx + 2);
+                        let eventName = lastEvent;
+                        let dataLines = [];
+                        for (const line of block.split("\n")) {
+                            if (line.startsWith("event:")) eventName = line.slice(6).trim();
+                            else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+                        }
+                        const data = dataLines.join("\n");
+                        if (eventName === "token") {
+                            body.textContent = data;
+                        } else if (eventName === "done") {
+                            body.textContent = data || "(no response)";
+                            fritzBubble.classList.remove("streaming");
+                        } else if (eventName === "error") {
+                            body.textContent = "Error: " + data;
+                            fritzBubble.classList.remove("streaming");
+                        }
+                        lastEvent = eventName;
+                    }
+                }
+                fritzBubble.classList.remove("streaming");
+            })
+            .catch((err) => {
+                body.textContent = "Network error: " + err.message;
+                fritzBubble.classList.remove("streaming");
+            })
+            .finally(() => {
+                textarea.disabled = false;
+                form.querySelector("button[type=submit]").disabled = false;
+                textarea.focus();
+                list.scrollTop = list.scrollHeight;
+            });
+    });
+})();
+</script>
 {% endblock %}

@@ -21,12 +21,13 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import queue
 import uvicorn
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Route
 from starlette.templating import Jinja2Templates
 
@@ -350,6 +351,9 @@ async def chat_logout(request: Request) -> Response:
 
 
 async def chat_send(request: Request) -> Response:
+    """Synchronous fallback endpoint — submits a message and renders the full
+    chat page with the reply. Used by graceful-degradation clients (no JS).
+    HTMX clients go to /chat/stream instead for live streaming."""
     user = _chat_user(request)
     if not user:
         return RedirectResponse(url="/chat", status_code=303)
@@ -399,6 +403,84 @@ async def chat_send(request: Request) -> Response:
     })
 
 
+# Sentinel pushed onto the streaming queue when the agent finishes.
+_CHAT_STREAM_DONE = object()
+
+
+async def chat_stream(request: Request) -> Response:
+    """Server-Sent Events endpoint. Runs ask_stuff in a worker thread; the
+    streaming_callback puts events on a queue.Queue that the SSE generator
+    drains. Emits:
+      - event=token data=<accumulated text so far>   (zero or more)
+      - event=done  data=<final text>                (exactly one)
+      - event=error data=<message>                   (instead of done on failure)
+    """
+    user = _chat_user(request)
+    if not user:
+        return Response(status_code=401, content="Not signed in.")
+
+    form = await request.form()
+    message = (form.get("message") or "").strip()
+    if not message:
+        return Response(status_code=400, content="Empty message.")
+
+    schedule_manager = _schedule_manager_from_request(request)
+    event_queue: queue.Queue = queue.Queue()
+
+    def _streaming_callback(partial_text: str) -> None:
+        # ask_stuff invokes this from a worker thread; queue.Queue is thread-safe.
+        event_queue.put(("token", partial_text))
+
+    def _invoke_agent() -> None:
+        from mister_fritz import ask_stuff
+        try:
+            response_data = ask_stuff(
+                message,
+                MessageSource.LOCAL,
+                user,
+                streaming_callback=_streaming_callback,
+                schedule_manager=schedule_manager,
+            )
+            reply = response_data.get("text") if isinstance(response_data, dict) else str(response_data)
+            audit_log("chat_message", user_id=user, chars=len(message),
+                      result="ok", reply_chars=len(reply or ""), streamed=True)
+            event_queue.put(("done", reply or ""))
+        except Exception as e:
+            logger.exception("Chat stream failed for %s", user)
+            audit_log("chat_message", user_id=user, chars=len(message),
+                      result="error", error=str(e), streamed=True)
+            event_queue.put(("error", str(e)))
+        finally:
+            event_queue.put(_CHAT_STREAM_DONE)
+
+    # Use a plain daemon thread (not run_in_executor) so the worker is
+    # independent of whatever event loop is driving the response. This matters
+    # under TestClient, which uses per-request loops; an executor task on the
+    # request loop can be torn down before the generator runs.
+    threading.Thread(target=_invoke_agent, name="chat-stream-worker", daemon=True).start()
+
+    async def _event_generator():
+        # Hand-format SSE frames so we avoid sse-starlette's internal
+        # asyncio.Event (used for keep-alive), which gets bound to the request
+        # loop and explodes under TestClient's per-request loops.
+        while True:
+            try:
+                item = event_queue.get_nowait()
+            except queue.Empty:
+                await asyncio.sleep(0.05)
+                continue
+            if item is _CHAT_STREAM_DONE:
+                return
+            event, data = item
+            # SSE wire format: an optional `event: <name>` line, one or more
+            # `data: <value>` lines (one per logical line in the payload),
+            # then a blank line as the frame terminator.
+            data_lines = "".join(f"data: {chunk}\n" for chunk in str(data).split("\n"))
+            yield f"event: {event}\n{data_lines}\n".encode("utf-8")
+
+    return StreamingResponse(_event_generator(), media_type="text/event-stream")
+
+
 # ── App factory + server boot ───────────────────────────────────────────────
 
 def create_app(password: str, schedule_manager=None) -> Starlette:
@@ -425,6 +507,7 @@ def create_app(password: str, schedule_manager=None) -> Starlette:
         Route("/chat/login", chat_login, methods=["POST"], name="chat_login"),
         Route("/chat/logout", chat_logout, methods=["POST"], name="chat_logout"),
         Route("/chat/send", chat_send, methods=["POST"], name="chat_send"),
+        Route("/chat/stream", chat_stream, methods=["POST"], name="chat_stream"),
     ]
     app = Starlette(
         routes=routes,
