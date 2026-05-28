@@ -514,7 +514,11 @@ class TestChatStreamSuccess(unittest.TestCase):
         tokens = [d for ev, d in events if ev == "token"]
         dones = [d for ev, d in events if ev == "done"]
         self.assertEqual(tokens, ["Very", "Very well", "Very well, sir."])
-        self.assertEqual(dones, ["Very well, sir."])
+        # The 'done' frame is now a JSON payload (Phase web-chat-3); the
+        # detailed shape is asserted in TestChatStreamDonePayload.
+        self.assertEqual(len(dones), 1)
+        import json as _json
+        self.assertEqual(_json.loads(dones[0])["text"], "Very well, sir.")
 
     def test_audit_log_records_streamed_message(self):
         client = _build_client()
@@ -569,6 +573,162 @@ class TestChatStreamEmptyMessage(unittest.TestCase):
         client.post("/chat/login", data={"username": "alice"})
         r = client.post("/chat/stream", data={"message": "   "})
         self.assertEqual(r.status_code, 400)
+
+
+# ── Phase web-chat-3 polish: markdown, progress, forget, history, assets ───
+
+class TestRenderMarkdown(unittest.TestCase):
+    def test_bold_renders_to_strong(self):
+        html = admin_panel._render_markdown("This is **bold** text.")
+        self.assertIn("<strong>bold</strong>", html)
+
+    def test_code_fence_renders_pre_code(self):
+        html = admin_panel._render_markdown("```py\nprint('hi')\n```")
+        self.assertIn("<pre>", html)
+        self.assertIn("print", html)
+
+    def test_empty_string_renders_empty(self):
+        self.assertEqual(admin_panel._render_markdown(""), "")
+        self.assertEqual(admin_panel._render_markdown(None), "")
+
+
+class TestChatStreamDonePayload(unittest.TestCase):
+    def test_done_event_carries_html_and_text(self):
+        import json as _json
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+
+        def fake_ask_stuff(message, source, user, *,
+                          streaming_callback=None, progress_callback=None, **_):
+            streaming_callback("Very well")
+            return {"text": "Very well **sir**.", "image_paths": [], "timestamp": "now"}
+
+        fake_module = MagicMock()
+        fake_module.ask_stuff = fake_ask_stuff
+        with patch.dict(sys.modules, {"mister_fritz": fake_module}), \
+             patch.object(admin_panel, "audit_log"):
+            r = client.post("/chat/stream", data={"message": "hi"})
+
+        events = _parse_sse(r.text)
+        dones = [d for ev, d in events if ev == "done"]
+        self.assertEqual(len(dones), 1)
+        payload = _json.loads(dones[0])
+        self.assertEqual(payload["text"], "Very well **sir**.")
+        self.assertIn("<strong>sir</strong>", payload["html"])
+        self.assertEqual(payload["images"], [])
+
+
+class TestChatStreamProgressEvents(unittest.TestCase):
+    def test_progress_callback_yields_progress_events(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+
+        def fake_ask_stuff(message, source, user, *,
+                          streaming_callback=None, progress_callback=None, **_):
+            assert progress_callback is not None
+            progress_callback("Searching the web...")
+            progress_callback("Reading results...")
+            streaming_callback("Here is what I found.")
+            return {"text": "Here is what I found.", "image_paths": [], "timestamp": "now"}
+
+        fake_module = MagicMock()
+        fake_module.ask_stuff = fake_ask_stuff
+        with patch.dict(sys.modules, {"mister_fritz": fake_module}), \
+             patch.object(admin_panel, "audit_log"):
+            r = client.post("/chat/stream", data={"message": "look it up"})
+
+        events = _parse_sse(r.text)
+        progresses = [d for ev, d in events if ev == "progress"]
+        self.assertEqual(progresses, ["Searching the web...", "Reading results..."])
+
+
+class TestChatHistory(unittest.TestCase):
+    def test_unauthed_returns_401(self):
+        client = _build_client()
+        r = client.get("/chat/history")
+        self.assertEqual(r.status_code, 401)
+
+    def test_authed_returns_messages_from_loader(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+        fake_history = [
+            {"role": "user", "content": "hi", "html": None},
+            {"role": "fritz", "content": "Greetings.", "html": "<p>Greetings.</p>"},
+        ]
+        with patch.object(admin_panel, "_load_chat_history", return_value=fake_history):
+            r = client.get("/chat/history")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["username"], "alice")
+        self.assertEqual(body["messages"], fake_history)
+
+
+class TestChatForget(unittest.TestCase):
+    def test_authed_post_calls_forget_conversation_and_redirects(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+        with patch.object(privacy, "forget_conversation", return_value=3) as fc, \
+             patch.object(admin_panel, "audit_log") as audit:
+            r = client.post("/chat/forget", follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(r.headers["location"], "/chat")
+        fc.assert_called_once_with("alice")
+        # Audit entry recorded.
+        calls = [c for c in audit.call_args_list if c.args and c.args[0] == "chat_forget_conversation"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].kwargs["user_id"], "alice")
+        self.assertEqual(calls[0].kwargs["removed"], 3)
+
+    def test_unauthed_redirects_without_touching_privacy(self):
+        client = _build_client()
+        with patch.object(privacy, "forget_conversation") as fc:
+            r = client.post("/chat/forget", follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        fc.assert_not_called()
+
+
+class TestChatAsset(unittest.TestCase):
+    def test_unauthed_returns_401(self):
+        client = _build_client()
+        r = client.get("/chat/assets/output/whatever.png")
+        self.assertEqual(r.status_code, 401)
+
+    def test_path_escape_returns_404(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+        # Try to escape the asset roots.
+        r = client.get("/chat/assets/../etc/passwd")
+        self.assertEqual(r.status_code, 404)
+
+    def test_serves_existing_file_under_output(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+
+        # Create a file under ./output for the test.
+        os.makedirs("output", exist_ok=True)
+        marker = os.path.join("output", "_admin_panel_test_marker.txt")
+        with open(marker, "w") as f:
+            f.write("hello world")
+        try:
+            r = client.get("/chat/assets/output/_admin_panel_test_marker.txt")
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.text, "hello world")
+        finally:
+            os.unlink(marker)
+
+
+class TestChatAssetUrlHelper(unittest.TestCase):
+    def test_path_in_output_root_returns_chat_assets_url(self):
+        abs_path = os.path.abspath(os.path.join("output", "abc.png"))
+        url = admin_panel._chat_asset_url(abs_path)
+        self.assertEqual(url, "/chat/assets/output/abc.png")
+
+    def test_path_outside_roots_returns_none(self):
+        self.assertIsNone(admin_panel._chat_asset_url("/etc/passwd"))
+
+    def test_empty_returns_none(self):
+        self.assertIsNone(admin_panel._chat_asset_url(""))
+        self.assertIsNone(admin_panel._chat_asset_url(None))
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import os
 import re
@@ -30,6 +31,9 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Route
 from starlette.templating import Jinja2Templates
+
+import markdown as md_lib
+from starlette.responses import FileResponse
 
 import chat_auth
 import privacy
@@ -302,6 +306,64 @@ def _chat_user(request: Request) -> str | None:
     return chat_auth.verify_cookie(token, CHAT_COOKIE_SECRET)
 
 
+# Markdown extensions enabled for Fritz's replies. fenced_code handles ```py
+# blocks; tables / nl2br polish the natural prose he tends to emit.
+_MARKDOWN_EXTENSIONS = ["fenced_code", "tables", "nl2br"]
+
+
+def _render_markdown(text: str) -> str:
+    """Render markdown to HTML. Used for Fritz's replies in the chat history
+    and for the final state of a streamed message."""
+    if not text:
+        return ""
+    return md_lib.markdown(text, extensions=_MARKDOWN_EXTENSIONS)
+
+
+def _doc_to_message(checkpoint_msg) -> dict | None:
+    """Convert a LangGraph checkpoint message into a chat-view dict.
+    Returns None for messages we shouldn't render (system, empty, tool calls)."""
+    # langchain messages have .type ("human" | "ai" | "system" | "tool") and .content
+    msg_type = getattr(checkpoint_msg, "type", None)
+    content = getattr(checkpoint_msg, "content", None)
+    if not content or not isinstance(content, str):
+        return None
+    content = content.strip()
+    if not content:
+        return None
+    if msg_type == "human":
+        return {"role": "user", "content": content, "html": None}
+    if msg_type == "ai":
+        return {"role": "fritz", "content": content, "html": _render_markdown(content)}
+    return None
+
+
+def _load_chat_history(user_id: str, limit: int = 40) -> list[dict]:
+    """Load the recent message history from the LangGraph SqliteSaver. Returns
+    a list of {role, content, html} dicts ready for the template. Best-effort
+    — returns [] on any failure."""
+    if not user_id:
+        return []
+    try:
+        # Lazy import — same reasoning as in chat_send.
+        from mister_fritz import app as agent_app, get_config_values
+        thread_id = re.sub(r"[^a-zA-Z0-9]", "", user_id)
+        if not thread_id:
+            return []
+        config = get_config_values({"metadata": {"user_id": thread_id, "thread_id": thread_id}})
+        snapshot = agent_app.get_state(config)
+        messages = (snapshot.values or {}).get("messages", []) if snapshot else []
+    except Exception as e:
+        logger.debug("Could not load chat history for %s: %s", user_id, e)
+        return []
+
+    out: list[dict] = []
+    for m in messages[-limit:]:
+        converted = _doc_to_message(m)
+        if converted is not None:
+            out.append(converted)
+    return out
+
+
 def _set_chat_cookie(response: Response, username: str) -> None:
     token = chat_auth.make_cookie(username, CHAT_COOKIE_SECRET)
     response.set_cookie(
@@ -317,9 +379,14 @@ async def chat_page(request: Request) -> HTMLResponse:
         return templates.TemplateResponse(request, "chat_login.html", {})
     # Refresh the cookie on every page view so active users don't get logged
     # out on day 31.
+    # Phase 3: hydrate the page with the last 40 messages from the LangGraph
+    # checkpoint so a refresh doesn't lose context.
+    history = await asyncio.get_running_loop().run_in_executor(
+        None, _load_chat_history, user, 40,
+    )
     response = templates.TemplateResponse(request, "chat.html", {
         "username": user,
-        "messages": [],   # Phase 3 will populate from SqliteSaver checkpoint.
+        "messages": history,
     })
     _set_chat_cookie(response, user)
     return response
@@ -397,8 +464,9 @@ async def chat_send(request: Request) -> Response:
     return templates.TemplateResponse(request, "chat.html", {
         "username": user,
         "messages": [
-            {"role": "user", "content": message},
-            {"role": "fritz", "content": reply or "(no response)"},
+            {"role": "user", "content": message, "html": None},
+            {"role": "fritz", "content": reply or "(no response)",
+             "html": _render_markdown(reply or "(no response)")},
         ],
     })
 
@@ -431,6 +499,12 @@ async def chat_stream(request: Request) -> Response:
         # ask_stuff invokes this from a worker thread; queue.Queue is thread-safe.
         event_queue.put(("token", partial_text))
 
+    def _progress_callback(progress_text: str) -> None:
+        # Tool progress messages: "Searching the web...", etc. Surfaced to the
+        # client as a separate event so the UI can render them as ephemeral
+        # italic lines instead of replacing the streaming bubble's content.
+        event_queue.put(("progress", progress_text))
+
     def _invoke_agent() -> None:
         from mister_fritz import ask_stuff
         try:
@@ -438,13 +512,24 @@ async def chat_stream(request: Request) -> Response:
                 message,
                 MessageSource.LOCAL,
                 user,
+                progress_callback=_progress_callback,
                 streaming_callback=_streaming_callback,
                 schedule_manager=schedule_manager,
             )
             reply = response_data.get("text") if isinstance(response_data, dict) else str(response_data)
+            image_paths = response_data.get("image_paths", []) if isinstance(response_data, dict) else []
             audit_log("chat_message", user_id=user, chars=len(message),
                       result="ok", reply_chars=len(reply or ""), streamed=True)
-            event_queue.put(("done", reply or ""))
+            # The 'done' frame carries both the raw text and the rendered HTML
+            # so the client doesn't have to ship a markdown parser. Image paths
+            # are encoded as a JSON-ish pipe-separated list to avoid newline
+            # issues in the SSE data field.
+            done_payload = {
+                "text": reply or "",
+                "html": _render_markdown(reply or ""),
+                "images": [_chat_asset_url(p) for p in image_paths],
+            }
+            event_queue.put(("done", json.dumps(done_payload)))
         except Exception as e:
             logger.exception("Chat stream failed for %s", user)
             audit_log("chat_message", user_id=user, chars=len(message),
@@ -481,6 +566,73 @@ async def chat_stream(request: Request) -> Response:
     return StreamingResponse(_event_generator(), media_type="text/event-stream")
 
 
+# Roots that /chat/assets/<path> is allowed to serve from. Anything outside
+# these dirs is a path-escape attempt.
+def _chat_asset_roots() -> list[str]:
+    return [
+        os.path.abspath("output"),
+        os.path.abspath("temp_images"),
+    ]
+
+
+def _chat_asset_url(path: str) -> str | None:
+    """Translate an absolute filesystem path (as returned by Fritz's image
+    tools) into a /chat/assets URL the browser can fetch. Returns None for
+    paths outside the allowed roots."""
+    if not path:
+        return None
+    abs_path = os.path.abspath(path)
+    for root in _chat_asset_roots():
+        if abs_path == root or abs_path.startswith(root + os.sep):
+            rel = os.path.relpath(abs_path, os.path.dirname(root))
+            # Use forward slashes for URL even on Windows.
+            return "/chat/assets/" + rel.replace(os.sep, "/")
+    return None
+
+
+async def chat_asset(request: Request) -> Response:
+    """Serve a file from one of the chat-asset roots (./output, ./temp_images).
+    Requires an authed chat user; rejects paths that escape the roots."""
+    user = _chat_user(request)
+    if not user:
+        return Response(status_code=401, content="Not signed in.")
+    rel = request.path_params["path"]
+    if not rel:
+        return Response(status_code=404)
+    for root in _chat_asset_roots():
+        root_parent = os.path.dirname(root)
+        full = os.path.abspath(os.path.join(root_parent, rel))
+        if full == root or full.startswith(root + os.sep):
+            if os.path.isfile(full):
+                return FileResponse(full)
+    return Response(status_code=404)
+
+
+async def chat_history(request: Request) -> JSONResponse:
+    """Return the recent message history for the cookie's user as JSON.
+    Used by clients that want to refresh without a full page reload."""
+    user = _chat_user(request)
+    if not user:
+        return JSONResponse({"error": "not signed in"}, status_code=401)
+    history = await asyncio.get_running_loop().run_in_executor(
+        None, _load_chat_history, user, 40,
+    )
+    return JSONResponse({"username": user, "messages": history})
+
+
+async def chat_forget(request: Request) -> Response:
+    """Clear the LangGraph checkpoint for the current user — the next message
+    starts a fresh conversation. Doesn't touch memories or schedules."""
+    user = _chat_user(request)
+    if not user:
+        return RedirectResponse(url="/chat", status_code=303)
+    removed = await asyncio.get_running_loop().run_in_executor(
+        None, privacy.forget_conversation, user,
+    )
+    audit_log("chat_forget_conversation", user_id=user, removed=removed)
+    return RedirectResponse(url="/chat", status_code=303)
+
+
 # ── App factory + server boot ───────────────────────────────────────────────
 
 def create_app(password: str, schedule_manager=None) -> Starlette:
@@ -508,6 +660,9 @@ def create_app(password: str, schedule_manager=None) -> Starlette:
         Route("/chat/logout", chat_logout, methods=["POST"], name="chat_logout"),
         Route("/chat/send", chat_send, methods=["POST"], name="chat_send"),
         Route("/chat/stream", chat_stream, methods=["POST"], name="chat_stream"),
+        Route("/chat/forget", chat_forget, methods=["POST"], name="chat_forget"),
+        Route("/chat/history", chat_history, name="chat_history"),
+        Route("/chat/assets/{path:path}", chat_asset, name="chat_asset"),
     ]
     app = Starlette(
         routes=routes,

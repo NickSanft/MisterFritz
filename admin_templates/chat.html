@@ -6,11 +6,12 @@
     .chat-shell { max-width: 760px; margin: 0 auto; }
     .chat-bubble {
         margin: 0.5rem 0; padding: 0.75rem 1rem; border-radius: 8px;
-        white-space: pre-wrap; word-wrap: break-word;
+        word-wrap: break-word;
     }
     .chat-bubble.user {
         background: #e8e5dc; color: var(--fg);
         margin-left: 4rem;
+        white-space: pre-wrap;
     }
     .chat-bubble.fritz {
         background: #fff; border: 1px solid var(--border); color: var(--fg);
@@ -25,6 +26,28 @@
         display: block; font-size: 0.7rem; color: var(--muted);
         text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.3rem;
     }
+    .chat-bubble .bubble-body p:first-child { margin-top: 0; }
+    .chat-bubble .bubble-body p:last-child { margin-bottom: 0; }
+    .chat-bubble .bubble-body pre {
+        background: #ecebe5; padding: 0.6rem 0.8rem; border-radius: 4px;
+        overflow-x: auto; font-size: 0.85rem;
+    }
+    .chat-bubble .bubble-body code {
+        background: #ecebe5; padding: 0.1rem 0.3rem; border-radius: 2px;
+        font-size: 0.88em;
+    }
+    .chat-bubble .bubble-body pre code { background: transparent; padding: 0; }
+    .chat-bubble .bubble-body img {
+        max-width: 100%; border-radius: 4px; margin-top: 0.5rem;
+    }
+    .chat-bubble .bubble-body table { border-collapse: collapse; margin: 0.5rem 0; }
+    .chat-bubble .bubble-body th, .chat-bubble .bubble-body td {
+        border: 1px solid var(--border); padding: 0.25rem 0.5rem; text-align: left;
+    }
+    .chat-progress {
+        font-style: italic; color: var(--muted); margin: 0.3rem 4rem 0.3rem 0;
+        font-size: 0.85rem; padding: 0.1rem 0.5rem;
+    }
     .chat-input-row {
         display: flex; gap: 0.5rem; margin-top: 1.5rem;
         padding-top: 1rem; border-top: 1px solid var(--border);
@@ -37,25 +60,27 @@
     .chat-input-row button { padding: 0.5rem 1.25rem; }
     .chat-header {
         display: flex; justify-content: space-between; align-items: center;
-        margin-bottom: 1rem;
+        margin-bottom: 1rem; gap: 0.5rem;
     }
+    .chat-header .right { display: flex; gap: 0.5rem; }
     .chat-empty {
         text-align: center; color: var(--muted); padding: 3rem 1rem;
         font-style: italic;
     }
-    .chat-error {
-        color: var(--danger); font-style: italic; padding: 0.5rem 0;
-    }
 </style>
-
-<script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
 
 <div class="chat-shell">
     <div class="chat-header">
         <span class="muted">Signed in as <code>{{ username }}</code></span>
-        <form class="inline" method="post" action="/chat/logout">
-            <button type="submit">Switch user</button>
-        </form>
+        <span class="right">
+            <form class="inline" method="post" action="/chat/forget"
+                  onsubmit="return confirm('Start a fresh conversation? Your memories and schedules stay; only this thread\\'s context is reset.');">
+                <button type="submit">New conversation</button>
+            </form>
+            <form class="inline" method="post" action="/chat/logout">
+                <button type="submit">Switch user</button>
+            </form>
+        </span>
     </div>
 
     <div class="card">
@@ -64,7 +89,11 @@
                 {% for m in messages %}
                 <div class="chat-bubble {{ m.role }}">
                     <span class="role">{{ "you" if m.role == "user" else "mister fritz" }}</span>
-                    {{ m.content }}
+                    {% if m.role == "fritz" and m.html %}
+                    <div class="bubble-body">{{ m.html | safe }}</div>
+                    {% else %}
+                    <div class="bubble-body">{{ m.content }}</div>
+                    {% endif %}
                 </div>
                 {% endfor %}
             {% else %}
@@ -90,7 +119,7 @@
     const list = document.getElementById("chat-messages");
     if (!form || !list) return;
 
-    function newBubble(role, content) {
+    function makeBubble(role) {
         const div = document.createElement("div");
         div.className = "chat-bubble " + role;
         const roleSpan = document.createElement("span");
@@ -99,8 +128,14 @@
         div.appendChild(roleSpan);
         const body = document.createElement("div");
         body.className = "bubble-body";
-        body.textContent = content;
         div.appendChild(body);
+        return div;
+    }
+
+    function makeProgressLine(text) {
+        const div = document.createElement("div");
+        div.className = "chat-progress";
+        div.textContent = text;
         return div;
     }
 
@@ -116,12 +151,20 @@
         if (!message) return;
 
         clearEmptyState();
-        list.appendChild(newBubble("user", message));
 
-        const fritzBubble = newBubble("fritz", "");
+        // User bubble: plain text (no markdown).
+        const userBubble = makeBubble("user");
+        userBubble.querySelector(".bubble-body").textContent = message;
+        list.appendChild(userBubble);
+
+        // Progress lines collected here so we can remove them when 'done' lands.
+        const progressLines = [];
+
+        // Assistant bubble: starts empty, streams tokens in.
+        const fritzBubble = makeBubble("fritz");
         fritzBubble.classList.add("streaming");
-        list.appendChild(fritzBubble);
         const body = fritzBubble.querySelector(".bubble-body");
+        list.appendChild(fritzBubble);
 
         textarea.value = "";
         textarea.disabled = true;
@@ -130,7 +173,6 @@
         const fd = new FormData();
         fd.append("message", message);
 
-        // EventSource doesn't accept a body, so we use fetch + ReadableStream.
         fetch("/chat/stream", { method: "POST", body: fd, credentials: "same-origin" })
             .then(async (resp) => {
                 if (!resp.ok) {
@@ -158,13 +200,36 @@
                         }
                         const data = dataLines.join("\n");
                         if (eventName === "token") {
+                            // During streaming, render as plain text (no markdown yet).
                             body.textContent = data;
+                        } else if (eventName === "progress") {
+                            // Progress message: ephemeral italic line above the
+                            // assistant bubble. Stacks if multiple arrive.
+                            const line = makeProgressLine(data);
+                            list.insertBefore(line, fritzBubble);
+                            progressLines.push(line);
                         } else if (eventName === "done") {
-                            body.textContent = data || "(no response)";
+                            // Final frame: payload is JSON with text, html, images.
+                            try {
+                                const payload = JSON.parse(data);
+                                body.innerHTML = payload.html || (payload.text ? escapeText(payload.text) : "(no response)");
+                                for (const url of (payload.images || [])) {
+                                    const img = document.createElement("img");
+                                    img.src = url;
+                                    img.alt = "Generated image";
+                                    body.appendChild(img);
+                                }
+                            } catch (e) {
+                                body.textContent = data || "(no response)";
+                            }
                             fritzBubble.classList.remove("streaming");
+                            for (const line of progressLines) line.remove();
+                            progressLines.length = 0;
                         } else if (eventName === "error") {
                             body.textContent = "Error: " + data;
                             fritzBubble.classList.remove("streaming");
+                            for (const line of progressLines) line.remove();
+                            progressLines.length = 0;
                         }
                         lastEvent = eventName;
                     }
@@ -179,9 +244,15 @@
                 textarea.disabled = false;
                 form.querySelector("button[type=submit]").disabled = false;
                 textarea.focus();
-                list.scrollTop = list.scrollHeight;
+                window.scrollTo(0, document.body.scrollHeight);
             });
     });
+
+    function escapeText(s) {
+        const div = document.createElement("div");
+        div.textContent = s;
+        return div.innerHTML;
+    }
 })();
 </script>
 {% endblock %}

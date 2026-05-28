@@ -288,3 +288,5 @@ APScheduler>=3.10.0
 # POST form handling in Phase 9b.
 starlette>=0.46
 python-multipart>=0.0.22
+# Server-side markdown rendering for Fritz's chat replies (Phase web-chat-3).
+Markdown>=3.5
