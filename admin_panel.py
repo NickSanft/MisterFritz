@@ -14,6 +14,7 @@ import asyncio
 import base64
 import logging
 import os
+import re
 import secrets
 import threading
 import time
@@ -29,12 +30,15 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Re
 from starlette.routing import Route
 from starlette.templating import Jinja2Templates
 
+import chat_auth
 import privacy
 import workspace_store
 from fritz_utils import (
     ADMIN_PANEL_PASSWORD,
     ADMIN_PANEL_PORT,
+    CHAT_COOKIE_SECRET,
     DOC_FOLDER,
+    MessageSource,
     __version__,
 )
 from observability import audit_log, get_health_snapshot
@@ -59,6 +63,11 @@ class _BasicAuthMiddleware(BaseHTTPMiddleware):
         self._password = password
 
     async def dispatch(self, request: Request, call_next):
+        # The chat surface has its own cookie-based identity model and must
+        # NOT require the admin password. Everything else needs Basic auth.
+        if request.url.path == "/chat" or request.url.path.startswith("/chat/"):
+            return await call_next(request)
+
         auth = request.headers.get("authorization", "")
         if not auth.lower().startswith("basic "):
             return _unauthorized()
@@ -281,6 +290,115 @@ async def reindex_document_action(request: Request) -> Response:
     return RedirectResponse(url="/documents", status_code=303)
 
 
+# ── /chat — local chat UI (Phase web-chat-1) ────────────────────────────────
+# A separate identity model from the admin panel: cookie-based, no password.
+# Threat model is "me + my friends on a port-forwarded local network." For
+# per-user namespacing of memories/schedules/threads, that's enough.
+
+def _chat_user(request: Request) -> str | None:
+    """Return the verified chat username from the cookie, or None."""
+    token = request.cookies.get(chat_auth.COOKIE_NAME)
+    return chat_auth.verify_cookie(token, CHAT_COOKIE_SECRET)
+
+
+def _set_chat_cookie(response: Response, username: str) -> None:
+    token = chat_auth.make_cookie(username, CHAT_COOKIE_SECRET)
+    response.set_cookie(
+        chat_auth.COOKIE_NAME, token,
+        max_age=chat_auth.COOKIE_MAX_AGE_SECONDS,
+        httponly=True, samesite="lax",
+    )
+
+
+async def chat_page(request: Request) -> HTMLResponse:
+    user = _chat_user(request)
+    if not user:
+        return templates.TemplateResponse(request, "chat_login.html", {})
+    # Refresh the cookie on every page view so active users don't get logged
+    # out on day 31.
+    response = templates.TemplateResponse(request, "chat.html", {
+        "username": user,
+        "messages": [],   # Phase 3 will populate from SqliteSaver checkpoint.
+    })
+    _set_chat_cookie(response, user)
+    return response
+
+
+async def chat_login(request: Request) -> Response:
+    form = await request.form()
+    username = (form.get("username") or "").strip()
+    # Same sanitisation as mister_fritz uses for thread_id.
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "", username)[:64]
+    if not safe:
+        # Re-render with an error.
+        return templates.TemplateResponse(request, "chat_login.html", {
+            "error": "Pick a username with at least one letter or number.",
+        })
+    response = RedirectResponse(url="/chat", status_code=303)
+    _set_chat_cookie(response, safe)
+    audit_log("chat_login", user_id=safe)
+    return response
+
+
+async def chat_logout(request: Request) -> Response:
+    user = _chat_user(request)
+    response = RedirectResponse(url="/chat", status_code=303)
+    response.delete_cookie(chat_auth.COOKIE_NAME)
+    if user:
+        audit_log("chat_logout", user_id=user)
+    return response
+
+
+async def chat_send(request: Request) -> Response:
+    user = _chat_user(request)
+    if not user:
+        return RedirectResponse(url="/chat", status_code=303)
+
+    form = await request.form()
+    message = (form.get("message") or "").strip()
+    if not message:
+        return RedirectResponse(url="/chat", status_code=303)
+
+    # Run the synchronous agent in a worker thread so the event loop is free.
+    loop = asyncio.get_running_loop()
+    schedule_manager = _schedule_manager_from_request(request)
+
+    def _invoke_agent() -> dict:
+        # Lazy import — keeps admin_panel importable without pulling the LLM
+        # stack until the first chat send.
+        from mister_fritz import ask_stuff
+        return ask_stuff(
+            message,
+            MessageSource.LOCAL,
+            user,
+            schedule_manager=schedule_manager,
+        )
+
+    try:
+        response_data = await loop.run_in_executor(None, _invoke_agent)
+    except Exception as e:
+        logger.exception("Chat send failed for %s", user)
+        audit_log("chat_message", user_id=user, chars=len(message), result="error", error=str(e))
+        return templates.TemplateResponse(request, "chat.html", {
+            "username": user,
+            "messages": [
+                {"role": "user", "content": message},
+                {"role": "fritz", "content": f"❌ An error occurred: {e}"},
+            ],
+        })
+
+    reply = response_data.get("text") if isinstance(response_data, dict) else str(response_data)
+    audit_log("chat_message", user_id=user, chars=len(message), result="ok", reply_chars=len(reply or ""))
+
+    return templates.TemplateResponse(request, "chat.html", {
+        "username": user,
+        "messages": [
+            {"role": "user", "content": message},
+            {"role": "fritz", "content": reply or "(no response)"},
+        ],
+    })
+
+
 # ── App factory + server boot ───────────────────────────────────────────────
 
 def create_app(password: str, schedule_manager=None) -> Starlette:
@@ -302,6 +420,11 @@ def create_app(password: str, schedule_manager=None) -> Starlette:
               methods=["POST"], name="cancel_schedule"),
         Route("/documents/reindex", reindex_document_action,
               methods=["POST"], name="reindex_document"),
+        # Chat surface (cookie auth; no admin password required).
+        Route("/chat", chat_page, name="chat"),
+        Route("/chat/login", chat_login, methods=["POST"], name="chat_login"),
+        Route("/chat/logout", chat_logout, methods=["POST"], name="chat_logout"),
+        Route("/chat/send", chat_send, methods=["POST"], name="chat_send"),
     ]
     app = Starlette(
         routes=routes,

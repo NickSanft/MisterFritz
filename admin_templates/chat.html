@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Chat · Mister Fritz{% endblock %}
+
+{% block body %}
+<style>
+    .chat-shell { max-width: 760px; margin: 0 auto; }
+    .chat-bubble {
+        margin: 0.5rem 0; padding: 0.75rem 1rem; border-radius: 8px;
+        white-space: pre-wrap; word-wrap: break-word;
+    }
+    .chat-bubble.user {
+        background: #e8e5dc; color: var(--fg);
+        margin-left: 4rem;
+    }
+    .chat-bubble.fritz {
+        background: #fff; border: 1px solid var(--border); color: var(--fg);
+        margin-right: 4rem;
+    }
+    .chat-bubble .role {
+        display: block; font-size: 0.7rem; color: var(--muted);
+        text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.3rem;
+    }
+    .chat-input-row {
+        display: flex; gap: 0.5rem; margin-top: 1.5rem;
+        padding-top: 1rem; border-top: 1px solid var(--border);
+    }
+    .chat-input-row textarea {
+        flex: 1; padding: 0.6rem 0.75rem; border: 1px solid var(--border);
+        border-radius: 4px; font-family: inherit; font-size: 0.95rem;
+        resize: vertical; min-height: 3rem;
+    }
+    .chat-input-row button { padding: 0.5rem 1.25rem; }
+    .chat-header {
+        display: flex; justify-content: space-between; align-items: center;
+        margin-bottom: 1rem;
+    }
+    .chat-empty {
+        text-align: center; color: var(--muted); padding: 3rem 1rem;
+        font-style: italic;
+    }
+</style>
+
+<div class="chat-shell">
+    <div class="chat-header">
+        <span class="muted">Signed in as <code>{{ username }}</code></span>
+        <form class="inline" method="post" action="/chat/logout">
+            <button type="submit">Switch user</button>
+        </form>
+    </div>
+
+    <div class="card">
+        {% if messages %}
+            {% for m in messages %}
+            <div class="chat-bubble {{ m.role }}">
+                <span class="role">{{ "you" if m.role == "user" else "mister fritz" }}</span>
+                {{ m.content }}
+            </div>
+            {% endfor %}
+        {% else %}
+            <div class="chat-empty">
+                Say hello to Fritz. He'll be delighted, in his own theatrical way.
+            </div>
+        {% endif %}
+
+        <form class="chat-input-row" method="post" action="/chat/send">
+            <textarea name="message" placeholder="Type a message..." required
+                      autofocus rows="2"></textarea>
+            <button type="submit">Send</button>
+        </form>
+    </div>
+</div>
+{% endblock %}

@@ -123,6 +123,35 @@ MEMORY_EXTRACT_MIN_REPLY_CHARS: int = int(os.environ.get("MEMORY_EXTRACT_MIN_REP
 ADMIN_PANEL_PASSWORD: str | None = os.environ.get("ADMIN_PANEL_PASSWORD") or None
 ADMIN_PANEL_PORT: int = int(os.environ.get("ADMIN_PANEL_PORT", "8001"))
 
+
+# Secret used to HMAC-sign the chat identity cookie. If unset, we auto-generate
+# one and persist it to .chat_cookie_secret on first boot so cookies survive
+# restarts. The file is gitignored.
+def _load_or_make_chat_cookie_secret() -> str:
+    env_value = os.environ.get("CHAT_COOKIE_SECRET")
+    if env_value:
+        return env_value
+    secret_path = ".chat_cookie_secret"
+    try:
+        with open(secret_path, "r", encoding="utf-8") as f:
+            existing = f.read().strip()
+            if existing:
+                return existing
+    except FileNotFoundError:
+        pass
+    import secrets as _secrets
+    new_secret = _secrets.token_hex(32)
+    try:
+        with open(secret_path, "w", encoding="utf-8") as f:
+            f.write(new_secret)
+    except OSError:
+        # Read-only filesystem — fall back to an in-process ephemeral secret.
+        pass
+    return new_secret
+
+
+CHAT_COOKIE_SECRET: str = _load_or_make_chat_cookie_secret()
+
 # ---------------------------------------------------------------------------
 # File-tool sandbox
 # ---------------------------------------------------------------------------

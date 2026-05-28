@@ -141,6 +141,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Auto-generated HMAC secret for the local chat UI cookie
+.chat_cookie_secret
+
 # Spyder project settings
 .spyderproject
 .spyproject

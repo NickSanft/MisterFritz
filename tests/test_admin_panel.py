@@ -319,5 +319,144 @@ class TestAdminUsernameInAudit(unittest.TestCase):
         self.assertEqual(audit.call_args.kwargs.get("admin"), "nick")
 
 
+# ── /chat (Phase web-chat-1) ────────────────────────────────────────────────
+
+class TestChatBypassesAdminAuth(unittest.TestCase):
+    """The chat surface has its own cookie-based identity — Basic auth
+    should NOT be required to reach /chat or its sub-routes."""
+
+    def test_chat_landing_does_not_require_basic_auth(self):
+        client = _build_client()
+        r = client.get("/chat")
+        # Login form rendered (200), not 401.
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("Sign in to chat", r.text)
+
+    def test_admin_pages_still_require_basic_auth(self):
+        client = _build_client()
+        r = client.get("/")
+        self.assertEqual(r.status_code, 401)
+
+
+class TestChatLogin(unittest.TestCase):
+    def test_post_login_sets_cookie_and_redirects(self):
+        client = _build_client()
+        r = client.post("/chat/login", data={"username": "alice"},
+                        follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(r.headers["location"], "/chat")
+        self.assertIn("fritz_chat_id", r.cookies)
+
+    def test_empty_username_renders_error(self):
+        client = _build_client()
+        r = client.post("/chat/login", data={"username": "  "},
+                        follow_redirects=False)
+        # Re-renders login form with error message (200, not redirect).
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("at least one letter", r.text)
+
+    def test_username_is_sanitised(self):
+        # Path-like or punctuation-heavy usernames get stripped to safe chars.
+        client = _build_client()
+        r = client.post("/chat/login", data={"username": "../bad/name"},
+                        follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        # The set cookie should contain "badname" (slashes + dots stripped).
+        import chat_auth
+        from fritz_utils import CHAT_COOKIE_SECRET
+        token = r.cookies.get("fritz_chat_id")
+        self.assertEqual(chat_auth.verify_cookie(token, CHAT_COOKIE_SECRET), "badname")
+
+
+class TestChatLogout(unittest.TestCase):
+    def test_logout_clears_cookie(self):
+        client = _build_client()
+        # First log in.
+        client.post("/chat/login", data={"username": "alice"})
+        # Then log out.
+        r = client.post("/chat/logout", follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        # Logout sets a max-age=0 / expired cookie; httpx may strip it from
+        # the jar. Either way, the next /chat should land on the login form.
+        r2 = client.get("/chat")
+        self.assertIn("Sign in to chat", r2.text)
+
+
+class TestChatPageWithCookie(unittest.TestCase):
+    def test_authed_user_sees_chat_ui(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+        r = client.get("/chat")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("alice", r.text)
+        self.assertIn("Type a message", r.text)
+
+    def test_tampered_cookie_renders_login(self):
+        client = _build_client()
+        client.cookies.set("fritz_chat_id", "alice:9999999999:deadbeef")
+        r = client.get("/chat")
+        self.assertIn("Sign in to chat", r.text)
+
+
+class TestChatSend(unittest.TestCase):
+    def test_unauthed_send_redirects_to_chat(self):
+        client = _build_client()
+        r = client.post("/chat/send", data={"message": "hi"},
+                        follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(r.headers["location"], "/chat")
+
+    def test_authed_send_invokes_ask_stuff_with_username(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+
+        fake_module = MagicMock()
+        fake_module.ask_stuff.return_value = {
+            "text": "Very well.",
+            "image_paths": [],
+            "timestamp": "now",
+        }
+        with patch.dict(sys.modules, {"mister_fritz": fake_module}), \
+             patch.object(admin_panel, "audit_log"):
+            r = client.post("/chat/send", data={"message": "hello fritz"})
+
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("Very well.", r.text)
+        # ask_stuff received the cookie's username as user_id.
+        args, kwargs = fake_module.ask_stuff.call_args
+        # ask_stuff(message, source, user_id, ...)
+        self.assertEqual(args[0], "hello fritz")
+        self.assertEqual(args[2], "alice")
+
+    def test_send_audit_log_records_message_chars(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+
+        fake_module = MagicMock()
+        fake_module.ask_stuff.return_value = {"text": "okay", "image_paths": [], "timestamp": "now"}
+        with patch.dict(sys.modules, {"mister_fritz": fake_module}), \
+             patch.object(admin_panel, "audit_log") as audit:
+            client.post("/chat/send", data={"message": "this is a test message"})
+
+        # First call should be chat_message with ok result.
+        calls = [c for c in audit.call_args_list if c.args and c.args[0] == "chat_message"]
+        self.assertEqual(len(calls), 1)
+        kwargs = calls[0].kwargs
+        self.assertEqual(kwargs["user_id"], "alice")
+        self.assertEqual(kwargs["chars"], len("this is a test message"))
+        self.assertEqual(kwargs["result"], "ok")
+
+    def test_empty_message_redirects_without_invoking_agent(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+
+        fake_module = MagicMock()
+        with patch.dict(sys.modules, {"mister_fritz": fake_module}):
+            r = client.post("/chat/send", data={"message": "   "},
+                            follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        fake_module.ask_stuff.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
