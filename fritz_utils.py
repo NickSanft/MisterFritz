@@ -152,6 +152,22 @@ def _load_or_make_chat_cookie_secret() -> str:
 
 CHAT_COOKIE_SECRET: str = _load_or_make_chat_cookie_secret()
 
+# Hard caps on chat-uploaded files (Phase web-chat-4). Images are 10 MB each
+# by default — enough for high-res photos, low enough that someone can't
+# accidentally fill the disk dragging a video in. Documents share the same
+# default; admins can bump for large PDFs.
+CHAT_IMAGE_UPLOAD_MAX_BYTES: int = int(
+    os.environ.get("CHAT_IMAGE_UPLOAD_MAX_BYTES", str(10 * 1024 * 1024))
+)
+CHAT_DOC_UPLOAD_MAX_BYTES: int = int(
+    os.environ.get("CHAT_DOC_UPLOAD_MAX_BYTES", str(10 * 1024 * 1024))
+)
+# Allowed MIME types for image uploads. Strict whitelist — no SVG (XSS risk),
+# no animated formats beyond GIF.
+CHAT_ALLOWED_IMAGE_TYPES: frozenset[str] = frozenset({
+    "image/jpeg", "image/png", "image/webp", "image/gif",
+})
+
 # ---------------------------------------------------------------------------
 # File-tool sandbox
 # ---------------------------------------------------------------------------

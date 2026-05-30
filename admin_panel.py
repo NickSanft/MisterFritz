@@ -36,12 +36,16 @@ import markdown as md_lib
 from starlette.responses import FileResponse
 
 import chat_auth
+import fritz_utils
 import privacy
 import workspace_store
 from fritz_utils import (
     ADMIN_PANEL_PASSWORD,
     ADMIN_PANEL_PORT,
+    CHAT_ALLOWED_IMAGE_TYPES,
     CHAT_COOKIE_SECRET,
+    CHAT_DOC_UPLOAD_MAX_BYTES,
+    CHAT_IMAGE_UPLOAD_MAX_BYTES,
     DOC_FOLDER,
     MessageSource,
     __version__,
@@ -387,6 +391,7 @@ async def chat_page(request: Request) -> HTMLResponse:
     response = templates.TemplateResponse(request, "chat.html", {
         "username": user,
         "messages": history,
+        "is_admin": fritz_utils.is_admin(user),
     })
     _set_chat_cookie(response, user)
     return response
@@ -433,6 +438,8 @@ async def chat_send(request: Request) -> Response:
     # Run the synchronous agent in a worker thread so the event loop is free.
     loop = asyncio.get_running_loop()
     schedule_manager = _schedule_manager_from_request(request)
+    pending_images = _drain_pending_images(user)
+    source = MessageSource.DISCORD_TEXT_AND_IMAGE if pending_images else MessageSource.LOCAL
 
     def _invoke_agent() -> dict:
         # Lazy import — keeps admin_panel importable without pulling the LLM
@@ -440,8 +447,9 @@ async def chat_send(request: Request) -> Response:
         from mister_fritz import ask_stuff
         return ask_stuff(
             message,
-            MessageSource.LOCAL,
+            source,
             user,
+            user_image_paths=pending_images or None,
             schedule_manager=schedule_manager,
         )
 
@@ -449,7 +457,8 @@ async def chat_send(request: Request) -> Response:
         response_data = await loop.run_in_executor(None, _invoke_agent)
     except Exception as e:
         logger.exception("Chat send failed for %s", user)
-        audit_log("chat_message", user_id=user, chars=len(message), result="error", error=str(e))
+        audit_log("chat_message", user_id=user, chars=len(message),
+                  attached_images=len(pending_images), result="error", error=str(e))
         return templates.TemplateResponse(request, "chat.html", {
             "username": user,
             "messages": [
@@ -493,6 +502,8 @@ async def chat_stream(request: Request) -> Response:
         return Response(status_code=400, content="Empty message.")
 
     schedule_manager = _schedule_manager_from_request(request)
+    pending_images = _drain_pending_images(user)
+    source = MessageSource.DISCORD_TEXT_AND_IMAGE if pending_images else MessageSource.LOCAL
     event_queue: queue.Queue = queue.Queue()
 
     def _streaming_callback(partial_text: str) -> None:
@@ -510,15 +521,17 @@ async def chat_stream(request: Request) -> Response:
         try:
             response_data = ask_stuff(
                 message,
-                MessageSource.LOCAL,
+                source,
                 user,
                 progress_callback=_progress_callback,
                 streaming_callback=_streaming_callback,
+                user_image_paths=pending_images or None,
                 schedule_manager=schedule_manager,
             )
             reply = response_data.get("text") if isinstance(response_data, dict) else str(response_data)
             image_paths = response_data.get("image_paths", []) if isinstance(response_data, dict) else []
             audit_log("chat_message", user_id=user, chars=len(message),
+                      attached_images=len(pending_images),
                       result="ok", reply_chars=len(reply or ""), streamed=True)
             # The 'done' frame carries both the raw text and the rendered HTML
             # so the client doesn't have to ship a markdown parser. Image paths
@@ -633,6 +646,143 @@ async def chat_forget(request: Request) -> Response:
     return RedirectResponse(url="/chat", status_code=303)
 
 
+# ── Phase web-chat-4: file uploads ───────────────────────────────────────────
+# Pending-image registry: maps username → list of absolute paths attached to
+# the user's next chat message. Single-process, in-memory — fine for the local
+# admin/chat panel deployment model.
+_pending_images: dict[str, list[str]] = {}
+_pending_images_lock = threading.Lock()
+
+
+def _stash_pending_image(user_id: str, path: str) -> None:
+    with _pending_images_lock:
+        _pending_images.setdefault(user_id, []).append(path)
+
+
+def _drain_pending_images(user_id: str) -> list[str]:
+    with _pending_images_lock:
+        return _pending_images.pop(user_id, [])
+
+
+def _safe_filename(name: str) -> str:
+    """Strip path separators and exotic punctuation from an uploaded filename.
+    Keeps the extension; replaces unsafe characters with underscores."""
+    base = os.path.basename(name or "upload")
+    stem, dot, ext = base.rpartition(".")
+    safe_stem = re.sub(r"[^a-zA-Z0-9._-]", "_", stem if stem else base)[:80]
+    safe_ext = re.sub(r"[^a-zA-Z0-9]", "", ext)[:8] if dot else ""
+    return f"{safe_stem}.{safe_ext}" if safe_ext else safe_stem
+
+
+async def chat_upload_image(request: Request) -> Response:
+    """Accept a multipart-form image, save it to ./temp_images/, and stash
+    the path in the per-user pending list. The next /chat/send or
+    /chat/stream picks it up and passes as user_image_paths to ask_stuff."""
+    user = _chat_user(request)
+    if not user:
+        return JSONResponse({"error": "not signed in"}, status_code=401)
+
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        return JSONResponse({"error": "missing file field"}, status_code=400)
+
+    content_type = (getattr(upload, "content_type", "") or "").lower()
+    if content_type not in CHAT_ALLOWED_IMAGE_TYPES:
+        audit_log("chat_upload_image", user_id=user, result="rejected_type",
+                  content_type=content_type)
+        return JSONResponse(
+            {"error": f"unsupported image type '{content_type}'"},
+            status_code=415,
+        )
+
+    raw = await upload.read()
+    if len(raw) > CHAT_IMAGE_UPLOAD_MAX_BYTES:
+        audit_log("chat_upload_image", user_id=user, result="rejected_size",
+                  bytes=len(raw), cap=CHAT_IMAGE_UPLOAD_MAX_BYTES)
+        return JSONResponse(
+            {"error": f"image exceeds {CHAT_IMAGE_UPLOAD_MAX_BYTES} byte cap"},
+            status_code=413,
+        )
+
+    os.makedirs("temp_images", exist_ok=True)
+    ts = int(time.time())
+    safe_name = _safe_filename(getattr(upload, "filename", "upload"))
+    safe_user = re.sub(r"[^a-zA-Z0-9_-]", "_", user)
+    target = os.path.abspath(os.path.join("temp_images", f"{safe_user}_{ts}_{safe_name}"))
+    with open(target, "wb") as f:
+        f.write(raw)
+
+    _stash_pending_image(user, target)
+    audit_log("chat_upload_image", user_id=user, result="ok",
+              path=target, bytes=len(raw))
+    return JSONResponse({
+        "ok": True,
+        "url": _chat_asset_url(target),
+        "name": safe_name,
+    })
+
+
+async def chat_upload_document(request: Request) -> Response:
+    """Accept a multipart-form document and drop it into DOC_FOLDER for the
+    watchdog to ingest. Admin-only — DOC_FOLDER is shared knowledge."""
+    user = _chat_user(request)
+    if not user:
+        return JSONResponse({"error": "not signed in"}, status_code=401)
+    if not fritz_utils.is_admin(user):
+        audit_log("chat_upload_document", user_id=user, result="not_admin")
+        return JSONResponse(
+            {"error": "document upload is admin-only — DOC_FOLDER is shared knowledge"},
+            status_code=403,
+        )
+
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        return JSONResponse({"error": "missing file field"}, status_code=400)
+
+    raw_name = getattr(upload, "filename", "upload")
+    safe_name = _safe_filename(raw_name)
+    # Defer to document_engine's supported extensions list.
+    try:
+        from document_engine import SUPPORTED_EXTENSIONS
+    except Exception:
+        SUPPORTED_EXTENSIONS = (".docx", ".pdf", ".xlsx", ".csv", ".txt", ".md")
+    _, dot, ext = safe_name.rpartition(".")
+    if not dot or f".{ext.lower()}" not in SUPPORTED_EXTENSIONS:
+        audit_log("chat_upload_document", user_id=user, result="bad_ext",
+                  filename=safe_name)
+        return JSONResponse(
+            {"error": f"unsupported extension; allowed: {', '.join(SUPPORTED_EXTENSIONS)}"},
+            status_code=415,
+        )
+
+    raw = await upload.read()
+    if len(raw) > CHAT_DOC_UPLOAD_MAX_BYTES:
+        audit_log("chat_upload_document", user_id=user, result="rejected_size",
+                  bytes=len(raw), cap=CHAT_DOC_UPLOAD_MAX_BYTES)
+        return JSONResponse(
+            {"error": f"document exceeds {CHAT_DOC_UPLOAD_MAX_BYTES} byte cap"},
+            status_code=413,
+        )
+
+    os.makedirs(DOC_FOLDER, exist_ok=True)
+    target = os.path.abspath(os.path.join(DOC_FOLDER, safe_name))
+    # Guard against path-escape via filename (extra belt to _safe_filename).
+    doc_root = os.path.abspath(DOC_FOLDER)
+    if not (target == doc_root or target.startswith(doc_root + os.sep)):
+        audit_log("chat_upload_document", user_id=user, result="path_escape",
+                  filename=safe_name)
+        return JSONResponse({"error": "invalid filename"}, status_code=400)
+
+    with open(target, "wb") as f:
+        f.write(raw)
+
+    audit_log("chat_upload_document", user_id=user, result="ok",
+              path=target, bytes=len(raw))
+    return JSONResponse({"ok": True, "name": safe_name})
+
+
 # ── App factory + server boot ───────────────────────────────────────────────
 
 def create_app(password: str, schedule_manager=None) -> Starlette:
@@ -663,6 +813,10 @@ def create_app(password: str, schedule_manager=None) -> Starlette:
         Route("/chat/forget", chat_forget, methods=["POST"], name="chat_forget"),
         Route("/chat/history", chat_history, name="chat_history"),
         Route("/chat/assets/{path:path}", chat_asset, name="chat_asset"),
+        Route("/chat/upload/image", chat_upload_image,
+              methods=["POST"], name="chat_upload_image"),
+        Route("/chat/upload/document", chat_upload_document,
+              methods=["POST"], name="chat_upload_document"),
     ]
     app = Starlette(
         routes=routes,

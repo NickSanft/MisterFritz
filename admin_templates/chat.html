@@ -51,6 +51,7 @@
     .chat-input-row {
         display: flex; gap: 0.5rem; margin-top: 1.5rem;
         padding-top: 1rem; border-top: 1px solid var(--border);
+        align-items: stretch;
     }
     .chat-input-row textarea {
         flex: 1; padding: 0.6rem 0.75rem; border: 1px solid var(--border);
@@ -58,6 +59,34 @@
         resize: vertical; min-height: 3rem;
     }
     .chat-input-row button { padding: 0.5rem 1.25rem; }
+    .chat-input-row .icon-btn {
+        padding: 0.4rem 0.7rem; font-size: 1rem;
+        background: #fff; border: 1px dashed var(--border);
+    }
+    .chat-input-row .icon-btn:hover { background: #f5f3ed; }
+    .chat-pending-attach {
+        display: none; margin-top: 0.5rem; padding: 0.4rem 0.6rem;
+        border: 1px solid var(--border); border-radius: 4px;
+        background: #f5f3ed; font-size: 0.85rem; color: var(--muted);
+        align-items: center; gap: 0.5rem;
+    }
+    .chat-pending-attach.active { display: flex; }
+    .chat-pending-attach img {
+        max-height: 40px; border-radius: 2px;
+    }
+    .chat-pending-attach .name { flex: 1; }
+    .chat-pending-attach button {
+        padding: 0.1rem 0.4rem; font-size: 0.75rem;
+    }
+    .chat-shell.dragover .card {
+        outline: 2px dashed var(--accent); outline-offset: -4px;
+    }
+    .chat-doc-upload {
+        margin-top: 0.75rem; padding: 0.5rem; border: 1px dashed var(--border);
+        border-radius: 4px; background: #f9f8f3; font-size: 0.85rem;
+        display: flex; gap: 0.5rem; align-items: center;
+    }
+    .chat-doc-upload label { color: var(--muted); }
     .chat-header {
         display: flex; justify-content: space-between; align-items: center;
         margin-bottom: 1rem; gap: 0.5rem;
@@ -103,11 +132,30 @@
             {% endif %}
         </div>
 
+        <div id="chat-pending-attach" class="chat-pending-attach">
+            <img id="chat-pending-img" alt="">
+            <span class="name" id="chat-pending-name"></span>
+            <button type="button" id="chat-pending-remove">Remove</button>
+        </div>
+
         <form class="chat-input-row" id="chat-form" method="post" action="/chat/send">
-            <textarea name="message" placeholder="Type a message..." required
-                      autofocus rows="2"></textarea>
+            <button type="button" class="icon-btn" id="chat-attach-btn"
+                    title="Attach an image">📎</button>
+            <input type="file" id="chat-image-input" accept="image/*"
+                   style="display: none;">
+            <textarea name="message" placeholder="Type a message... (or drop an image anywhere)"
+                      required autofocus rows="2"></textarea>
             <button type="submit">Send</button>
         </form>
+
+        {% if is_admin %}
+        <div class="chat-doc-upload">
+            <label>📚 Add to shared docs (admin):</label>
+            <input type="file" id="chat-doc-input"
+                   accept=".pdf,.docx,.xlsx,.csv,.txt,.md">
+            <span id="chat-doc-status" class="muted"></span>
+        </div>
+        {% endif %}
     </div>
 </div>
 
@@ -118,6 +166,92 @@
     const form = document.getElementById("chat-form");
     const list = document.getElementById("chat-messages");
     if (!form || !list) return;
+
+    const shell = document.querySelector(".chat-shell");
+    const attachBtn = document.getElementById("chat-attach-btn");
+    const imageInput = document.getElementById("chat-image-input");
+    const pendingRow = document.getElementById("chat-pending-attach");
+    const pendingImg = document.getElementById("chat-pending-img");
+    const pendingName = document.getElementById("chat-pending-name");
+    const pendingRemove = document.getElementById("chat-pending-remove");
+    const docInput = document.getElementById("chat-doc-input");
+    const docStatus = document.getElementById("chat-doc-status");
+
+    function clearPending() {
+        pendingRow.classList.remove("active");
+        pendingImg.src = "";
+        pendingName.textContent = "";
+    }
+
+    function uploadImage(file) {
+        if (!file) return;
+        if (!file.type.startsWith("image/")) {
+            alert("That doesn't look like an image.");
+            return;
+        }
+        const fd = new FormData();
+        fd.append("file", file);
+        fetch("/chat/upload/image", {
+            method: "POST", body: fd, credentials: "same-origin",
+        }).then(r => r.json().then(j => ({ ok: r.ok, body: j })))
+          .then(({ ok, body }) => {
+              if (!ok) {
+                  alert("Upload failed: " + (body.error || "unknown"));
+                  return;
+              }
+              pendingImg.src = body.url;
+              pendingName.textContent = body.name || "attachment";
+              pendingRow.classList.add("active");
+          })
+          .catch(err => alert("Upload failed: " + err.message));
+    }
+
+    function uploadDocument(file) {
+        if (!file || !docStatus) return;
+        docStatus.textContent = "uploading...";
+        const fd = new FormData();
+        fd.append("file", file);
+        fetch("/chat/upload/document", {
+            method: "POST", body: fd, credentials: "same-origin",
+        }).then(r => r.json().then(j => ({ ok: r.ok, body: j })))
+          .then(({ ok, body }) => {
+              docStatus.textContent = ok
+                  ? "✓ " + (body.name || "uploaded")
+                  : "✗ " + (body.error || "failed");
+              if (ok) docInput.value = "";
+          })
+          .catch(err => { docStatus.textContent = "✗ " + err.message; });
+    }
+
+    if (attachBtn) attachBtn.addEventListener("click", () => imageInput.click());
+    if (imageInput) imageInput.addEventListener("change", (e) => {
+        if (e.target.files && e.target.files[0]) uploadImage(e.target.files[0]);
+        imageInput.value = "";
+    });
+    if (pendingRemove) pendingRemove.addEventListener("click", clearPending);
+    if (docInput) docInput.addEventListener("change", (e) => {
+        if (e.target.files && e.target.files[0]) uploadDocument(e.target.files[0]);
+    });
+
+    // Drag-and-drop on the chat shell: dropping an image triggers upload.
+    if (shell) {
+        let dragDepth = 0;
+        shell.addEventListener("dragenter", (e) => {
+            e.preventDefault(); dragDepth++; shell.classList.add("dragover");
+        });
+        shell.addEventListener("dragover", (e) => e.preventDefault());
+        shell.addEventListener("dragleave", () => {
+            dragDepth = Math.max(0, dragDepth - 1);
+            if (dragDepth === 0) shell.classList.remove("dragover");
+        });
+        shell.addEventListener("drop", (e) => {
+            e.preventDefault();
+            dragDepth = 0;
+            shell.classList.remove("dragover");
+            const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+            if (file) uploadImage(file);
+        });
+    }
 
     function makeBubble(role) {
         const div = document.createElement("div");
@@ -152,10 +286,26 @@
 
         clearEmptyState();
 
-        // User bubble: plain text (no markdown).
+        // User bubble: plain text (no markdown). If there's a pending image
+        // attached, show its thumbnail in the user bubble so the user can see
+        // what they sent.
         const userBubble = makeBubble("user");
-        userBubble.querySelector(".bubble-body").textContent = message;
+        const userBody = userBubble.querySelector(".bubble-body");
+        if (pendingRow.classList.contains("active") && pendingImg.src) {
+            const img = document.createElement("img");
+            img.src = pendingImg.src;
+            img.alt = "attached image";
+            img.style.maxWidth = "200px";
+            img.style.borderRadius = "4px";
+            img.style.display = "block";
+            img.style.marginBottom = "0.5rem";
+            userBody.appendChild(img);
+        }
+        const textSpan = document.createElement("span");
+        textSpan.textContent = message;
+        userBody.appendChild(textSpan);
         list.appendChild(userBubble);
+        clearPending();
 
         // Progress lines collected here so we can remove them when 'done' lands.
         const progressLines = [];

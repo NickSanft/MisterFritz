@@ -731,5 +731,198 @@ class TestChatAssetUrlHelper(unittest.TestCase):
         self.assertIsNone(admin_panel._chat_asset_url(None))
 
 
+# ── Phase web-chat-4: file uploads ──────────────────────────────────────────
+
+# Tiny payload we claim is an image — admin_panel validates the content-type
+# header, not the actual file bytes, so this is enough for the tests.
+_TINY_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+
+
+def _drain_for_user(user: str):
+    """Clear any leftover pending image so tests can run independently."""
+    admin_panel._drain_pending_images(user)
+
+
+class TestChatUploadImage(unittest.TestCase):
+    def setUp(self):
+        _drain_for_user("alice")
+
+    def tearDown(self):
+        _drain_for_user("alice")
+        # Clean up the temp_images dir of any test artefacts.
+        if os.path.isdir("temp_images"):
+            for f in os.listdir("temp_images"):
+                if f.startswith("alice_") or f.startswith("_admin_panel_test_"):
+                    try:
+                        os.unlink(os.path.join("temp_images", f))
+                    except OSError:
+                        pass
+
+    def test_unauthed_returns_401(self):
+        client = _build_client()
+        r = client.post("/chat/upload/image",
+                        files={"file": ("a.png", _TINY_PNG, "image/png")})
+        self.assertEqual(r.status_code, 401)
+
+    def test_happy_path_saves_file_and_stashes_pending(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+        with patch.object(admin_panel, "audit_log"):
+            r = client.post(
+                "/chat/upload/image",
+                files={"file": ("photo.png", _TINY_PNG, "image/png")},
+            )
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertTrue(body["ok"])
+        self.assertIsNotNone(body["url"])
+        # The pending dict has an entry for alice now.
+        with admin_panel._pending_images_lock:
+            pending = list(admin_panel._pending_images.get("alice", []))
+        self.assertEqual(len(pending), 1)
+        self.assertTrue(os.path.isfile(pending[0]))
+
+    def test_rejects_unsupported_content_type(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+        with patch.object(admin_panel, "audit_log"):
+            r = client.post(
+                "/chat/upload/image",
+                files={"file": ("a.svg", b"<svg/>", "image/svg+xml")},
+            )
+        self.assertEqual(r.status_code, 415)
+
+    def test_rejects_oversized_image(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+        with patch.object(admin_panel, "CHAT_IMAGE_UPLOAD_MAX_BYTES", 32), \
+             patch.object(admin_panel, "audit_log"):
+            r = client.post(
+                "/chat/upload/image",
+                files={"file": ("a.png", _TINY_PNG, "image/png")},
+            )
+        self.assertEqual(r.status_code, 413)
+
+    def test_missing_file_field_returns_400(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+        r = client.post("/chat/upload/image", data={"not_file": "x"})
+        self.assertEqual(r.status_code, 400)
+
+
+class TestChatUploadDocument(unittest.TestCase):
+    def setUp(self):
+        # Pretend "alice" is an admin for the admin-gated tests.
+        self._patch = patch.object(admin_panel.fritz_utils, "is_admin",
+                                    side_effect=lambda u: u == "alice")
+        self._patch.start()
+        # Use a temp DOC_FOLDER so test files don't pollute the real one.
+        self.tmp_doc_dir = tempfile.mkdtemp()
+        self._doc_patch = patch.object(admin_panel, "DOC_FOLDER", self.tmp_doc_dir)
+        self._doc_patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+        self._doc_patch.stop()
+
+    def test_unauthed_returns_401(self):
+        client = _build_client()
+        r = client.post("/chat/upload/document",
+                        files={"file": ("notes.md", b"# hi", "text/markdown")})
+        self.assertEqual(r.status_code, 401)
+
+    def test_non_admin_returns_403(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "bob"})  # not "alice"
+        with patch.object(admin_panel, "audit_log"):
+            r = client.post(
+                "/chat/upload/document",
+                files={"file": ("notes.md", b"# hi", "text/markdown")},
+            )
+        self.assertEqual(r.status_code, 403)
+
+    def test_admin_happy_path_writes_to_doc_folder(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+        with patch.object(admin_panel, "audit_log"):
+            r = client.post(
+                "/chat/upload/document",
+                files={"file": ("notes.md", b"# hi from alice", "text/markdown")},
+            )
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["ok"])
+        # Verify the file was written into the (patched) DOC_FOLDER.
+        written = os.path.join(self.tmp_doc_dir, "notes.md")
+        self.assertTrue(os.path.isfile(written))
+
+    def test_admin_rejected_for_bad_extension(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+        with patch.object(admin_panel, "audit_log"):
+            r = client.post(
+                "/chat/upload/document",
+                files={"file": ("malware.exe", b"MZ\x90\x00", "application/octet-stream")},
+            )
+        self.assertEqual(r.status_code, 415)
+
+
+class TestPendingImagePlumbing(unittest.TestCase):
+    def setUp(self):
+        _drain_for_user("alice")
+
+    def tearDown(self):
+        _drain_for_user("alice")
+
+    def test_send_picks_up_pending_image_and_clears(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+        admin_panel._stash_pending_image("alice", "/tmp/fake-img.png")
+
+        captured = {}
+
+        def fake_ask_stuff(message, source, user, *,
+                          user_image_paths=None, **_):
+            captured["source"] = source
+            captured["images"] = user_image_paths
+            return {"text": "ok", "image_paths": [], "timestamp": "now"}
+
+        fake_module = MagicMock()
+        fake_module.ask_stuff = fake_ask_stuff
+        with patch.dict(sys.modules, {"mister_fritz": fake_module}), \
+             patch.object(admin_panel, "audit_log"):
+            client.post("/chat/send", data={"message": "look at this"})
+
+        # ask_stuff received the stashed image path.
+        self.assertEqual(captured["images"], ["/tmp/fake-img.png"])
+        # Compare by enum name, not identity — other tests in the suite
+        # (test_workspace_store) reload fritz_utils, which creates a new
+        # MessageSource class that won't `==` the one admin_panel captured.
+        self.assertEqual(captured["source"].name, "DISCORD_TEXT_AND_IMAGE")
+        # The pending registry is empty after consumption.
+        with admin_panel._pending_images_lock:
+            self.assertNotIn("alice", admin_panel._pending_images)
+
+    def test_send_without_pending_uses_local_source(self):
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+
+        captured = {}
+
+        def fake_ask_stuff(message, source, user, *,
+                          user_image_paths=None, **_):
+            captured["source"] = source
+            captured["images"] = user_image_paths
+            return {"text": "ok", "image_paths": [], "timestamp": "now"}
+
+        fake_module = MagicMock()
+        fake_module.ask_stuff = fake_ask_stuff
+        with patch.dict(sys.modules, {"mister_fritz": fake_module}), \
+             patch.object(admin_panel, "audit_log"):
+            client.post("/chat/send", data={"message": "just text"})
+
+        self.assertIsNone(captured["images"])
+        self.assertEqual(captured["source"].name, "LOCAL")
+
+
 if __name__ == "__main__":
     unittest.main()
