@@ -309,6 +309,54 @@ If `ADMIN_PANEL_PASSWORD` is unset the panel doesn't start at all.
 
 ---
 
+## Chat UI
+
+Talk to Fritz from a browser at **`http://127.0.0.1:8001/chat`** — no Discord required. It runs on the same server as the admin panel, but with its own identity model: cookie-based, no password.
+
+### Getting in
+
+Open `/chat`, pick a username, start chatting. Use the **same Discord username** you normally use and you'll continue the same conversation thread — the web UI and Discord share the LangGraph conversation state, so a topic you start in Discord can be continued in the browser and vice versa.
+
+> **Trust model.** The chat surface deliberately has no password — anyone who can reach the port can claim any username. It's meant for "you and your friends on a port-forwarded local network," not the public internet. The username only namespaces memories, schedules, and conversation history; it is not authentication. If you need real auth, keep the port bound to localhost (the default) and tunnel over SSH.
+
+The identity cookie is HMAC-signed (so it can't be tampered to impersonate another user mid-session), `httponly`, `SameSite=Lax`, and rolls forward a 30-day expiry on every visit. The signing secret comes from `CHAT_COOKIE_SECRET`; if unset, one is generated and saved to `.chat_cookie_secret` (gitignored) on first boot.
+
+### What it does
+
+| Feature | Notes |
+|---|---|
+| **Streaming responses** | Fritz's reply appears token-by-token via Server-Sent Events, with a blinking cursor while he writes. |
+| **Markdown rendering** | Code blocks, tables, lists, bold/italic all render. Markdown is finalised when the response completes. |
+| **Tool progress** | Ephemeral italic lines ("🔍 Searching the web…", "🧠 Looking through my memories…") show what Fritz is doing, then vanish when the answer lands. |
+| **Conversation history** | The page hydrates with your last 40 messages on load, so a refresh doesn't lose context. |
+| **New conversation** | A header button resets just this thread's context (calls `forget_conversation`). Your memories and schedules are untouched. |
+| **Image analysis** | Drag an image anywhere onto the chat, or click 📎, then send a message — Fritz analyses it with the vision model. |
+| **Inline images** | Images Fritz generates render directly in his reply bubble. |
+| **Document upload** *(admin only)* | Admins get a "Add to shared docs" control that drops a file into `DOC_FOLDER`; the watchdog auto-indexes it for `/lore` and `search_documents`. |
+
+No JavaScript? The message form still works — it falls back to a synchronous submit-and-render (you just don't get streaming).
+
+### Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `CHAT_COOKIE_SECRET` | auto-generated | HMAC secret for the identity cookie. Set this explicitly if you run multiple instances or want stable cookies across redeploys. |
+| `CHAT_IMAGE_UPLOAD_MAX_BYTES` | `10485760` (10 MB) | Max size for an uploaded image. |
+| `CHAT_DOC_UPLOAD_MAX_BYTES` | `10485760` (10 MB) | Max size for an admin document upload. |
+
+Image uploads accept JPEG / PNG / WEBP / GIF only. Document uploads accept the same extensions as the RAG engine (`.pdf`, `.docx`, `.xlsx`, `.csv`, `.txt`, `.md`). Every chat turn and every upload is written to `AUDIT_LOG_PATH` (`chat_message`, `chat_upload_image`, `chat_upload_document`, `chat_login`/`chat_logout` events).
+
+### Remote access
+
+Bound to `127.0.0.1` like the admin panel. To reach it from another machine, SSH-forward the port rather than exposing it:
+
+```bash
+ssh -L 8001:127.0.0.1:8001 you@your-bot-host
+# then open http://127.0.0.1:8001/chat locally
+```
+
+---
+
 ## Local DevOps Simulation
 
 Simulate the full canary deployment pipeline **without a Discord token or cloud cluster** using Docker Compose and synthetic traffic:
