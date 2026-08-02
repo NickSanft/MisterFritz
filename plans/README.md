@@ -4,6 +4,8 @@ _August 2026. Produced by an 11-agent planning workflow: one planner per item â€
 
 Every file:line reference was verified against the working tree at plan time. Where a planner found the earlier audit wrong, the correction is recorded in that item's **Current state** section.
 
+> **[DECISIONS.md](DECISIONS.md) records the answers to every open question these plans raised, and overrides the plan text where the two disagree.** Read it alongside this file. Most consequentially: plan mode is being deleted outright, which amends plans 01, 03 and 08.
+
 ## Contents
 
 1. [Feed conversation history to the executor](01-history-window.md) â€” M (half day), depends on nothing
