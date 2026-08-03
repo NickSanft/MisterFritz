@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=EB+Garamond:ital,wght@0,400;0,500;1,400&family=JetBrains+Mono:ital,wght@0,400;0,500;0,700;1,400&display=swap" rel="stylesheet" />
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #0b0710; }
+  * { box-sizing: border-box; }
+  a { color: #b79ce0; }
+  a:hover { color: #d8c7f0; }
+  ::selection { background: rgba(147, 100, 210, 0.35); color: #f0e9fa; }
+  ::-webkit-scrollbar { width: 10px; }
+  ::-webkit-scrollbar-track { background: #0b0710; }
+  ::-webkit-scrollbar-thumb { background: #2c2140; border: 2px solid #0b0710; }
+  ::-webkit-scrollbar-thumb:hover { background: #3d2e58; }
+  @keyframes candleFlicker {
+    0%, 100% { opacity: 0.55; } 8% { opacity: 0.68; } 22% { opacity: 0.5; }
+    36% { opacity: 0.72; } 51% { opacity: 0.58; } 67% { opacity: 0.75; } 84% { opacity: 0.52; }
+  }
+  @keyframes scanDrift { 0% { background-position: 0 0; } 100% { background-position: 0 128px; } }
+  @keyframes quillBlink { 0%, 45% { opacity: 1; } 50%, 95% { opacity: 0; } 100% { opacity: 1; } }
+  @keyframes sealPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(147, 100, 210, 0.35), 0 0 18px rgba(147, 100, 210, 0.25); }
+    50% { box-shadow: 0 0 0 5px rgba(147, 100, 210, 0.08), 0 0 26px rgba(147, 100, 210, 0.45); }
+  }
+  @keyframes glitchShiftA {
+    0%, 91%, 100% { transform: none; clip-path: none; opacity: 1; }
+    92% { transform: translate(-2px, 1px); clip-path: inset(12% 0 61% 0); opacity: 0.85; }
+    94% { transform: translate(2px, -1px); clip-path: inset(55% 0 18% 0); opacity: 0.9; }
+    96% { transform: translate(-1px, 0); clip-path: inset(30% 0 42% 0); opacity: 0.85; }
+    98% { transform: none; clip-path: none; opacity: 1; }
+  }
+  @keyframes prismSweep { 0% { transform: translateX(-130%) skewX(-18deg); } 100% { transform: translateX(430%) skewX(-18deg); } }
+  @keyframes noticeIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+  @keyframes msgIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  @keyframes veilIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes cardIn { from { opacity: 0; transform: translateY(14px) scale(0.98); } to { opacity: 1; transform: none; } }
+  .fritz-md p { margin: 0 0 0.85em 0; }
+  .fritz-md p:last-child { margin-bottom: 0; }
+  .fritz-md em { color: #cdb9ea; }
+  .fritz-md strong { color: #f0e9fa; font-weight: 600; }
+  .fritz-md code { font-family: "JetBrains Mono", monospace; font-size: 0.82em; background: rgba(147, 100, 210, 0.12); border: 1px solid rgba(147, 100, 210, 0.22); padding: 0.1em 0.4em; color: #d8c7f0; }
+  .fritz-md .cite { color: #8d7fa8; font-style: italic; }
+  .hl-kw { color: #c792ea; } .hl-str { color: #b8a1e3; } .hl-fn { color: #e0cff5; }
+  .hl-cm { color: #64578a; font-style: italic; } .hl-num { color: #d4b8f0; } .hl-op { color: #9d8bc0; }
+</style>
+</helmet>
+<div style="position: fixed; inset: 0; display: flex; flex-direction: column; background: radial-gradient(ellipse 120% 90% at 50% -20%, #1a1128 0%, #0e0916 48%, #0b0710 100%); color: #d5cbe5; font-family: 'EB Garamond', Georgia, serif; font-size: 17px; overflow: hidden;">
+  <sc-if value="{{ showScanLines }}" hint-placeholder-val="{{ true }}">
+    <div style="position: absolute; inset: 0; pointer-events: none; z-index: 6; background: repeating-linear-gradient(0deg, rgba(11, 7, 16, 0) 0px, rgba(11, 7, 16, 0) 3px, rgba(20, 10, 34, 0.14) 4px); animation: scanDrift 9s linear infinite; mix-blend-mode: overlay;"></div>
+  </sc-if>
+  <sc-if value="{{ showCandleGlow }}" hint-placeholder-val="{{ true }}">
+    <div style="position: absolute; left: 50%; top: -140px; width: 720px; height: 420px; margin-left: -360px; pointer-events: none; z-index: 1; background: radial-gradient(ellipse at center, rgba(150, 105, 215, 0.16) 0%, rgba(150, 105, 215, 0) 65%); animation: candleFlicker 7s ease-in-out infinite;"></div>
+  </sc-if>
+
+  <header style="position: relative; z-index: 8; flex: 0 0 auto; display: flex; align-items: center; gap: 18px; padding: 14px 26px; border-bottom: 1px solid rgba(147, 100, 210, 0.22); background: linear-gradient(180deg, rgba(24, 15, 38, 0.85), rgba(15, 10, 24, 0.65)); backdrop-filter: blur(8px);">
+    <div style="position: relative; width: 44px; height: 44px; flex: 0 0 auto; display: grid; place-items: center; background: linear-gradient(135deg, #241638, #120b1e); border: 1px solid rgba(147, 100, 210, 0.45); clip-path: polygon(50% 0%, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%); animation: sealPulse 5s ease-in-out infinite;">
+      <span style="font-family: 'Cormorant Garamond', serif; font-weight: 700; font-size: 24px; color: #d8c7f0; line-height: 1;">F</span>
+    </div>
+    <div style="flex: 1 1 auto; min-width: 0;">
+      <div style="display: flex; align-items: baseline; gap: 12px;">
+        <h1 style="position: relative; margin: 0; font-family: 'Cormorant Garamond', serif; font-weight: 600; font-size: 26px; letter-spacing: 0.06em; color: #f0e9fa; {{ titleGlitchStyle }}">Mister Fritz</h1>
+        <span style="font-family: 'JetBrains Mono', monospace; font-size: 10.5px; letter-spacing: 0.22em; text-transform: uppercase; color: #6f5f92;">est. MMXXIV — the household model</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px; margin-top: 2px;">
+        <span style="width: 7px; height: 7px; background: {{ presenceColor }}; clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%); box-shadow: 0 0 8px {{ presenceColor }};"></span>
+        <span style="font-size: 13.5px; font-style: italic; color: #9d8bc0;">{{ presenceLabel }}</span>
+      </div>
+    </div>
+    <button onClick="{{ requestNewConversation }}" style="flex: 0 0 auto; display: flex; align-items: center; gap: 9px; padding: 9px 18px; background: transparent; border: 1px solid rgba(147, 100, 210, 0.4); color: #cdb9ea; font-family: 'Cormorant Garamond', serif; font-size: 16px; letter-spacing: 0.08em; cursor: pointer; clip-path: polygon(10px 0%, 100% 0%, calc(100% - 10px) 100%, 0% 100%); transition: all 0.25s ease;" style-hover="background: rgba(147, 100, 210, 0.14); border-color: rgba(180, 140, 235, 0.7); color: #f0e9fa;">
+      <span style="font-size: 18px; line-height: 1;">✦</span> New conversation
+    </button>
+  </header>
+
+  <sc-if value="{{ notice }}" hint-placeholder-val="{{ false }}">
+    <div style="position: relative; z-index: 8; flex: 0 0 auto; display: flex; align-items: center; gap: 12px; margin: 12px 26px 0; padding: 10px 16px; background: {{ noticeBg }}; border: 1px solid {{ noticeBorder }}; border-left-width: 3px; animation: noticeIn 0.3s ease; font-size: 15px;">
+      <span style="font-family: 'Cormorant Garamond', serif; font-weight: 700; font-size: 17px; color: {{ noticeAccent }};">{{ noticeGlyph }}</span>
+      <span style="flex: 1; font-style: italic; color: #cdb9ea;">{{ notice }}</span>
+      <button onClick="{{ dismissNotice }}" style="background: none; border: none; color: #6f5f92; font-size: 18px; cursor: pointer; padding: 0 4px; line-height: 1;" style-hover="color: #d8c7f0;">×</button>
+    </div>
+  </sc-if>
+
+  <main ref="{{ scrollRef }}" style="position: relative; z-index: 7; flex: 1 1 auto; overflow-y: auto; padding: 30px 26px 20px;">
+    <div style="max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 26px;">
+
+      <sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
+        <div style="display: flex; flex-direction: column; align-items: center; text-align: center; padding: 60px 20px 40px; animation: msgIn 0.5s ease;">
+          <div style="position: relative; width: 92px; height: 92px; display: grid; place-items: center; background: linear-gradient(135deg, #241638, #100a1b); border: 1px solid rgba(147, 100, 210, 0.5); clip-path: polygon(50% 0%, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%); animation: sealPulse 5s ease-in-out infinite;">
+            <span style="font-family: 'Cormorant Garamond', serif; font-weight: 700; font-size: 52px; color: #d8c7f0;">F</span>
+          </div>
+          <h2 style="margin: 26px 0 0; font-family: 'Cormorant Garamond', serif; font-weight: 600; font-size: 34px; letter-spacing: 0.04em; color: #f0e9fa;">The study is lit. The ledger is open.</h2>
+          <p style="margin: 10px 0 0; max-width: 520px; font-style: italic; font-size: 17px; color: #9d8bc0; line-height: 1.6;">You have reached the desk of Mister Fritz — butler, archivist, and keeper of this machine's more troublesome daemons. Speak, and it shall be transcribed.</p>
+          <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 30px;">
+            <sc-for list="{{ suggestions }}" as="sug" hint-placeholder-count="3">
+              <button onClick="{{ sug.use }}" style="padding: 10px 18px; background: rgba(147, 100, 210, 0.07); border: 1px solid rgba(147, 100, 210, 0.3); color: #cdb9ea; font-family: 'EB Garamond', serif; font-size: 15.5px; font-style: italic; cursor: pointer; clip-path: polygon(8px 0%, 100% 0%, calc(100% - 8px) 100%, 0% 100%); transition: all 0.25s ease;" style-hover="background: rgba(147, 100, 210, 0.16); border-color: rgba(180, 140, 235, 0.6); color: #f0e9fa;">{{ sug.label }}</button>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-for list="{{ messages }}" as="msg" hint-placeholder-count="0">
+        <div style="{{ msg.rowStyle }}">
+          <sc-if value="{{ msg.isFritz }}" hint-placeholder-val="{{ false }}">
+            <div style="flex: 0 0 auto; width: 34px; height: 34px; display: grid; place-items: center; margin-top: 2px; background: linear-gradient(135deg, #241638, #120b1e); border: 1px solid rgba(147, 100, 210, 0.45); clip-path: polygon(50% 0%, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%);">
+              <span style="font-family: 'Cormorant Garamond', serif; font-weight: 700; font-size: 18px; color: #d8c7f0;">F</span>
+            </div>
+          </sc-if>
+          <div style="{{ msg.bubbleStyle }}">
+            <div style="display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px;">
+              <span style="font-family: 'Cormorant Garamond', serif; font-weight: 600; font-size: 15px; letter-spacing: 0.12em; text-transform: uppercase; color: {{ msg.nameColor }};">{{ msg.speaker }}</span>
+              <span style="font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.1em; color: #574a75;">{{ msg.time }}</span>
+            </div>
+            <sc-if value="{{ msg.image }}" hint-placeholder-val="{{ false }}">
+              <div style="margin: 4px 0 10px; padding: 8px; background: rgba(11, 7, 16, 0.6); border: 1px solid rgba(147, 100, 210, 0.3); max-width: 340px;">
+                <div style="{{ msg.imageStyle }}"></div>
+                <div style="display: flex; justify-content: space-between; align-items: baseline; margin-top: 7px; padding: 0 2px;">
+                  <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #9d8bc0;">{{ msg.imageName }}</span>
+                  <span style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #574a75;">{{ msg.imageMeta }}</span>
+                </div>
+              </div>
+            </sc-if>
+            <div class="fritz-md" style="line-height: 1.65; color: {{ msg.textColor }};">{{ msg.body }}</div>
+            <sc-if value="{{ msg.code }}" hint-placeholder-val="{{ false }}">
+              <div style="margin-top: 12px; border: 1px solid rgba(147, 100, 210, 0.32); background: linear-gradient(180deg, rgba(9, 6, 14, 0.92), rgba(13, 8, 22, 0.92)); overflow: hidden;">
+                <div style="display: flex; align-items: center; justify-content: space-between; padding: 7px 12px; border-bottom: 1px solid rgba(147, 100, 210, 0.22); background: rgba(147, 100, 210, 0.07);">
+                  <span style="display: flex; align-items: center; gap: 8px; font-family: 'JetBrains Mono', monospace; font-size: 10.5px; letter-spacing: 0.18em; text-transform: uppercase; color: #8d7fa8;">
+                    <span style="width: 6px; height: 6px; background: #9364d2; clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);"></span>{{ msg.codeLang }}
+                  </span>
+                  <button onClick="{{ msg.copyCode }}" style="display: flex; align-items: center; gap: 6px; padding: 3px 10px; background: transparent; border: 1px solid rgba(147, 100, 210, 0.35); color: #9d8bc0; font-family: 'JetBrains Mono', monospace; font-size: 10.5px; letter-spacing: 0.1em; cursor: pointer; transition: all 0.2s ease;" style-hover="color: #e8ddf7; border-color: rgba(180, 140, 235, 0.7); background: rgba(147, 100, 210, 0.12);">{{ msg.copyLabel }}</button>
+                </div>
+                <pre style="margin: 0; padding: 14px 16px; overflow-x: auto; font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.6; color: #c9bce0;"><code>{{ msg.codeEl }}</code></pre>
+              </div>
+            </sc-if>
+            <sc-if value="{{ msg.streaming }}" hint-placeholder-val="{{ false }}">
+              <span style="display: inline-block; width: 9px; height: 18px; margin-left: 3px; vertical-align: text-bottom; background: linear-gradient(180deg, #b48ceb, #7a4fc0); animation: quillBlink 1.1s infinite;"></span>
+            </sc-if>
+          </div>
+        </div>
+      </sc-for>
+
+      <sc-if value="{{ statusLine }}" hint-placeholder-val="{{ false }}">
+        <div style="display: flex; align-items: center; gap: 12px; padding: 2px 4px 2px 46px; animation: msgIn 0.3s ease;">
+          <span style="position: relative; overflow: hidden; display: inline-flex; align-items: center; gap: 10px; padding: 7px 16px; border: 1px solid rgba(147, 100, 210, 0.3); background: rgba(147, 100, 210, 0.06); clip-path: polygon(9px 0%, 100% 0%, calc(100% - 9px) 100%, 0% 100%);">
+            <span style="position: absolute; top: 0; bottom: 0; left: 0; width: 34%; background: linear-gradient(90deg, transparent, rgba(190, 150, 245, 0.14), transparent); animation: prismSweep 2.2s ease-in-out infinite;"></span>
+            <span style="font-size: 14.5px; font-style: italic; color: #9d8bc0;">{{ statusLine }}</span>
+          </span>
+          <button onClick="{{ stopStream }}" style="display: flex; align-items: center; gap: 7px; padding: 6px 14px; background: rgba(178, 82, 102, 0.08); border: 1px solid rgba(198, 106, 126, 0.45); color: #d89aac; font-family: 'Cormorant Garamond', serif; font-size: 15px; letter-spacing: 0.1em; cursor: pointer; clip-path: polygon(8px 0%, 100% 0%, calc(100% - 8px) 100%, 0% 100%); transition: all 0.2s ease;" style-hover="background: rgba(178, 82, 102, 0.2); color: #f0c2cf;">
+            <span style="width: 8px; height: 8px; background: currentColor;"></span> Enough
+          </button>
+        </div>
+      </sc-if>
+    </div>
+  </main>
+
+  <footer style="position: relative; z-index: 8; flex: 0 0 auto; padding: 14px 26px 18px; border-top: 1px solid rgba(147, 100, 210, 0.22); background: linear-gradient(0deg, rgba(24, 15, 38, 0.9), rgba(15, 10, 24, 0.7)); backdrop-filter: blur(8px);">
+    <div style="max-width: 860px; margin: 0 auto;">
+      <sc-if value="{{ attachment }}" hint-placeholder-val="{{ false }}">
+        <div style="display: inline-flex; align-items: center; gap: 10px; margin-bottom: 10px; padding: 6px 12px; background: rgba(147, 100, 210, 0.08); border: 1px solid rgba(147, 100, 210, 0.35); animation: noticeIn 0.25s ease;">
+          <span style="width: 22px; height: 22px; background: linear-gradient(135deg, #3d2e58, #241638); border: 1px solid rgba(147, 100, 210, 0.4); clip-path: polygon(50% 0%, 100% 38%, 82% 100%, 18% 100%, 0% 38%);"></span>
+          <span style="font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: #cdb9ea;">{{ attachment }}</span>
+          <button onClick="{{ removeAttachment }}" style="background: none; border: none; color: #6f5f92; font-size: 16px; cursor: pointer; padding: 0 2px; line-height: 1;" style-hover="color: #d8c7f0;">×</button>
+        </div>
+      </sc-if>
+      <div style="display: flex; align-items: flex-end; gap: 12px;">
+        <button onClick="{{ attachImage }}" title="Present an image to Fritz" style="flex: 0 0 auto; width: 46px; height: 46px; display: grid; place-items: center; background: rgba(147, 100, 210, 0.06); border: 1px solid rgba(147, 100, 210, 0.35); color: #9d8bc0; font-size: 19px; cursor: pointer; clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%); transition: all 0.25s ease;" style-hover="background: rgba(147, 100, 210, 0.16); color: #e8ddf7; border-color: rgba(180, 140, 235, 0.6);">✧</button>
+        <div style="flex: 1; position: relative;">
+          <textarea ref="{{ inputRef }}" value="{{ draft }}" onChange="{{ onDraft }}" onKeyDown="{{ onKey }}" rows="1" placeholder="Address the butler…" style="width: 100%; resize: none; padding: 13px 16px; background: rgba(11, 7, 16, 0.75); border: 1px solid rgba(147, 100, 210, 0.35); color: #e8ddf7; font-family: 'EB Garamond', serif; font-size: 16.5px; line-height: 1.5; outline: none; min-height: 46px; max-height: 150px; transition: border-color 0.25s ease, box-shadow 0.25s ease;" style-focus="border-color: rgba(180, 140, 235, 0.75); box-shadow: 0 0 0 1px rgba(180, 140, 235, 0.35), 0 0 22px rgba(147, 100, 210, 0.15);"></textarea>
+        </div>
+        <button onClick="{{ send }}" style="flex: 0 0 auto; display: flex; align-items: center; gap: 9px; height: 46px; padding: 0 22px; background: linear-gradient(135deg, #4b2f78, #33205a); border: 1px solid rgba(180, 140, 235, 0.55); color: #eee6f9; font-family: 'Cormorant Garamond', serif; font-weight: 600; font-size: 17px; letter-spacing: 0.12em; cursor: pointer; clip-path: polygon(12px 0%, 100% 0%, calc(100% - 12px) 100%, 0% 100%); transition: all 0.25s ease;" style-hover="background: linear-gradient(135deg, #5d3b96, #41296f); box-shadow: 0 0 24px rgba(147, 100, 210, 0.35);">
+          Dispatch <span style="font-size: 14px;">❖</span>
+        </button>
+      </div>
+      <div style="display: flex; justify-content: space-between; margin-top: 8px; padding: 0 2px;">
+        <span style="font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.14em; color: #574a75;">ENTER TO DISPATCH · SHIFT+ENTER FOR A NEW LINE</span>
+        <span style="font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.14em; color: #574a75;">CANDLE NO. 7 STILL BURNING</span>
+      </div>
+    </div>
+  </footer>
+
+  <sc-if value="{{ confirmOpen }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ cancelNew }}" style="position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; background: rgba(6, 4, 10, 0.72); backdrop-filter: blur(4px); animation: veilIn 0.25s ease;">
+      <div onClick="{{ swallow }}" style="position: relative; width: min(480px, calc(100vw - 48px)); padding: 34px 36px 30px; background: linear-gradient(160deg, #1c1230, #100a1b); border: 1px solid rgba(147, 100, 210, 0.5); clip-path: polygon(24px 0%, 100% 0%, 100% calc(100% - 24px), calc(100% - 24px) 100%, 0% 100%, 0% 24px); animation: cardIn 0.3s ease;">
+        <div style="width: 46px; height: 46px; display: grid; place-items: center; margin-bottom: 18px; background: rgba(178, 82, 102, 0.1); border: 1px solid rgba(198, 106, 126, 0.5); clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);">
+          <span style="font-family: 'Cormorant Garamond', serif; font-weight: 700; font-size: 22px; color: #d89aac;">!</span>
+        </div>
+        <h3 style="margin: 0 0 10px; font-family: 'Cormorant Garamond', serif; font-weight: 600; font-size: 26px; letter-spacing: 0.03em; color: #f0e9fa;">Burn the correspondence?</h3>
+        <p style="margin: 0 0 26px; font-style: italic; font-size: 16px; line-height: 1.6; color: #9d8bc0;">The present conversation shall be committed to the fire — every word, every confession. The ashes cannot be reassembled, sir. Fritz has tried.</p>
+        <div style="display: flex; justify-content: flex-end; gap: 12px;">
+          <button onClick="{{ cancelNew }}" style="padding: 10px 20px; background: transparent; border: 1px solid rgba(147, 100, 210, 0.4); color: #cdb9ea; font-family: 'Cormorant Garamond', serif; font-size: 16px; letter-spacing: 0.08em; cursor: pointer; clip-path: polygon(9px 0%, 100% 0%, calc(100% - 9px) 100%, 0% 100%); transition: all 0.2s ease;" style-hover="background: rgba(147, 100, 210, 0.12); color: #f0e9fa;">Spare it</button>
+          <button onClick="{{ confirmNew }}" style="padding: 10px 22px; background: linear-gradient(135deg, #7c3350, #5a2138); border: 1px solid rgba(198, 106, 126, 0.6); color: #f5dee6; font-family: 'Cormorant Garamond', serif; font-weight: 600; font-size: 16px; letter-spacing: 0.1em; cursor: pointer; clip-path: polygon(9px 0%, 100% 0%, calc(100% - 9px) 100%, 0% 100%); transition: all 0.2s ease;" style-hover="background: linear-gradient(135deg, #96405f, #6e2a45); box-shadow: 0 0 20px rgba(178, 82, 102, 0.35);">Into the fire</button>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;glitchIntensity&quot;: {&quot;editor&quot;: &quot;enum&quot;, &quot;options&quot;: [&quot;subtle&quot;, &quot;off&quot;, &quot;heavy&quot;], &quot;default&quot;: &quot;subtle&quot;, &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Atmosphere&quot;}, &quot;candleGlow&quot;: {&quot;editor&quot;: &quot;boolean&quot;, &quot;default&quot;: true, &quot;tsType&quot;: &quot;boolean&quot;, &quot;section&quot;: &quot;Atmosphere&quot;}, &quot;scanLines&quot;: {&quot;editor&quot;: &quot;boolean&quot;, &quot;default&quot;: true, &quot;tsType&quot;: &quot;boolean&quot;, &quot;section&quot;: &quot;Atmosphere&quot;}}">
+class Component extends DCLogic {
+  state = {
+    messages: [], draft: '', attachment: null, streaming: false, statusLine: null,
+    confirmOpen: false, notice: null, noticeKind: 'info', copied: {}, seq: 0,
+  };
+  componentDidMount() { this._timers = []; this.seedConversation(); }
+  componentWillUnmount() { (this._timers || []).forEach(clearTimeout); }
+  later(fn, ms) { const t = setTimeout(fn, ms); (this._timers = this._timers || []).push(t); return t; }
+  now() { const d = new Date(); return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+
+  push(msg) {
+    this.setState(s => ({ messages: [...s.messages, { id: 'm' + (s.seq + 1), time: this.now(), ...msg }], seq: s.seq + 1 }), () => this.scrollDown());
+  }
+  scrollDown() {
+    const el = this._scroll; if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+  }
+
+  seedConversation() {
+    this.push({ role: 'user', text: 'Fritz, the test suite keeps dirtying my git status. What is writing all these files?' });
+    this.later(() => {
+      this.push({
+        role: 'fritz',
+        text: "A most vexing poltergeist, sir, and I have cornered it. *Importing the household module itself* conjures three artifacts into whatever room one happens to be standing in — a SQLite ledger, a Chroma vault, and a diagram it insists on sketching via daemon thread. The remedy is a __conftest.py__ that banishes them to a temporary wing before any test awakens:",
+        code: {
+          lang: 'python — tests/conftest.py',
+          lines: [
+            [['cm', '# Must be top-level statements — test modules import']],
+            [['cm', '# mister_fritz at collection time, before any fixture.']],
+            [['kw', 'import'], ['pl', ' os, tempfile']],
+            [],
+            [['pl', '_SANDBOX = tempfile.mkdtemp(prefix='], ['str', '"fritz-tests-"'], ['pl', ')']],
+            [['kw', 'for'], ['pl', ' _k '], ['kw', 'in'], ['pl', ' ('], ['str', '"DB_NAME"'], ['pl', ', '], ['str', '"CHAT_DB_NAME"'], ['pl', ', '], ['str', '"SCHEDULE_DB"'], ['pl', ',']],
+            [['pl', '           '], ['str', '"CHROMA_DB_PATH"'], ['pl', '):']],
+            [['pl', '    os.environ.setdefault(_k, os.path.join(_SANDBOX, _k.lower()))']],
+          ],
+        },
+      });
+    }, 900);
+    this.later(() => {
+      this.push({ role: 'user', text: 'Perfect. Run the suite and tell me if the working tree stays clean.' });
+    }, 1800);
+    this.later(() => this.streamReply(
+      "It does, sir — *immaculately so*. *pytest* reports **214 passed** in 41.2 seconds, and `git status` returns nothing but a respectful silence. The diagram PNGs remain untouched, the stray databases are confined to `/tmp`, and I have taken the liberty of adding all three artifacts to the gitignore. The estate is in order.", null
+    ), 2600);
+  }
+
+  streamReply(fullText, code) {
+    this.setState({ streaming: true, statusLine: 'Fritz is consulting the archives…' });
+    this.later(() => { if (this.state.streaming) this.setState({ statusLine: 'Fritz is taking pen to paper…' }); }, 1400);
+    this.later(() => {
+      if (!this.state.streaming) return;
+      this.push({ role: 'fritz', text: '', streaming: true, pendingCode: code || null });
+      this._full = fullText; this._pos = 0;
+      this.tick();
+    }, 2100);
+  }
+  tick() {
+    if (!this.state.streaming) return;
+    const step = 2 + Math.floor(Math.random() * 5);
+    this._pos = Math.min(this._full.length, this._pos + step);
+    const donePart = this._full.slice(0, this._pos);
+    this.setState(s => {
+      const msgs = s.messages.slice();
+      const last = { ...msgs[msgs.length - 1], text: donePart };
+      msgs[msgs.length - 1] = last;
+      return { messages: msgs };
+    }, () => this.scrollDown());
+    if (this._pos < this._full.length) {
+      this.later(() => this.tick(), 18 + Math.random() * 45);
+    } else {
+      this.setState(s => {
+        const msgs = s.messages.slice();
+        const last = { ...msgs[msgs.length - 1] };
+        last.streaming = false;
+        if (last.pendingCode) { last.code = last.pendingCode; last.pendingCode = null; }
+        msgs[msgs.length - 1] = last;
+        return { messages: msgs, streaming: false, statusLine: null };
+      }, () => this.scrollDown());
+    }
+  }
+
+  composeReply(userText, hadImage) {
+    const t = userText.toLowerCase();
+    if (hadImage) return {
+      text: "Received and examined, sir. A screenshot, rendered at a resolution that suggests *urgency*. I note an exception dialog lurking in the lower third — shall I transcribe the traceback into the ledger and summon the relevant logs? A stack trace, like a séance, is best conducted before the trail goes cold.",
+      code: null,
+    };
+    if (t.includes('run') || t.includes('command') || t.includes('exec')) return {
+      text: "At once, sir. The command was executed within the *scrubbed environment* — no tokens, no secrets, nothing the daemons might pocket. The output, presented on a silver tray:",
+      code: { lang: 'shell — workspace', lines: [
+        [['op', '$'], ['pl', ' ruff check . --statistics']],
+        [['num', '0'], ['pl', ' errors found']],
+        [['cm', 'All checks passed. The silverware has been counted, sir.']],
+      ] },
+    };
+    if (t.includes('stream') || t.includes('token')) return {
+      text: "Indeed, sir — you are witnessing it presently. Each word arrives as it is inked rather than by *sealed envelope*. The **_DeltaEmitter** dispatches deltas the moment the model breathes them, and the household's four surfaces receive them in one atomic contract: *delta, accumulated, restart*. Most civilised.",
+      code: null,
+    };
+    if (t.includes('secret') || t.includes('token') || t.includes('env')) return {
+      text: "Sealed in the vault, sir. The execution environment is *scrubbed* before any guest command runs — `DISCORD_BOT_TOKEN` and its confidential brethren are simply not in the room. What a workspace user cannot see, a workspace user cannot print into a Discord channel.",
+      code: null,
+    };
+    return {
+      text: "Very well, sir. I have committed your instruction to the ledger and shall attend to it with the discretion this household expects. Should the matter require a heavier hand — a command executed, an archive searched, a daemon disciplined — you need only say the word.",
+      code: null,
+    };
+  }
+
+  renderVals() {
+    const S = this.state;
+    const esc = (t) => t;
+    const mdToNodes = (text, key) => {
+      const parts = [];
+      text.split(/\n\n/).forEach((para, pi) => {
+        const frag = [];
+        let rest = para, m, i = 0;
+        const rx = /(\*\*([^*]+)\*\*|\*([^*]+)\*|__([^_]+)__|`([^`]+)`)/;
+        while ((m = rx.exec(rest))) {
+          if (m.index > 0) frag.push(rest.slice(0, m.index));
+          if (m[2]) frag.push(React.createElement('strong', { key: i }, m[2]));
+          else if (m[3]) frag.push(React.createElement('em', { key: i }, m[3]));
+          else if (m[4]) frag.push(React.createElement('strong', { key: i }, m[4]));
+          else if (m[5]) frag.push(React.createElement('code', { key: i }, m[5]));
+          rest = rest.slice(m.index + m[1].length); i++;
+        }
+        if (rest) frag.push(rest);
+        parts.push(React.createElement('p', { key: key + '-p' + pi }, frag));
+      });
+      return parts;
+    };
+    const hlColors = { kw: 'hl-kw', str: 'hl-str', fn: 'hl-fn', cm: 'hl-cm', num: 'hl-num', op: 'hl-op', pl: '' };
+    const codeToNodes = (lines, key) => lines.map((line, li) =>
+      React.createElement('span', { key: key + '-l' + li },
+        line.map((tok, ti) => React.createElement('span', { key: ti, className: hlColors[tok[0]] || '' }, tok[1])),
+        '\n'
+      )
+    );
+
+    const messages = S.messages.map((m) => {
+      const isFritz = m.role === 'fritz';
+      return {
+        id: m.id, isFritz, speaker: isFritz ? 'Mister Fritz' : 'You', time: m.time,
+        rowStyle: isFritz
+          ? 'display:flex; gap:12px; animation: msgIn 0.35s ease;'
+          : 'display:flex; gap:12px; justify-content:flex-end; animation: msgIn 0.35s ease;',
+        bubbleStyle: isFritz
+          ? 'max-width: 78%; padding: 14px 18px 15px; background: linear-gradient(160deg, rgba(32,20,52,0.75), rgba(19,12,32,0.75)); border: 1px solid rgba(147,100,210,0.3); border-left: 2px solid rgba(180,140,235,0.55); clip-path: polygon(14px 0%, 100% 0%, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0% 100%, 0% 14px);'
+          : 'max-width: 72%; padding: 14px 18px 15px; background: rgba(147,100,210,0.09); border: 1px solid rgba(147,100,210,0.24); clip-path: polygon(0% 0%, calc(100% - 14px) 0%, 100% 14px, 100% 100%, 14px 100%, 0% calc(100% - 14px));',
+        nameColor: isFritz ? '#b48ceb' : '#8d7fa8',
+        textColor: isFritz ? '#d5cbe5' : '#c4b8d8',
+        body: mdToNodes(m.text || '', m.id),
+        streaming: !!m.streaming,
+        image: !!m.image,
+        imageName: m.image ? m.image.name : '',
+        imageMeta: m.image ? m.image.meta : '',
+        imageStyle: m.image ? 'height: 150px; background: ' + m.image.bg + '; border: 1px solid rgba(147,100,210,0.25);' : '',
+        code: !!m.code,
+        codeLang: m.code ? m.code.lang : '',
+        codeEl: m.code ? codeToNodes(m.code.lines, m.id) : null,
+        copyLabel: S.copied[m.id] ? '✓ Transcribed' : '⧉ Copy',
+        copyCode: () => {
+          if (m.code) {
+            const text = m.code.lines.map(l => l.map(t => t[1]).join('')).join('\n');
+            try { navigator.clipboard.writeText(text); } catch (e) {}
+            this.setState(s => ({ copied: { ...s.copied, [m.id]: true } }));
+            this.later(() => this.setState(s => ({ copied: { ...s.copied, [m.id]: false } })), 2200);
+          }
+        },
+      };
+    });
+
+    const noticeStyles = {
+      info: { bg: 'rgba(147,100,210,0.08)', border: 'rgba(147,100,210,0.4)', accent: '#b48ceb', glyph: '❦' },
+      error: { bg: 'rgba(178,82,102,0.1)', border: 'rgba(198,106,126,0.5)', accent: '#d89aac', glyph: '✕' },
+    };
+    const ns = noticeStyles[S.noticeKind] || noticeStyles.info;
+
+    const glitch = this.props.glitchIntensity ?? 'subtle';
+    return {
+      messages,
+      showScanLines: (this.props.scanLines ?? true) && glitch !== 'off',
+      showCandleGlow: this.props.candleGlow ?? true,
+      titleGlitchStyle: glitch === 'off' ? 'animation: none;' : (glitch === 'heavy' ? 'animation: glitchShiftA 2.5s steps(1) infinite;' : 'animation: glitchShiftA 8s steps(1) infinite;'),
+      isEmpty: S.messages.length === 0 && !S.streaming,
+      draft: S.draft,
+      attachment: S.attachment,
+      statusLine: S.statusLine,
+      confirmOpen: S.confirmOpen,
+      notice: S.notice,
+      noticeBg: ns.bg, noticeBorder: ns.border, noticeAccent: ns.accent, noticeGlyph: ns.glyph,
+      presenceColor: S.streaming ? '#d8b45a' : '#7fc98f',
+      presenceLabel: S.streaming ? 'Occupied — composing a reply' : 'In attendance · the candles are lit',
+      scrollRef: (el) => { this._scroll = el; },
+      inputRef: (el) => { this._input = el; },
+      suggestions: [
+        { label: '“What is dirtying my git status?”', use: () => this.useSuggestion('Fritz, the test suite keeps dirtying my git status. What is writing all these files?') },
+        { label: '“Run ruff and report back.”', use: () => this.useSuggestion('Run ruff check on the workspace and report back.') },
+        { label: '“Are my secrets safe in exec?”', use: () => this.useSuggestion('If someone runs a command in the workspace, can they read my env secrets?') },
+      ],
+      onDraft: (e) => this.setState({ draft: e.target.value }),
+      onKey: (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this.doSend(); }
+      },
+      send: () => this.doSend(),
+      attachImage: () => {
+        if (S.attachment) return;
+        this.setState({ attachment: 'traceback_screenshot.png · 412 KB' });
+      },
+      removeAttachment: () => this.setState({ attachment: null }),
+      stopStream: () => {
+        (this._timers || []).forEach(clearTimeout); this._timers = [];
+        this.setState(s => {
+          const msgs = s.messages.slice();
+          if (msgs.length && msgs[msgs.length - 1].streaming) {
+            const last = { ...msgs[msgs.length - 1], streaming: false, pendingCode: null };
+            last.text = (last.text || '') + ' —';
+            msgs[msgs.length - 1] = last;
+          }
+          return { messages: msgs, streaming: false, statusLine: null, notice: 'Very well — Fritz has set down his pen mid-sentence. The model, regrettably, mutters on in the servants\u2019 quarters.', noticeKind: 'info' };
+        });
+      },
+      requestNewConversation: () => this.setState({ confirmOpen: true }),
+      cancelNew: () => this.setState({ confirmOpen: false }),
+      swallow: (e) => e.stopPropagation(),
+      confirmNew: () => {
+        (this._timers || []).forEach(clearTimeout); this._timers = [];
+        this.setState({ messages: [], confirmOpen: false, streaming: false, statusLine: null, attachment: null, notice: 'The correspondence has been burned. A fresh ledger awaits, sir.', noticeKind: 'info' });
+        this.later(() => this.setState({ notice: null }), 4500);
+      },
+      dismissNotice: () => this.setState({ notice: null }),
+    };
+  }
+
+  useSuggestion(text) { this.setState({ draft: text }, () => { if (this._input) this._input.focus(); }); }
+
+  doSend() {
+    const text = this.state.draft.trim();
+    if (!text && !this.state.attachment) return;
+    if (this.state.streaming) {
+      this.setState({ notice: 'One moment, sir — Fritz is mid-sentence. Interrupt him with \u201cEnough\u201d if you must.', noticeKind: 'error' });
+      this.later(() => this.setState({ notice: null }), 4000);
+      return;
+    }
+    const hadImage = !!this.state.attachment;
+    const msg = { role: 'user', text: text || 'What do you make of this?' };
+    if (hadImage) msg.image = { name: 'traceback_screenshot.png', meta: '1440×900 · PNG', bg: 'linear-gradient(145deg, #221733 0%, #171025 40%, #0e0a18 100%)' };
+    this.push(msg);
+    this.setState({ draft: '', attachment: null });
+    const reply = this.composeReply(text, hadImage);
+    this.later(() => this.streamReply(reply.text, reply.code), 500);
+  }
+}
+</script>
+</body>
+</html>

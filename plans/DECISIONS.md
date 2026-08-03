@@ -114,11 +114,95 @@ Stops metrics leaking into channel history; any guild member can still run it th
 
 ---
 
-## 11. One shared theme for chat and admin panel
+## 11. ~~One shared theme for chat and admin panel~~ — **SUPERSEDED by decision 12**
 
-The parchment/mahogany token set applies to both surfaces. Smallest change, and it fixes the `--muted` contrast failures on the admin tables for free.
+~~The parchment/mahogany token set applies to both surfaces.~~
 
-**Confirms plan 07** as written — `_theme.html` carries the full palette, both surfaces consume it.
+Overtaken by the `NewMockup/` design. See decision 12.
+
+---
+
+# Mockup decisions (2026-08-03)
+
+Answered after the `NewMockup/` dark-academia design landed. These drove the rewrite of [plan 07](07-web-chat-redesign.md); see that document for the implementation detail.
+
+## 12. Theme scope — chat only. Decision 11 is overridden
+
+The dark-academia palette applies to the chat surface only. `overview` / `users` / `schedules` / `documents` keep a plainer utility look.
+
+The faceted clip-paths fight the `table { display: block; overflow-x: auto }` mobile rule, and candle-lit purple buys nothing on a data grid. `_theme.html` splits three ways: `_theme_base` (reset, responsive, a11y — shared), `_theme_chat`, `_theme_admin`.
+
+**The admin panel still gets its contrast fix.** `--muted` failing at 3.67:1 was a real audit finding and it survives the scope change — it just gets fixed in the admin palette rather than a shared one. Note the audit undercounted the consumers: `h2 { color: var(--muted) }` at base.html:33 means every section heading on every admin page is currently sub-AA.
+
+## 13. Fonts — self-hosted woff2
+
+Six faces (Cormorant Garamond 400/600/700, EB Garamond 400/400i/**600**, JetBrains Mono 400), latin subset, ~150-170 KB cached forever. The prototype's Google request asks for 13 faces and uses 6 — and omits EB Garamond 600, which `.fritz-md strong` needs.
+
+Rejected the CDN: a 127.0.0.1 admin panel should not beacon to a third party on every page load, it renders unstyled on an egress-less host or in Docker, and it forces `fonts.googleapis.com` / `fonts.gstatic.com` into the CSP.
+
+**This adds a `/static` mount that does not exist today**, and its path must be added to `_BasicAuthMiddleware`'s exemption (admin_panel.py:77) or `/chat/login` renders unstyled behind a password prompt.
+
+## 14. Contrast — lighten the failing tokens
+
+Three mockup colours fail WCAG AA against composited backgrounds: `#574a75` at **2.26:1** (worse than the 3.67:1 this redesign exists to fix), `#6f5f92` at 3.28:1, `#64578a` at 3.11:1.
+
+Collapse `#574a75` / `#6f5f92` / `#8d7fa8` into one `--text-meta #9082aa` (4.77:1 worst case); move the code comment to `#8579ab`. Keep `--text-dim`, `--text-body` and `--text-hi` exactly as designed.
+
+**This departs from the handoff**, which declares colours final and asks for pixel-perfect recreation. Measure against the *composited* background (bubble = 0.75 alpha over the page gradient), not the raw hex — measuring against `#0b0710` flatters every number.
+
+## 15. Atmosphere — ships on, honours reduced-motion
+
+Scan lines, candle glow and the wordmark glitch all ship enabled. The prototype implements **zero** `prefers-reduced-motion` handling; write it against the checklist in plan 07 §5.6.
+
+An env knob was considered and left open — the reduced-motion block already names every selector, so promoting it later is ten lines.
+
+## 16. Keep all three "missing data" details
+
+Timestamps, the image metadata caption, and the code-block language label all stay, and each needs new server-side plumbing:
+
+- **Timestamps** — `_doc_to_message` returns only `{role, content, html}` and checkpoints carry no time. Add a `ts` field; render history without a timestamp rather than a wrong one.
+- **Image meta** — extend PR 8's response to `{ok, url, name, width, height, format}`; Pillow already computes it.
+- **Language label** — the expensive one. `codehilite` strips the `language-*` class `fenced_code` emits, and fences carry no filename. Needs a custom treeprocessor plus `data-lang` in the nh3 allowlist, and a fence convention you invent for the filename half. **If scope is cut later, cut this first** — a static "code" chip preserves the rhythm at zero cost.
+
+## 17. Identity lives in the presence row
+
+"in attendance · {{ username }}" beside the status dot, with a ghost sign-out link next to New conversation. The mockup header has neither, but `POST /chat/logout` is a live route and `test_authed_user_sees_chat_ui` asserts the username appears in the body.
+
+## 18. Login page reuses the confirm-dialog card
+
+`chat_login.html` is not in the mockup. Reuse the "Burn the correspondence?" card shape — 24px faceted card, seal badge, radial ground — so it matches with no new design work.
+
+Preserve two literal strings or four tests break: **"Sign in to chat"** (asserted at test_admin_panel.py:333, :382, :398) and the `{% if error %}` block at chat_login.html:14-16 (carries "at least one letter", asserted at :356).
+
+## 19. Admin document upload moves to the admin panel
+
+Consistent with decision 2 — a privileged action does not belong on a surface where identity is a claim. Delete the `{% if is_admin %}` block from chat.html; its four tests move or retire.
+
+---
+
+# Amendments to plan 05 forced by the mockup
+
+Both were found by verification, and both would have failed silently.
+
+## 20. `_sanitise_html` must allow `class` — plan 05 as written breaks all syntax highlighting
+
+Plan 05 calls `nh3.clean(raw_html)` with no `attributes=`, which strips `class="codehilite"` and every Pygments token class. Code blocks render flat with no error and no failing test.
+
+```python
+_NH3_ATTRS = dict(nh3.ALLOWED_ATTRIBUTES)           # dict() copy load-bearing
+for _t in ("div", "pre", "code", "span", "table"):
+    _NH3_ATTRS[_t] = (_NH3_ATTRS.get(_t) or set()) | {"class"}   # default is None
+```
+
+**PR 5 before PR 13, always.** Ship `test_codehilite_classes_survive_sanitiser` with it.
+
+## 21. The CSP must gain `font-src`, and `script-src 'none'` is not viable
+
+Plan 05's `default-src 'none'` with no `font-src` blocks every `@font-face` — self-hosted or CDN. And `script-src 'none'` kills the chat client outright, since chat.html is one large inline script.
+
+Ship: `default-src 'none'; script-src 'nonce-{nonce}'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'`
+
+Never write `style-src 'nonce-x' 'unsafe-inline'` — the nonce makes `'unsafe-inline'` be ignored and every `style=""` attribute dies.
 
 ---
 
@@ -133,5 +217,7 @@ These came up during planning and remain unresolved. None blocks tranche 1.
 - `/draw` upper bound — 40 fits one message; higher is safe once chunking lands, but may just be a footgun.
 - Whether `/schedule list_all` stays plain chunked text while `/schedule list` becomes an embed.
 - Enter-to-send behavior on touch devices (currently disabled on the theory that soft keyboards lack a reliable Shift).
-- Whether the Stop button should say "Stop" (honest about the UI, not the server) or "Hide reply".
+- ~~Whether the Stop button should say "Stop" or "Hide reply"~~ — **resolved by the mockup: "Enough"**, with honest notice copy explaining the model keeps generating server-side.
 - Whether `search_memories_internal`'s `limit=30` should drop to ~10, and whether the injected memory blob should stop carrying internal `namespace` / `original_key` metadata on every turn.
+- Whether the atmosphere layers get an env knob in addition to `prefers-reduced-motion`.
+- Whether the admin panel eventually adopts a restrained version of the faceted geometry, or stays permanently plain.

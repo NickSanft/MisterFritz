@@ -6,6 +6,11 @@ Every file:line reference was verified against the working tree at plan time. Wh
 
 > **[DECISIONS.md](DECISIONS.md) records the answers to every open question these plans raised, and overrides the plan text where the two disagree.** Read it alongside this file. Most consequentially: plan mode is being deleted outright, which amends plans 01, 03 and 08.
 
+> **2026-08-03 — the `NewMockup/` design landed.** [Plan 07](07-web-chat-redesign.md) was rewritten around it: the chat surface is now dark-academia (candle-lit purple, serif, zero border-radius, clip-path facets) rather than the light parchment palette originally planned. Three knock-on changes to the PR sequence below:
+> - **PR 11 splits three ways** — `_theme_base` / `_theme_chat` / `_theme_admin`. Decision 11 (one shared theme) is superseded by decision 12; the admin panel keeps its own palette and still gets its contrast fix.
+> - **A new PR is needed before PR 11**: `admin_static/` + a `/static` mount + self-hosted fonts, plus extending the Basic-auth path exemption to `/static`.
+> - **PR 5 becomes a hard blocker for PR 13.** Plan 05's sanitiser as written strips every Pygments class, so syntax highlighting renders flat with no error and no failing test. See decisions 20 and 21 — plan 05's CSP also needs `font-src` and cannot use `script-src 'none'`.
+
 ## Contents
 
 1. [Feed conversation history to the executor](01-history-window.md) — M (half day), depends on nothing
