@@ -8,23 +8,11 @@ Slash commands in discord.py are wrapped in an app_commands.Command descriptor,
 so we exercise the underlying callback (the .callback attribute) directly with
 a fake Interaction object. That sidesteps the need for a live Discord client.
 """
-import sys
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
-
-def _ensure_mock(name: str) -> MagicMock:
-    if name not in sys.modules:
-        sys.modules[name] = MagicMock()
-    return sys.modules[name]
-
-
 # bot_commands pulls in mister_fritz → agent_tools → ddgs, plus document_engine
-# / image_generator / tts. Stub everything heavy.
-_ensure_mock("ddgs")
-_ensure_mock("image_generator")
-_ensure_mock("document_engine")
-_ensure_mock("tts")
+# / image_generator / tts. All are stubbed in tests/conftest.py.
 
 import fritz_utils  # noqa: E402
 import bot_commands  # noqa: E402

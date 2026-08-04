@@ -6,23 +6,11 @@ diagram at import time. We stub heavy modules (image_generator, document_engine)
 before importing, but ChatOllama itself is real — we patch the instance after
 import to control what invoke() returns.
 """
-import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
-
-def _ensure_mock(name: str) -> MagicMock:
-    if name not in sys.modules:
-        sys.modules[name] = MagicMock()
-    return sys.modules[name]
-
-
-# ddgs (DuckDuckGo search) and image_generator/document_engine all initialise
-# heavy resources at import time. Stub them so this test doesn't require the
-# full runtime environment.
-_ensure_mock("ddgs")
-_ensure_mock("image_generator")
-_ensure_mock("document_engine")
+# ddgs / image_generator / document_engine are stubbed in tests/conftest.py
+# before any test module is collected.
 
 from langchain_core.messages import HumanMessage  # noqa: E402
 

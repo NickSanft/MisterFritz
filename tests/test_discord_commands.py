@@ -6,30 +6,12 @@ We mock the heavy modules before importing so no Discord connection or TTS
 model load is required.
 """
 import asyncio
-import sys
 import time
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-
-# ---------------------------------------------------------------------------
-# Pre-import mocks — must happen before 'import main_discord'
-# ---------------------------------------------------------------------------
-
-def _ensure_mock(name: str) -> MagicMock:
-    if name not in sys.modules:
-        m = MagicMock()
-        sys.modules[name] = m
-    return sys.modules[name]
-
-
-# Prevent TTS model download
-tts_mock = _ensure_mock("tts")
-tts_mock.TTSEngine = MagicMock(return_value=MagicMock())
-
-# Prevent LLM/chroma initialisation (already mocked in test_agent_tools if run first)
-_ensure_mock("image_generator")
-_ensure_mock("document_engine")
+# tts (prevents a TTS model download), image_generator and document_engine are
+# stubbed in tests/conftest.py before any test module is collected.
 
 from main_discord import split_into_chunks, StreamingMessageHandler  # noqa: E402
 

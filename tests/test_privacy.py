@@ -7,21 +7,13 @@ don't require a live Chroma or an APScheduler instance.
 import importlib
 import os
 import sqlite3
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-
-def _ensure_mock(name: str) -> MagicMock:
-    if name not in sys.modules:
-        sys.modules[name] = MagicMock()
-    return sys.modules[name]
-
-
-# Heavy modules stubbed so importing privacy → fritz_utils stays fast.
-_ensure_mock("ddgs")
+# ddgs (kept out of the import chain so privacy → fritz_utils stays fast) is
+# stubbed in tests/conftest.py before any test module is collected.
 
 
 class TestSanitiseThreadId(unittest.TestCase):

@@ -8,6 +8,12 @@ chroma_store/*
 .cache.sqlite
 fritz.db*
 
+# Test debris — tests/conftest.py sandboxes these into a temp dir, but keep
+# them ignored in case the suite is ever run with the sandbox disabled.
+tests/*.db
+tests/chroma_store/
+tests/*.png
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

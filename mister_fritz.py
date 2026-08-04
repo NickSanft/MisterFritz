@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import re
 import threading
 from contextlib import ExitStack
@@ -649,4 +650,7 @@ def _write_diagram():
     except Exception as _diagram_err:
         logger.debug("Could not write graph diagram (non-fatal): %s", _diagram_err)
 
-threading.Thread(target=_write_diagram, name="diagram-writer", daemon=True).start()
+# FRITZ_WRITE_DIAGRAMS=0 (set by tests/conftest.py) keeps the writer from
+# dirtying the tracked PNG on every test run.
+if os.environ.get("FRITZ_WRITE_DIAGRAMS", "1") != "0":
+    threading.Thread(target=_write_diagram, name="diagram-writer", daemon=True).start()

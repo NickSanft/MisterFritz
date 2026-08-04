@@ -14,16 +14,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
-def _ensure_mock(name: str):
-    if name not in sys.modules:
-        sys.modules[name] = MagicMock()
-    return sys.modules[name]
-
-
-# ddgs is required transitively by privacy → workspace_store → fritz_utils
-# is fine, but agent_tools (which privacy doesn't actually need) is imported
-# nowhere; nothing else to stub.
-_ensure_mock("ddgs")
+# ddgs (required transitively by privacy → workspace_store) is stubbed in
+# tests/conftest.py before any test module is collected.
 
 from starlette.testclient import TestClient  # noqa: E402
 

@@ -7,30 +7,13 @@ wrapped in a try/except in the source, so it won't fail. The DB and chroma
 directory creation are lightweight and acceptable in a test environment.
 """
 import re
-import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
 
-# ---------------------------------------------------------------------------
-# Import mister_fritz with mocked heavy dependencies so unit tests do not
-# require a live Ollama instance.
-# ---------------------------------------------------------------------------
-
-def _ensure_mock(module_name: str, mock: MagicMock = None) -> MagicMock:
-    """Place mock in sys.modules if not already imported."""
-    if module_name not in sys.modules:
-        m = mock or MagicMock()
-        sys.modules[module_name] = m
-        return m
-    return sys.modules[module_name]
-
-
-# image_generator and document_engine have no state we care about in unit tests
-_ensure_mock("image_generator")
-_ensure_mock("document_engine")
-
-# Import the functions we want to test AFTER ensuring mocks are in place.
+# image_generator / document_engine (and ddgs) are stubbed in
+# tests/conftest.py before any test module is collected, so unit tests do not
+# require a live Ollama instance or the heavy optional stacks.
 # (chroma_store, langchain_ollama, and langchain.agents are real packages in
 # the venv; they don't connect to Ollama at import / __init__ time.)
 import agent_tools  # noqa: E402  — also needed for patching _HTTP_CLIENT
