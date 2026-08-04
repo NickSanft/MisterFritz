@@ -448,8 +448,11 @@ def executor(state: EnhancedState, config: RunnableConfig):
             "current_step": current_step + 1,
         }
     else:
+        # Bare strings are coerced to HumanMessage by the add_messages reducer,
+        # which makes the checkpointed transcript an unbroken run of user turns
+        # (and mislabels every reply in the /chat history renderer). Tag it.
         return {
-            "messages": [resp],
+            "messages": [AIMessage(content=resp)],
             "image_paths": image_paths,
         }
 
@@ -500,8 +503,10 @@ def synthesizer(state: EnhancedState, config: RunnableConfig):
         ).content
 
     logger.info("Synthesizer complete: %d chars from %d steps", len(accumulated_text), len(plan))
+    # Same reducer coercion as the executor's simple-mode return: a bare str
+    # would be stored as a HumanMessage. Tag the reply explicitly.
     return {
-        "messages": [accumulated_text],
+        "messages": [AIMessage(content=accumulated_text)],
         "plan": [],
         "current_step": 0,
         "step_results": [],
