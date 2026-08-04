@@ -17,7 +17,6 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool, BaseTool
 
 import document_engine
-import image_generator
 from file_tools import get_file_tools_description
 from fritz_utils import (
     DOC_STORAGE_DESCRIPTION,
@@ -303,6 +302,10 @@ def generate_image(prompt: str):
     string: The path of the image.
     """
     with time_tool("generate_image"):
+        # Deferred: image_generator imports torch/diffusers/xformers at module
+        # level. Keeping it out of the import graph lets the bot start (and CI
+        # run) without the multi-GB GPU stack installed.
+        import image_generator
         return image_generator.generate_image(prompt)
 
 
