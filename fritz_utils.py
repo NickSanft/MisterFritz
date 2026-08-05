@@ -221,9 +221,15 @@ CHAT_CODE_HIGHLIGHT: bool = os.environ.get("CHAT_CODE_HIGHLIGHT", "true").lower(
 
 # Allowlist for the `execute_command` file tool. Only argv[0] values listed here
 # are permitted. Override with EXEC_ALLOWED_COMMANDS as a comma-separated list.
-# Keep it tight by default — this is ROOT_USER-gated, but defence-in-depth.
+#
+# NOT ROOT_USER-gated since Phase 7b: any user who runs `/workspace enable`
+# reaches this tool. Every entry here that can evaluate caller-supplied code —
+# python/node (-c/-e), pip/npm (install scripts), make (user Makefile),
+# git (-c, ! aliases), find (-exec) — is arbitrary code execution for that
+# user. That capability is deliberately kept and contained by EXEC_REQUIRE_ADMIN
+# below plus the environment scrub in file_tools._build_exec_env.
 _DEFAULT_EXEC_ALLOWED = (
-    "ls,dir,pwd,cd,echo,cat,type,head,tail,wc,"
+    "ls,dir,pwd,echo,cat,type,head,tail,wc,"
     "python,python3,pip,pytest,"
     "node,npm,npx,"
     "git,"
@@ -236,6 +242,38 @@ EXEC_ALLOWED_COMMANDS: frozenset[str] = frozenset(
     for cmd in os.environ.get("EXEC_ALLOWED_COMMANDS", _DEFAULT_EXEC_ALLOWED).split(",")
     if cmd.strip()
 )
+
+# execute_command only. The other five file tools stay open to any workspace
+# holder (Phase 7b) — they are confined by _resolve_safe_path. Running programs
+# is not confined by anything the bot controls, so it needs an identity check.
+# Falsy values: 0/false/no/off/empty.
+EXEC_REQUIRE_ADMIN: bool = os.environ.get(
+    "EXEC_REQUIRE_ADMIN", "true"
+).strip().lower() not in ("0", "false", "no", "off", "")
+
+# Environment variables handed to execute_command children. Everything else is
+# dropped, so DISCORD_BOT_TOKEN / ADMIN_PANEL_PASSWORD / CHAT_COOKIE_SECRET /
+# OLLAMA_HOST never reach a subprocess. Names are matched case-insensitively
+# (os.environ upper-cases keys on Windows).
+_DEFAULT_EXEC_ENV_PASSTHROUGH_NT = (
+    "PATH,PATHEXT,SYSTEMROOT,WINDIR,COMSPEC,SYSTEMDRIVE,"
+    "TEMP,TMP,USERPROFILE,HOMEDRIVE,HOMEPATH,APPDATA,LOCALAPPDATA,"
+    "NUMBER_OF_PROCESSORS,PROCESSOR_ARCHITECTURE,OS"
+)
+_DEFAULT_EXEC_ENV_PASSTHROUGH_POSIX = "PATH,HOME,TMPDIR,LANG,LC_ALL,TZ,TERM,USER,LOGNAME"
+EXEC_ENV_PASSTHROUGH: frozenset[str] = frozenset(
+    name.strip().upper()
+    for name in os.environ.get(
+        "EXEC_ENV_PASSTHROUGH",
+        _DEFAULT_EXEC_ENV_PASSTHROUGH_NT if os.name == "nt"
+        else _DEFAULT_EXEC_ENV_PASSTHROUGH_POSIX,
+    ).split(",")
+    if name.strip()
+)
+
+# Hard ceiling on the execute_command timeout (seconds). Was a bare constant in
+# file_tools; env-configurable now to match every other tunable.
+EXEC_TIMEOUT_MAX: int = int(os.environ.get("EXEC_TIMEOUT_MAX", "30"))
 
 # ---------------------------------------------------------------------------
 # Discord

@@ -407,7 +407,7 @@ The bot now pre-warms every configured model in a background thread at startup, 
 Phase 1 added an Ollama request timeout (default 120s). If it trips, you'll see the agent return an error instead of hanging. Lower it (`OLLAMA_TIMEOUT=30`) to fail faster while you debug, or raise it for slow CPU inference. Check `:8000/health` for the bot's error rate and p99 latency snapshot.
 
 **`execute_command` rejects a command**
-The file-tools shell sandbox uses an allowlist (Phase 1). Allowed programs are listed in `EXEC_ALLOWED_COMMANDS` (see `.env.example`). To allow additional programs, override that env var. Shell features (pipes, `&&`, redirects) are not interpreted — the agent must run separate commands instead.
+The file-tools shell sandbox uses an allowlist. Allowed programs are listed in `EXEC_ALLOWED_COMMANDS` (see `.env.example`). Three other rules can reject a command: the program name must be bare (`python`, not `./python` or `C:\...\python.exe`); arguments may not contain `..` or absolute paths outside the workspace; and while `EXEC_REQUIRE_ADMIN=true` (the default) only admins may run programs at all — the other five file tools stay open to every workspace holder. Shell features (pipes, `&&`, redirects) are not interpreted — the agent must run separate commands instead. Commands run with a scrubbed environment: only `PATH` plus a few platform basics (`EXEC_ENV_PASSTHROUGH`) are passed through, so a script cannot read the bot's tokens out of `os.environ`. If a command works from a terminal but fails through the bot with a "not found" or TLS error, the fix is to add the variable it needs to `EXEC_ENV_PASSTHROUGH`.
 
 **Missing `DISCORD_BOT_TOKEN` error on startup**
 Copy `.env.example` → `.env` and fill in the required values.

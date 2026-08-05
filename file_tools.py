@@ -12,9 +12,13 @@ from langchain_core.tools import tool
 
 from fritz_utils import (
     EXEC_ALLOWED_COMMANDS,
+    EXEC_ENV_PASSTHROUGH,
     EXEC_OUTPUT_TRUNCATE,
+    EXEC_REQUIRE_ADMIN,
+    EXEC_TIMEOUT_MAX,
     MAX_FILE_SIZE_BYTES,
     MAX_READ_LINES,
+    is_admin,
 )
 from observability import METRICS, audit_log, time_tool
 
@@ -22,7 +26,13 @@ logger = logging.getLogger(__name__)
 
 # Backwards-compatible aliases — the test suite and other modules may still
 # import these names. The values are now sourced from fritz_utils.
+#
+# NOTE for tests: these are from-imports, so they are patched as
+# file_tools.EXEC_ALLOWED_COMMANDS / file_tools.EXEC_REQUIRE_ADMIN, NOT as
+# fritz_utils.<name>. (fritz_utils.ROOT_USER is different — is_admin reads it
+# from its own module globals at call time, so patching fritz_utils works there.)
 MAX_FILE_SIZE = MAX_FILE_SIZE_BYTES
+MAX_EXEC_TIMEOUT = EXEC_TIMEOUT_MAX
 
 
 def _timed(name: str):
@@ -386,20 +396,66 @@ def search_files(config: RunnableConfig, pattern: str, path: str = ".", file_glo
     return header + "\n" + "\n".join(matches)
 
 
-# Maximum command execution timeout in seconds
-MAX_EXEC_TIMEOUT = 30
+def _build_exec_env() -> dict[str, str]:
+    """Explicit environment for execute_command children.
+
+    subprocess inherits os.environ by default, which hands every child the
+    bot's secrets — DISCORD_BOT_TOKEN, ADMIN_PANEL_PASSWORD, CHAT_COOKIE_SECRET,
+    OLLAMA_HOST. Pass an allowlist instead (EXEC_ENV_PASSTHROUGH).
+    """
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() in EXEC_ENV_PASSTHROUGH
+    }
+    # POSIX resolves argv[0] via os.get_exec_path(env); with no PATH in the
+    # child env nothing is findable at all. On Windows CreateProcess searches
+    # the *parent's* PATH, but children that spawn their own tools still need it.
+    if not env.get("PATH"):
+        env["PATH"] = os.defpath
+    # Lets a workspace script tell it is running under the bot sandbox.
+    env["MISTERFRITZ_SANDBOX"] = "1"
+    return env
+
+
+def _exec_denied_reason(user_id: str) -> Optional[str]:
+    """Return a refusal message if this user may not run programs, else None.
+
+    Returns a string rather than raising (unlike _authorize) so the refusal
+    reaches the LLM as a normal tool result and lands in the audit log.
+    """
+    if not EXEC_REQUIRE_ADMIN:
+        return None
+    if is_admin(user_id):
+        return None
+    return (
+        "Error: Running commands is restricted to administrators. "
+        "The other file tools (read, write, edit, search, list) are still "
+        "available in your workspace."
+    )
 
 
 def _validate_command_argv(argv: list[str], workspace: str) -> Optional[str]:
     """Validate a parsed argv list. Returns an error message if rejected, else None.
 
     Enforces:
-      - argv[0] (basename, lowercased) must be in EXEC_ALLOWED_COMMANDS.
+      - argv[0] must be a bare program name, resolved from PATH.
+      - argv[0] (lowercased, suffix-stripped) must be in EXEC_ALLOWED_COMMANDS.
       - No argument may contain '..' as a path component or be an absolute path
         that escapes the workspace.
     """
     if not argv:
         return "Error: Empty command."
+
+    # argv[0] must be a bare program name resolved from PATH. Without this, an
+    # absolute path to a workspace file the user just wrote with write_file
+    # (e.g. <workspace>/git.bat) passes the basename + suffix-strip check below
+    # and executes — CreateProcess runs .bat/.cmd through cmd.exe.
+    if os.path.isabs(argv[0]) or re.search(r"[\\/]", argv[0]):
+        return (
+            f"Error: '{argv[0]}' must be a bare program name, not a path. "
+            "Commands are resolved from PATH only."
+        )
 
     program = os.path.basename(argv[0]).lower()
     # Strip Windows .exe / .cmd / .bat suffixes for the allowlist check.
@@ -438,9 +494,12 @@ def execute_command(config: RunnableConfig, command: str, timeout: int = 30) -> 
     The command runs with the workspace as the current working directory.
 
     Only commands whose program name is in the allowlist (see EXEC_ALLOWED_COMMANDS
-    env var) are permitted. Shell metacharacters are not interpreted — this runs
-    via argv, not a shell. Arguments with '..' or absolute paths outside the
-    workspace are rejected.
+    env var) are permitted, and the program name must be bare — no paths. Shell
+    metacharacters are not interpreted — this runs via argv, not a shell.
+    Arguments with '..' or absolute paths outside the workspace are rejected.
+    The command runs with a scrubbed environment: only PATH and a small set of
+    platform basics are passed through, so the bot's secrets are not visible.
+    Depending on configuration this tool may be restricted to administrators.
 
     Args:
         config: The RunnableConfig containing workspace_root and user_id in metadata.
@@ -453,7 +512,9 @@ def execute_command(config: RunnableConfig, command: str, timeout: int = 30) -> 
     workspace = _get_workspace(config)
     user_id, workspace_root = _audit_identity(config)
 
-    timeout = min(timeout, MAX_EXEC_TIMEOUT)
+    # Clamped at both ends: subprocess.run(timeout=0) raises TimeoutExpired
+    # immediately, so an unclamped 0 or negative request could never succeed.
+    timeout = max(1, min(timeout, MAX_EXEC_TIMEOUT))
 
     try:
         # posix=True works on Windows too for our purposes; we don't want cmd.exe semantics.
@@ -464,6 +525,18 @@ def execute_command(config: RunnableConfig, command: str, timeout: int = 30) -> 
             command=command, result="parse_error",
         )
         return f"Error: Could not parse command: {e}"
+
+    # Placed AFTER the parse and BEFORE _validate_command_argv on purpose:
+    # parsing is side-effect-free, and keeping it first preserves the existing
+    # parse_error audit path.
+    denial = _exec_denied_reason(user_id)
+    if denial is not None:
+        logger.warning("Denied exec for non-admin %s in %s", user_id, workspace)
+        audit_log(
+            "exec", user_id=user_id, workspace=workspace_root,
+            argv=argv, result="denied", reason=denial,
+        )
+        return denial
 
     rejection = _validate_command_argv(argv, workspace)
     if rejection is not None:
@@ -483,6 +556,7 @@ def execute_command(config: RunnableConfig, command: str, timeout: int = 30) -> 
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=_build_exec_env(),
         )
 
         output_parts = []

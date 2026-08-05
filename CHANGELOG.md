@@ -7,6 +7,16 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Security
+- **Phase 15 — `execute_command` containment.**
+  - Child processes now get an explicit environment (`EXEC_ENV_PASSTHROUGH`, platform-aware default) instead of inheriting `os.environ`. Previously any user with a workspace could run `python -c "import os; print(os.environ['DISCORD_BOT_TOKEN'])"` and read the bot token, `ADMIN_PANEL_PASSWORD` and `CHAT_COOKIE_SECRET` straight out of the chat reply — verified live, not theoretical. `PATH` is always present (falling back to `os.defpath`); `MISTERFRITZ_SANDBOX=1` is injected so workspace scripts can detect the sandbox.
+  - `argv[0]` must now be a bare program name. The allowlist check strips `.exe/.cmd/.bat/.ps1` before matching, so an absolute path to a workspace-authored `git.bat` used to pass validation and execute through `cmd.exe` on Windows. Paths in `argv[0]` are rejected outright.
+  - New `EXEC_REQUIRE_ADMIN` (default `true`) restricts *only* `execute_command` to `fritz_utils.is_admin` users. Phase 7b correctly opened `read`/`write`/`edit`/`search`/`list` to every workspace holder, but it also opened program execution — and everything on the default allowlist that can evaluate caller-supplied code (`python -c`, `node -e`, `make`, `git -c`, `find -exec`, or simply `write_file` + `python script.py`) is arbitrary code execution. Denials are audited as `result="denied"`.
+  - `MAX_EXEC_TIMEOUT` moved to `fritz_utils.EXEC_TIMEOUT_MAX` (env-configurable, default 30) and requested timeouts are clamped to `[1, max]` rather than only capped above — `subprocess.run(timeout=0)` expired immediately before.
+  - `cd` left the default allowlist: with no shell and the cwd fixed to the workspace it was always a no-op.
+  - The stale "this is ROOT_USER-gated" comment above the allowlist in `fritz_utils.py` has been corrected — it had been wrong since Phase 7b.
+  - Honest scope: this contains env-var exfiltration and the allowlist bypass. It is not OS-level sandboxing. Under the default configuration an admin running a command can still read `~/.ssh`, `../.env` and `fritz.db`, and can make outbound network calls. Real containment needs a low-privilege user or a container per exec.
+
 ### Performance
 - **Phase 10 — quick wins.**
   - `config.json` parse is now cached via `functools.lru_cache`. Repeated key lookups during import no longer re-open the file.
