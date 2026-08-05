@@ -111,6 +111,30 @@ class TestConstantDefaults(unittest.TestCase):
             with self.subTest(attr=attr):
                 self.assertTrue(getattr(fu, attr))
 
+    def test_numeric_tunables_are_sane(self):
+        self.assertGreater(fu.SUMMARIZE_THRESHOLD, 0)
+        self.assertGreaterEqual(fu.HISTORY_TOKEN_BUDGET, 0)  # 0 = window disabled
+        self.assertGreater(fu.MEMORY_INJECT_MAX_CHARS, 0)
+        self.assertGreaterEqual(fu.STREAM_MIN_CHARS, 1)
+        self.assertGreater(fu.DISCORD_STREAM_MIN_INTERVAL, 0)
+        self.assertGreater(fu.BLOCKING_POOL_SIZE, 0)
+        self.assertGreaterEqual(fu.IMAGE_GEN_MAX_CONCURRENCY, 1)  # 0 deadlocks /gen
+        self.assertGreaterEqual(fu.TTS_MAX_CONCURRENCY, 1)
+        for attr in ("SUMMARIZE_THRESHOLD", "HISTORY_TOKEN_BUDGET",
+                     "MEMORY_INJECT_MAX_CHARS", "STREAM_MIN_CHARS",
+                     "BLOCKING_POOL_SIZE", "IMAGE_GEN_MAX_CONCURRENCY",
+                     "TTS_MAX_CONCURRENCY"):
+            with self.subTest(attr=attr):
+                self.assertIsInstance(getattr(fu, attr), int)
+        self.assertIsInstance(fu.DISCORD_STREAM_MIN_INTERVAL, float)
+
+    def test_bool_tunables_are_bools(self):
+        for attr in ("SUMMARIZE_ASYNC", "CHAT_CODE_HIGHLIGHT", "DISCORD_ERROR_DETAIL"):
+            with self.subTest(attr=attr):
+                self.assertIsInstance(getattr(fu, attr), bool)
+        # Defaults: summariser off-path and highlighting on; error detail off.
+        self.assertFalse(fu.DISCORD_ERROR_DETAIL)
+
     def test_ffmpeg_path_is_string(self):
         self.assertIsInstance(fu.FFMPEG_PATH, str)
         self.assertTrue(fu.FFMPEG_PATH)

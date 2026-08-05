@@ -96,6 +96,36 @@ OLLAMA_KEEP_ALIVE: str = os.environ.get("OLLAMA_KEEP_ALIVE", "5m")
 # Number of conversation messages before the agent triggers a summarisation pass.
 SUMMARIZE_THRESHOLD: int = int(os.environ.get("SUMMARIZE_THRESHOLD", "15"))
 
+# Token budget for the slice of conversation history handed to the executor's
+# ReAct sub-agent each turn. The sub-agent is compiled WITHOUT a checkpointer,
+# so this window is the only short-term memory the model gets; Chroma memory
+# injection covers long-range recall. Sized against num_ctx=32768 (see
+# modelfiles/): ~900 system prompt + ~1900 tool schemas + ~1000 injected
+# memories + 4096 history still leaves ~24k for tool output and the reply.
+# Set to 0 to disable the window entirely and restore pre-window behaviour.
+HISTORY_TOKEN_BUDGET: int = int(os.environ.get("HISTORY_TOKEN_BUDGET", "4096"))
+
+# Hard cap (characters) on the Chroma memory blob auto-injected into the
+# system prompt. search_memories_internal pulls up to 30 stored summaries with
+# no size limit; uncapped, that block alone can evict the history window — and
+# the system prompt itself — from the model's context.
+MEMORY_INJECT_MAX_CHARS: int = int(os.environ.get("MEMORY_INJECT_MAX_CHARS", "4000"))
+
+# Characters buffered before the streaming pipeline fires streaming_callback.
+# 1 emits every token; raising it coalesces deltas (fewer SSE frames / Discord
+# hops) at the cost of choppier streaming.
+STREAM_MIN_CHARS: int = max(1, int(os.environ.get("STREAM_MIN_CHARS", "1")))
+
+# Minimum seconds between Discord message edits and between worker-thread →
+# event-loop streaming hops. Keeps a ~40 token/s model from queueing 40
+# coroutines/s onto the gateway loop.
+DISCORD_STREAM_MIN_INTERVAL: float = float(os.environ.get("DISCORD_STREAM_MIN_INTERVAL", "1.5"))
+
+# When true, conversation summarisation runs on a background thread instead of
+# blocking the reply that crossed SUMMARIZE_THRESHOLD. Set false to restore
+# the old synchronous ordering (rollback / deterministic debugging).
+SUMMARIZE_ASYNC: bool = os.environ.get("SUMMARIZE_ASYNC", "true").lower() in ("1", "true", "yes")
+
 # Max number of lines returned by the file_tools.read_file tool.
 MAX_READ_LINES: int = int(os.environ.get("MAX_READ_LINES", "500"))
 
@@ -117,6 +147,18 @@ MAX_SCHEDULES_PER_USER: int = int(os.environ.get("MAX_SCHEDULES_PER_USER", "10")
 # zero useful signal. Lower these if you're losing valid short facts.
 MEMORY_EXTRACT_MIN_USER_CHARS: int = int(os.environ.get("MEMORY_EXTRACT_MIN_USER_CHARS", "20"))
 MEMORY_EXTRACT_MIN_REPLY_CHARS: int = int(os.environ.get("MEMORY_EXTRACT_MIN_REPLY_CHARS", "40"))
+
+# Worker count for the shared bounded thread pool (bot_adapters.run_blocking)
+# that keeps ask_stuff / STT / TTS work off the Discord event loop.
+BLOCKING_POOL_SIZE: int = int(os.environ.get("BLOCKING_POOL_SIZE", "8"))
+
+# Concurrent SDXL renders permitted by the /gen semaphore. Must be >= 1;
+# 0 would deadlock the command. The pipeline is GPU-bound — leave at 1 unless
+# you have VRAM to burn.
+IMAGE_GEN_MAX_CONCURRENCY: int = int(os.environ.get("IMAGE_GEN_MAX_CONCURRENCY", "1"))
+
+# Concurrent XTTS syntheses permitted by the /voice semaphore. Must be >= 1.
+TTS_MAX_CONCURRENCY: int = int(os.environ.get("TTS_MAX_CONCURRENCY", "1"))
 
 # Admin panel: shared password gate + local-only port. If ADMIN_PANEL_PASSWORD
 # is unset the panel won't start at all.
@@ -168,6 +210,11 @@ CHAT_ALLOWED_IMAGE_TYPES: frozenset[str] = frozenset({
     "image/jpeg", "image/png", "image/webp", "image/gif",
 })
 
+# Syntax-highlight fenced code blocks in web-chat replies (Pygments via the
+# markdown codehilite extension). Escape hatch: set false if highlighting
+# misbehaves — code still renders as plain <pre> blocks.
+CHAT_CODE_HIGHLIGHT: bool = os.environ.get("CHAT_CODE_HIGHLIGHT", "true").lower() in ("1", "true", "yes")
+
 # ---------------------------------------------------------------------------
 # File-tool sandbox
 # ---------------------------------------------------------------------------
@@ -196,6 +243,11 @@ EXEC_ALLOWED_COMMANDS: frozenset[str] = frozenset(
 
 DISCORD_KEY = "discord_bot_token"  # legacy config.json key (kept for compat)
 DISCORD_BOT_TOKEN: str | None = _env_or_json("DISCORD_BOT_TOKEN", DISCORD_KEY)
+
+# When true, user-facing error messages append the exception type and text.
+# Off by default: end users get butler copy plus a log ref, and the traceback
+# stays in the log. Turn on for local debugging of a private instance.
+DISCORD_ERROR_DETAIL: bool = os.environ.get("DISCORD_ERROR_DETAIL", "").lower() in ("1", "true", "yes")
 
 # ---------------------------------------------------------------------------
 # Application config
