@@ -61,5 +61,16 @@ def _ensure_mock(name: str) -> MagicMock:
 
 _ensure_mock("ddgs")
 _ensure_mock("image_generator")
-_ensure_mock("document_engine")
 _ensure_mock("tts")
+
+# document_engine's stub needs one real attribute. admin_panel does
+#     try: from document_engine import SUPPORTED_EXTENSIONS
+#     except Exception: SUPPORTED_EXTENSIONS = (...)
+# and that import SUCCEEDS against a MagicMock — it just yields another
+# MagicMock, whose __contains__ is False for everything. The fallback never
+# fires and every document upload 415s. Mirror the real value (defined at
+# document_engine.py:47) so the stub is faithful for the attributes callers
+# actually read.
+_document_engine = _ensure_mock("document_engine")
+if isinstance(_document_engine, MagicMock):
+    _document_engine.SUPPORTED_EXTENSIONS = (".docx", ".pdf", ".xlsx", ".csv", ".txt", ".md")
