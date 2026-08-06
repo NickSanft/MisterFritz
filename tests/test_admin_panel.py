@@ -584,6 +584,66 @@ class TestRenderMarkdown(unittest.TestCase):
         self.assertEqual(admin_panel._render_markdown(None), "")
 
 
+class TestSanitiseHtml(unittest.TestCase):
+    """python-markdown emits raw HTML verbatim and chat.html renders replies
+    with `| safe`, so anything Fritz can be talked into saying reaches the DOM.
+    """
+
+    def test_script_tag_is_stripped(self):
+        html = admin_panel._render_markdown("hello <script>alert(1)</script> there")
+        self.assertNotIn("<script", html)
+        self.assertNotIn("alert(1)", html)
+
+    def test_event_handler_attribute_is_stripped(self):
+        html = admin_panel._render_markdown('<img src="x" onerror="steal()">')
+        self.assertNotIn("onerror", html)
+        self.assertNotIn("steal()", html)
+
+    def test_javascript_url_is_neutralised(self):
+        html = admin_panel._render_markdown('<a href="javascript:alert(1)">click</a>')
+        self.assertNotIn("javascript:", html)
+
+    def test_iframe_is_stripped(self):
+        html = admin_panel._render_markdown('<iframe src="https://evil.test"></iframe>')
+        self.assertNotIn("<iframe", html)
+
+    def test_benign_formatting_survives(self):
+        html = admin_panel._render_markdown(
+            "**bold** and [a link](https://example.test) and ![pic](/img.png)"
+        )
+        self.assertIn("<strong>bold</strong>", html)
+        self.assertIn("https://example.test", html)   # href kept
+        self.assertIn("/img.png", html)               # img src kept
+
+    def test_codehilite_classes_survive_sanitiser(self):
+        # The guard for the trap in DECISIONS.md #20: nh3's default attribute
+        # map has no entry for div/pre/code/span, so a plain nh3.clean() strips
+        # every Pygments class and highlighting dies silently — no error, and a
+        # test that only checks for "<pre>" and "print" still passes.
+        highlighted = (
+            '<div class="codehilite"><pre><code>'
+            '<span class="nb">print</span><span class="p">(</span>'
+            "</code></pre></div>"
+        )
+        cleaned = admin_panel._sanitise_html(highlighted)
+        self.assertIn('class="codehilite"', cleaned)
+        self.assertIn('class="nb"', cleaned)
+
+    def test_class_allowlist_does_not_disarm_other_attributes(self):
+        # Building the map from anything other than dict(nh3.ALLOWED_ATTRIBUTES)
+        # silently drops href/src, because `attributes=` replaces the defaults
+        # rather than extending them.
+        cleaned = admin_panel._sanitise_html(
+            '<span class="ok" onclick="evil()">x</span>'
+        )
+        self.assertIn('class="ok"', cleaned)
+        self.assertNotIn("onclick", cleaned)
+
+    def test_empty_input_is_empty(self):
+        self.assertEqual(admin_panel._sanitise_html(""), "")
+        self.assertEqual(admin_panel._sanitise_html(None), "")
+
+
 class TestChatStreamDonePayload(unittest.TestCase):
     def test_done_event_carries_html_and_text(self):
         import json as _json

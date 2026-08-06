@@ -290,3 +290,6 @@ starlette>=0.46
 python-multipart>=0.0.22
 # Server-side markdown rendering for Fritz's chat replies (Phase web-chat-3).
 Markdown>=3.5
+# HTML sanitiser for rendered chat markdown (Phase 15). python-markdown passes
+# raw HTML through verbatim and the chat template renders it with | safe.
+nh3>=0.3,<0.4

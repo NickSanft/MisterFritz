@@ -33,6 +33,7 @@ from starlette.routing import Route
 from starlette.templating import Jinja2Templates
 
 import markdown as md_lib
+import nh3
 from starlette.responses import FileResponse
 
 import chat_auth
@@ -314,13 +315,43 @@ def _chat_user(request: Request) -> str | None:
 # blocks; tables / nl2br polish the natural prose he tends to emit.
 _MARKDOWN_EXTENSIONS = ["fenced_code", "tables", "nl2br"]
 
+# Attribute allowlist for _sanitise_html.
+#
+# Two things about this that are easy to get wrong:
+#   1. nh3's `attributes=` REPLACES the default map wholesale rather than
+#      extending it, so it must be built from a dict() copy of the defaults —
+#      passing a bare {"span": {"class"}} would also strip href from <a> and
+#      src/alt from <img>.
+#   2. The default map has NO entry at all for div/pre/code/span, so a plain
+#      nh3.clean() removes every class attribute. That silently reduces
+#      syntax-highlighted code blocks to inert markup: Pygments still runs,
+#      the spans are still emitted, and every styling hook is gone. Nothing
+#      errors and no naive test catches it, because <pre> and the code text
+#      both survive.
+_NH3_ATTRIBUTES = dict(nh3.ALLOWED_ATTRIBUTES)
+for _tag in ("div", "pre", "code", "span", "table"):
+    _NH3_ATTRIBUTES[_tag] = (_NH3_ATTRIBUTES.get(_tag) or set()) | {"class"}
+
+
+def _sanitise_html(html: str) -> str:
+    """Strip scripting from rendered markdown, keeping styling classes.
+
+    python-markdown passes raw HTML through verbatim, and the chat template
+    renders replies with `| safe` into innerHTML — so anything the model can be
+    talked into emitting reaches the DOM. Everything Fritz says goes through
+    here before it is rendered.
+    """
+    if not html:
+        return ""
+    return nh3.clean(html, attributes=_NH3_ATTRIBUTES)
+
 
 def _render_markdown(text: str) -> str:
-    """Render markdown to HTML. Used for Fritz's replies in the chat history
-    and for the final state of a streamed message."""
+    """Render markdown to sanitised HTML. Used for Fritz's replies in the chat
+    history and for the final state of a streamed message."""
     if not text:
         return ""
-    return md_lib.markdown(text, extensions=_MARKDOWN_EXTENSIONS)
+    return _sanitise_html(md_lib.markdown(text, extensions=_MARKDOWN_EXTENSIONS))
 
 
 def _doc_to_message(checkpoint_msg) -> dict | None:
