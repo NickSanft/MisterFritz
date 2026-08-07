@@ -21,15 +21,26 @@
         </label>
         <input type="text" id="username" name="username" autofocus
                placeholder="e.g. nick" required maxlength="64"
+               autocomplete="username"
+               style="width: 100%; padding: 0.5rem 0.6rem; border: 1px solid var(--border);
+                      border-radius: 3px; font-family: inherit; font-size: 16px; margin-bottom: 1rem;">
+        <label for="password" style="display: block; margin-bottom: 0.4rem; color: var(--muted); font-size: 0.85rem;">
+            Password
+        </label>
+        <input type="password" id="password" name="password" required
+               autocomplete="current-password"
                style="width: 100%; padding: 0.5rem 0.6rem; border: 1px solid var(--border);
                       border-radius: 3px; font-family: inherit; font-size: 16px; margin-bottom: 1rem;">
         <button type="submit">Start chatting</button>
     </form>
 
     <p class="muted" style="margin-top: 1.5rem; font-size: 0.8rem;">
-        This is a local-only chat surface. No password — anyone reaching this
-        port can pick any name. Trust model is "you and your friends on a port-
-        forwarded local network."
+        This chat surface is bound to localhost and gated by a shared password
+        (<code>CHAT_PASSWORD</code>), separate from the admin panel's. The
+        password decides whether you may be here at all; the username only
+        decides whose memories and thread you get. Anyone who knows the
+        password can still type someone else's name — set
+        <code>CHAT_ALLOWED_USERS</code> to narrow that.
     </p>
 </div>
 {% endblock %}

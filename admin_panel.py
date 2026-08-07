@@ -44,9 +44,12 @@ from fritz_utils import (
     ADMIN_PANEL_PASSWORD,
     ADMIN_PANEL_PORT,
     CHAT_ALLOWED_IMAGE_TYPES,
+    CHAT_ALLOWED_USERS,
     CHAT_COOKIE_SECRET,
+    CHAT_COOKIE_SECURE,
     CHAT_DOC_UPLOAD_MAX_BYTES,
     CHAT_IMAGE_UPLOAD_MAX_BYTES,
+    CHAT_PASSWORD,
     DOC_FOLDER,
     MessageSource,
     __version__,
@@ -404,7 +407,7 @@ def _set_chat_cookie(response: Response, username: str) -> None:
     response.set_cookie(
         chat_auth.COOKIE_NAME, token,
         max_age=chat_auth.COOKIE_MAX_AGE_SECONDS,
-        httponly=True, samesite="lax",
+        httponly=True, samesite="lax", secure=CHAT_COOKIE_SECURE,
     )
 
 
@@ -429,8 +432,39 @@ async def chat_page(request: Request) -> HTMLResponse:
 
 
 async def chat_login(request: Request) -> Response:
+    """Exchange the shared chat password + a username for an identity cookie.
+
+    The password is the perimeter ("may you be here at all"); the username is
+    only namespacing ("whose memories, schedules and thread"). Anyone holding
+    the password can still claim any name and read that person's conversation
+    — set CHAT_ALLOWED_USERS to narrow it, or wait for per-user invite tokens.
+
+    Note the route is unthrottled. compare_digest closes the timing channel but
+    nothing rate-limits guessing; that is acceptable while the panel is bound
+    to 127.0.0.1 and reached over an SSH tunnel, and not otherwise.
+    """
+    chat_password = getattr(request.app.state, "chat_password", None)
     form = await request.form()
     username = (form.get("username") or "").strip()
+    password = form.get("password") or ""
+
+    # Fail closed. Without a configured secret the old behaviour was to mint an
+    # identity for anyone who could reach the port, which is the hole this
+    # closes — so refuse rather than fall back to something weaker.
+    if not chat_password:
+        audit_log("chat_login", result="disabled")
+        return templates.TemplateResponse(request, "chat_login.html", {
+            "error": "Chat is disabled on this instance: CHAT_PASSWORD is not set.",
+        }, status_code=503)
+
+    if not secrets.compare_digest(password, chat_password):
+        audit_log("chat_login", result="bad_password",
+                  attempted_user=re.sub(r"[^a-zA-Z0-9_-]", "", username)[:64],
+                  client=request.client.host if request.client else None)
+        return templates.TemplateResponse(request, "chat_login.html", {
+            "error": "Wrong password.",
+        }, status_code=401)
+
     # Same sanitisation as mister_fritz uses for thread_id.
     safe = re.sub(r"[^a-zA-Z0-9_-]", "", username)[:64]
     if not safe:
@@ -438,9 +472,15 @@ async def chat_login(request: Request) -> Response:
         return templates.TemplateResponse(request, "chat_login.html", {
             "error": "Pick a username with at least one letter or number.",
         })
+    if CHAT_ALLOWED_USERS and safe not in CHAT_ALLOWED_USERS:
+        audit_log("chat_login", result="not_allowlisted", user_id=safe)
+        return templates.TemplateResponse(request, "chat_login.html", {
+            "error": "That username is not on the allowlist for this instance.",
+        }, status_code=403)
+
     response = RedirectResponse(url="/chat", status_code=303)
     _set_chat_cookie(response, safe)
-    audit_log("chat_login", user_id=safe)
+    audit_log("chat_login", user_id=safe, result="ok")
     return response
 
 
@@ -823,9 +863,21 @@ async def chat_upload_document(request: Request) -> Response:
 
 # ── App factory + server boot ───────────────────────────────────────────────
 
-def create_app(password: str, schedule_manager=None) -> Starlette:
-    """Build the Starlette app with the password baked in. Exposed as a
-    factory so tests can construct it without spinning up uvicorn."""
+# Distinguishes "caller said nothing about chat_password" (use the configured
+# value) from "caller explicitly passed None" (chat disabled). Both are
+# legitimate and they must not collapse into each other.
+_UNSET = object()
+
+def create_app(password: str, schedule_manager=None, chat_password: str | None = _UNSET) -> Starlette:
+    """Build the Starlette app with the passwords baked in. Exposed as a
+    factory so tests can construct it without spinning up uvicorn.
+
+    `password` gates the admin panel via HTTP Basic; `chat_password` gates
+    /chat/login. They are separate secrets on purpose — chat access must not
+    confer admin access. Omitting `chat_password` takes the configured
+    fritz_utils.CHAT_PASSWORD; passing None explicitly disables chat, which is
+    a different thing and has to stay distinguishable.
+    """
     routes = [
         Route("/", overview, name="overview"),
         Route("/users", users_list, name="users"),
@@ -861,6 +913,7 @@ def create_app(password: str, schedule_manager=None) -> Starlette:
         middleware=[Middleware(_BasicAuthMiddleware, password=password)],
     )
     app.state.schedule_manager = schedule_manager
+    app.state.chat_password = CHAT_PASSWORD if chat_password is _UNSET else chat_password
     return app
 
 
@@ -873,6 +926,15 @@ def start_admin_panel(schedule_manager=None) -> Optional[int]:
     if not ADMIN_PANEL_PASSWORD:
         logger.info("ADMIN_PANEL_PASSWORD not set — admin panel disabled.")
         return None
+
+    if not CHAT_PASSWORD:
+        logger.warning(
+            "CHAT_PASSWORD not set — the web chat at :%d/chat is DISABLED and will "
+            "refuse every login. Set CHAT_PASSWORD in .env to enable it. It is "
+            "deliberately separate from ADMIN_PANEL_PASSWORD so that giving "
+            "someone chat access does not give them the admin panel.",
+            ADMIN_PANEL_PORT,
+        )
 
     app = create_app(ADMIN_PANEL_PASSWORD, schedule_manager=schedule_manager)
     config = uvicorn.Config(

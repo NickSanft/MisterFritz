@@ -4,10 +4,16 @@ The chat surface (`/chat/*`) has its own identity model separate from the
 admin panel's HTTP Basic auth. A user picks a username on first visit; we
 store it in a tamper-resistant cookie so they don't have to type it again.
 
-This is **not** real authentication — anyone reaching `:8001/chat` can claim
-any username they like. The threat model is "me + my friends on a port-
-forwarded local network." For per-user namespacing of memories and
-schedules, that's enough.
+The cookie is issued only after `POST /chat/login` verifies the shared
+`CHAT_PASSWORD`, so holding a valid cookie does mean the bearer cleared the
+perimeter. What the cookie does *not* establish is which person cleared it:
+anyone who knows the password may type any username and get that person's
+memories, schedules and thread. Set `CHAT_ALLOWED_USERS` to narrow the set of
+claimable names; per-user invite tokens are the real fix and are not built yet.
+
+So: the signature makes the username unforgeable *after* issuance, and the
+password makes issuance non-anonymous. Neither makes the username a proven
+identity.
 
 Cookie payload format:
     <username>:<unix_ts>:<hex_hmac>

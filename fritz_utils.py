@@ -165,6 +165,27 @@ TTS_MAX_CONCURRENCY: int = int(os.environ.get("TTS_MAX_CONCURRENCY", "1"))
 ADMIN_PANEL_PASSWORD: str | None = os.environ.get("ADMIN_PANEL_PASSWORD") or None
 ADMIN_PANEL_PORT: int = int(os.environ.get("ADMIN_PANEL_PORT", "8001"))
 
+# Shared secret required to obtain a /chat identity cookie.
+#
+# Deliberately does NOT fall back to ADMIN_PANEL_PASSWORD: handing someone chat
+# access must never hand them the admin panel. If this is unset the chat
+# surface refuses every login rather than minting free identities — that
+# failure is intentional and loud, and start_admin_panel logs why.
+CHAT_PASSWORD: str | None = os.environ.get("CHAT_PASSWORD") or None
+
+# Optional allowlist of usernames that may be claimed at /chat/login. Empty
+# (default) = any sanitised name, once the password checks out. The password is
+# the perimeter; the username is only namespacing, so without this allowlist
+# anyone holding the password can claim anyone else's name and read their
+# conversation.
+CHAT_ALLOWED_USERS: frozenset[str] = frozenset(
+    u.strip() for u in os.environ.get("CHAT_ALLOWED_USERS", "").split(",") if u.strip()
+)
+
+# Mark the chat cookie Secure. Off by default: the panel is normally reached
+# over plain http through an SSH tunnel, where Secure would silently break login.
+CHAT_COOKIE_SECURE: bool = os.environ.get("CHAT_COOKIE_SECURE", "").lower() in ("1", "true", "yes")
+
 
 # Secret used to HMAC-sign the chat identity cookie. If unset, we auto-generate
 # one and persist it to .chat_cookie_secret on first boot so cookies survive

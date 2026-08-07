@@ -33,6 +33,10 @@ _env = patch.dict(os.environ, {
     "DB_NAME": str(_TMP / "test_fritz.db"),
     "WORKSPACES_ROOT": str(_TMP / "workspaces"),
     "ADMIN_PANEL_PASSWORD": "secret",
+    # Deliberately different from ADMIN_PANEL_PASSWORD: there is no fallback
+    # between them, and a test that shared one value would not notice if one
+    # were reintroduced.
+    "CHAT_PASSWORD": "chatsecret",
 })
 _env.start()
 
@@ -47,6 +51,7 @@ importlib.reload(admin_panel)
 
 
 PASSWORD = "secret"
+CHAT_PASSWORD = "chatsecret"
 
 
 def _auth_header(password: str = PASSWORD) -> dict:
@@ -54,9 +59,20 @@ def _auth_header(password: str = PASSWORD) -> dict:
     return {"Authorization": f"Basic {encoded}"}
 
 
-def _build_client(schedule_manager=None) -> TestClient:
-    app = admin_panel.create_app(PASSWORD, schedule_manager=schedule_manager)
+def _build_client(schedule_manager=None, chat_password="__default__") -> TestClient:
+    kwargs = {} if chat_password == "__default__" else {"chat_password": chat_password}
+    app = admin_panel.create_app(PASSWORD, schedule_manager=schedule_manager, **kwargs)
     return TestClient(app)
+
+
+def _login(client: TestClient, username: str = "alice",
+           password: str = CHAT_PASSWORD, **kwargs):
+    """Obtain a chat identity cookie. /chat/login now needs a password, so
+    every test that wants an authed chat session goes through here rather than
+    repeating the form fields."""
+    return client.post(
+        "/chat/login", data={"username": username, "password": password}, **kwargs,
+    )
 
 
 class TestAuth(unittest.TestCase):
@@ -333,16 +349,14 @@ class TestChatBypassesAdminAuth(unittest.TestCase):
 class TestChatLogin(unittest.TestCase):
     def test_post_login_sets_cookie_and_redirects(self):
         client = _build_client()
-        r = client.post("/chat/login", data={"username": "alice"},
-                        follow_redirects=False)
+        r = _login(client, follow_redirects=False)
         self.assertEqual(r.status_code, 303)
         self.assertEqual(r.headers["location"], "/chat")
         self.assertIn("fritz_chat_id", r.cookies)
 
     def test_empty_username_renders_error(self):
         client = _build_client()
-        r = client.post("/chat/login", data={"username": "  "},
-                        follow_redirects=False)
+        r = _login(client, username="  ", follow_redirects=False)
         # Re-renders login form with error message (200, not redirect).
         self.assertEqual(r.status_code, 200)
         self.assertIn("at least one letter", r.text)
@@ -350,8 +364,7 @@ class TestChatLogin(unittest.TestCase):
     def test_username_is_sanitised(self):
         # Path-like or punctuation-heavy usernames get stripped to safe chars.
         client = _build_client()
-        r = client.post("/chat/login", data={"username": "../bad/name"},
-                        follow_redirects=False)
+        r = _login(client, username="../bad/name", follow_redirects=False)
         self.assertEqual(r.status_code, 303)
         # The set cookie should contain "badname" (slashes + dots stripped).
         import chat_auth
@@ -360,11 +373,80 @@ class TestChatLogin(unittest.TestCase):
         self.assertEqual(chat_auth.verify_cookie(token, CHAT_COOKIE_SECRET), "badname")
 
 
+class TestChatPasswordGate(unittest.TestCase):
+    """The password is the perimeter: before this, anyone who could reach the
+    port could type any username and read that person's conversation."""
+
+    def test_missing_password_is_rejected(self):
+        client = _build_client()
+        with patch.object(admin_panel, "audit_log"):
+            r = client.post("/chat/login", data={"username": "alice"},
+                            follow_redirects=False)
+        self.assertEqual(r.status_code, 401)
+        self.assertNotIn("fritz_chat_id", r.cookies)
+
+    def test_wrong_password_is_rejected(self):
+        client = _build_client()
+        with patch.object(admin_panel, "audit_log"):
+            r = _login(client, password="wrong", follow_redirects=False)
+        self.assertEqual(r.status_code, 401)
+        self.assertNotIn("fritz_chat_id", r.cookies)
+
+    def test_bad_password_attempt_is_audited(self):
+        client = _build_client()
+        with patch.object(admin_panel, "audit_log") as audit:
+            _login(client, password="wrong", follow_redirects=False)
+        kwargs = audit.call_args.kwargs
+        self.assertEqual(kwargs["result"], "bad_password")
+        self.assertEqual(kwargs["attempted_user"], "alice")
+
+    def test_correct_password_still_works(self):
+        client = _build_client()
+        r = _login(client, follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        self.assertIn("fritz_chat_id", r.cookies)
+
+    def test_chat_is_disabled_when_no_password_configured(self):
+        # Fail closed rather than minting free identities.
+        client = _build_client(chat_password=None)
+        with patch.object(admin_panel, "audit_log"):
+            r = _login(client, follow_redirects=False)
+        self.assertEqual(r.status_code, 503)
+        self.assertNotIn("fritz_chat_id", r.cookies)
+        self.assertIn("CHAT_PASSWORD", r.text)
+
+    def test_admin_password_is_not_accepted_for_chat(self):
+        # DECISIONS #2b: no fallback between the two secrets. Giving someone
+        # chat access must never hand them the admin panel's password.
+        client = _build_client()
+        with patch.object(admin_panel, "audit_log"):
+            r = _login(client, password=PASSWORD, follow_redirects=False)
+        self.assertEqual(r.status_code, 401)
+
+    def test_allowlist_blocks_unlisted_username(self):
+        client = _build_client()
+        with patch.object(admin_panel, "CHAT_ALLOWED_USERS", frozenset({"alice"})), \
+             patch.object(admin_panel, "audit_log"):
+            r = _login(client, username="mallory", follow_redirects=False)
+        self.assertEqual(r.status_code, 403)
+        self.assertNotIn("fritz_chat_id", r.cookies)
+
+    def test_allowlist_admits_listed_username(self):
+        client = _build_client()
+        with patch.object(admin_panel, "CHAT_ALLOWED_USERS", frozenset({"alice"})):
+            r = _login(client, username="alice", follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+
+    def test_login_page_no_longer_claims_there_is_no_password(self):
+        client = _build_client()
+        self.assertNotIn("No password", client.get("/chat").text)
+
+
 class TestChatLogout(unittest.TestCase):
     def test_logout_clears_cookie(self):
         client = _build_client()
         # First log in.
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
         # Then log out.
         r = client.post("/chat/logout", follow_redirects=False)
         self.assertEqual(r.status_code, 303)
@@ -377,7 +459,7 @@ class TestChatLogout(unittest.TestCase):
 class TestChatPageWithCookie(unittest.TestCase):
     def test_authed_user_sees_chat_ui(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
         r = client.get("/chat")
         self.assertEqual(r.status_code, 200)
         self.assertIn("alice", r.text)
@@ -395,7 +477,7 @@ class TestChatCorrectnessAndA11y(unittest.TestCase):
 
     def _chat_page(self) -> str:
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
         return client.get("/chat").text
 
     def test_viewport_meta_present(self):
@@ -450,7 +532,7 @@ class TestChatSend(unittest.TestCase):
 
     def test_authed_send_invokes_ask_stuff_with_username(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
 
         fake_module = MagicMock()
         fake_module.ask_stuff.return_value = {
@@ -472,7 +554,7 @@ class TestChatSend(unittest.TestCase):
 
     def test_send_audit_log_records_message_chars(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
 
         fake_module = MagicMock()
         fake_module.ask_stuff.return_value = {"text": "okay", "image_paths": [], "timestamp": "now"}
@@ -490,7 +572,7 @@ class TestChatSend(unittest.TestCase):
 
     def test_empty_message_redirects_without_invoking_agent(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
 
         fake_module = MagicMock()
         with patch.dict(sys.modules, {"mister_fritz": fake_module}):
@@ -534,7 +616,7 @@ class TestChatStreamUnauthed(unittest.TestCase):
 class TestChatStreamSuccess(unittest.TestCase):
     def test_streams_token_events_then_done(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
 
         # Fake ask_stuff calls its streaming_callback a few times, then returns.
         def fake_ask_stuff(message, source, user, *,
@@ -564,7 +646,7 @@ class TestChatStreamSuccess(unittest.TestCase):
 
     def test_audit_log_records_streamed_message(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
 
         def fake_ask_stuff(message, source, user, *,
                           streaming_callback=None, **_):
@@ -588,7 +670,7 @@ class TestChatStreamSuccess(unittest.TestCase):
 class TestChatStreamError(unittest.TestCase):
     def test_agent_exception_yields_error_event(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
 
         def fake_ask_stuff(message, source, user, **_):
             raise RuntimeError("ollama down")
@@ -612,7 +694,7 @@ class TestChatStreamError(unittest.TestCase):
 class TestChatStreamEmptyMessage(unittest.TestCase):
     def test_empty_message_returns_400(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
         r = client.post("/chat/stream", data={"message": "   "})
         self.assertEqual(r.status_code, 400)
 
@@ -698,7 +780,7 @@ class TestChatStreamDonePayload(unittest.TestCase):
     def test_done_event_carries_html_and_text(self):
         import json as _json
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
 
         def fake_ask_stuff(message, source, user, *,
                           streaming_callback=None, progress_callback=None, **_):
@@ -723,7 +805,7 @@ class TestChatStreamDonePayload(unittest.TestCase):
 class TestChatStreamProgressEvents(unittest.TestCase):
     def test_progress_callback_yields_progress_events(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
 
         def fake_ask_stuff(message, source, user, *,
                           streaming_callback=None, progress_callback=None, **_):
@@ -752,7 +834,7 @@ class TestChatHistory(unittest.TestCase):
 
     def test_authed_returns_messages_from_loader(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
         fake_history = [
             {"role": "user", "content": "hi", "html": None},
             {"role": "fritz", "content": "Greetings.", "html": "<p>Greetings.</p>"},
@@ -768,7 +850,7 @@ class TestChatHistory(unittest.TestCase):
 class TestChatForget(unittest.TestCase):
     def test_authed_post_calls_forget_conversation_and_redirects(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
         with patch.object(privacy, "forget_conversation", return_value=3) as fc, \
              patch.object(admin_panel, "audit_log") as audit:
             r = client.post("/chat/forget", follow_redirects=False)
@@ -797,14 +879,14 @@ class TestChatAsset(unittest.TestCase):
 
     def test_path_escape_returns_404(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
         # Try to escape the asset roots.
         r = client.get("/chat/assets/../etc/passwd")
         self.assertEqual(r.status_code, 404)
 
     def test_serves_existing_file_under_output(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
 
         # Create a file under ./output for the test.
         os.makedirs("output", exist_ok=True)
@@ -868,7 +950,7 @@ class TestChatUploadImage(unittest.TestCase):
 
     def test_happy_path_saves_file_and_stashes_pending(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
         with patch.object(admin_panel, "audit_log"):
             r = client.post(
                 "/chat/upload/image",
@@ -886,7 +968,7 @@ class TestChatUploadImage(unittest.TestCase):
 
     def test_rejects_unsupported_content_type(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
         with patch.object(admin_panel, "audit_log"):
             r = client.post(
                 "/chat/upload/image",
@@ -896,7 +978,7 @@ class TestChatUploadImage(unittest.TestCase):
 
     def test_rejects_oversized_image(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
         with patch.object(admin_panel, "CHAT_IMAGE_UPLOAD_MAX_BYTES", 32), \
              patch.object(admin_panel, "audit_log"):
             r = client.post(
@@ -907,7 +989,7 @@ class TestChatUploadImage(unittest.TestCase):
 
     def test_missing_file_field_returns_400(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
         r = client.post("/chat/upload/image", data={"not_file": "x"})
         self.assertEqual(r.status_code, 400)
 
@@ -935,7 +1017,7 @@ class TestChatUploadDocument(unittest.TestCase):
 
     def test_non_admin_returns_403(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "bob"})  # not "alice"
+        _login(client, "bob")  # not "alice"
         with patch.object(admin_panel, "audit_log"):
             r = client.post(
                 "/chat/upload/document",
@@ -945,7 +1027,7 @@ class TestChatUploadDocument(unittest.TestCase):
 
     def test_admin_happy_path_writes_to_doc_folder(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
         with patch.object(admin_panel, "audit_log"):
             r = client.post(
                 "/chat/upload/document",
@@ -959,7 +1041,7 @@ class TestChatUploadDocument(unittest.TestCase):
 
     def test_admin_rejected_for_bad_extension(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
         with patch.object(admin_panel, "audit_log"):
             r = client.post(
                 "/chat/upload/document",
@@ -977,7 +1059,7 @@ class TestPendingImagePlumbing(unittest.TestCase):
 
     def test_send_picks_up_pending_image_and_clears(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
         admin_panel._stash_pending_image("alice", "/tmp/fake-img.png")
 
         captured = {}
@@ -1006,7 +1088,7 @@ class TestPendingImagePlumbing(unittest.TestCase):
 
     def test_send_without_pending_uses_local_source(self):
         client = _build_client()
-        client.post("/chat/login", data={"username": "alice"})
+        _login(client)
 
         captured = {}
 
