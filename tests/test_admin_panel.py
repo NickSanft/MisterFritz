@@ -390,6 +390,56 @@ class TestChatPageWithCookie(unittest.TestCase):
         self.assertIn("Sign in to chat", r.text)
 
 
+class TestChatCorrectnessAndA11y(unittest.TestCase):
+    """Guards for the mobile / confirm-dialog / screen-reader fixes."""
+
+    def _chat_page(self) -> str:
+        client = _build_client()
+        client.post("/chat/login", data={"username": "alice"})
+        return client.get("/chat").text
+
+    def test_viewport_meta_present(self):
+        # Lives in base.html, so this covers all eight templates at once.
+        self.assertIn('name="viewport"', self._chat_page())
+
+    def test_login_page_also_has_viewport_meta(self):
+        client = _build_client()
+        self.assertIn('name="viewport"', client.get("/chat").text)
+
+    def test_forget_form_has_no_inline_onsubmit(self):
+        # The attribute it replaced contained a literal \\' sequence. HTML does
+        # not unescape backslashes, so the handler was a SyntaxError, compiled
+        # to null, and POST /chat/forget fired with no confirmation at all —
+        # destroying the thread's checkpoint unrecoverably.
+        page = self._chat_page()
+        self.assertNotIn("onsubmit", page)
+        self.assertIn('id="chat-forget-form"', page)
+
+    def test_confirm_is_registered_above_the_early_return_guard(self):
+        # Placement is the whole fix: below `if (!form || !list) return;` a
+        # missing composer would silently disarm the confirmation again.
+        page = self._chat_page()
+        listener = page.index("chat-forget-form")
+        guard = page.index("if (!form || !list) return;")
+        self.assertLess(listener, guard)
+
+    def test_transcript_is_a_log_region(self):
+        page = self._chat_page()
+        self.assertIn('role="log"', page)
+        self.assertIn('aria-live="polite"', page)
+
+    def test_status_region_exists(self):
+        self.assertIn('id="chat-status"', self._chat_page())
+
+    def test_composer_font_size_avoids_ios_zoom(self):
+        # iOS Safari force-zooms a focused input whose text is under 16px and
+        # never zooms back out.
+        self.assertIn("font-size: 16px", self._chat_page())
+
+    def test_reduced_motion_block_present(self):
+        self.assertIn("prefers-reduced-motion", self._chat_page())
+
+
 class TestChatSend(unittest.TestCase):
     def test_unauthed_send_redirects_to_chat(self):
         client = _build_client()

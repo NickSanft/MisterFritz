@@ -55,7 +55,10 @@
     }
     .chat-input-row textarea {
         flex: 1; padding: 0.6rem 0.75rem; border: 1px solid var(--border);
-        border-radius: 4px; font-family: inherit; font-size: 0.95rem;
+        border-radius: 4px; font-family: inherit;
+        /* 16px floor: iOS Safari force-zooms the whole page when a focused
+           input's text is smaller, and never zooms back out. */
+        font-size: 16px;
         resize: vertical; min-height: 3rem;
     }
     .chat-input-row button { padding: 0.5rem 1.25rem; }
@@ -96,14 +99,33 @@
         text-align: center; color: var(--muted); padding: 3rem 1rem;
         font-style: italic;
     }
+    /* Announced to screen readers, not shown — the transcript itself is the
+       visual feedback. Not display:none, which removes it from the a11y tree. */
+    .visually-hidden {
+        position: absolute; width: 1px; height: 1px; overflow: hidden;
+        clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+    }
+    @media (max-width: 700px) {
+        /* The 4rem bubble insets leave almost no line length on a phone. */
+        .chat-bubble.user { margin-left: 1.5rem; }
+        .chat-bubble.fritz { margin-right: 1.5rem; }
+        .chat-progress { margin-right: 1.5rem; }
+        .chat-input-row { flex-wrap: wrap; }
+        .chat-input-row textarea { flex: 1 0 100%; order: -1; }
+        .chat-header { flex-direction: column; align-items: flex-start; }
+    }
 </style>
 
 <div class="chat-shell">
     <div class="chat-header">
         <span class="muted">Signed in as <code>{{ username }}</code></span>
         <span class="right">
-            <form class="inline" method="post" action="/chat/forget"
-                  onsubmit="return confirm('Start a fresh conversation? Your memories and schedules stay; only this thread\\'s context is reset.');">
+            {# No onsubmit attribute: the confirmation is registered in JS
+               below, above the early-return guard. The attribute this
+               replaced contained a literal \\' sequence, which HTML does not
+               unescape, so the handler failed to compile and the thread was
+               destroyed with no prompt at all. #}
+            <form class="inline" method="post" action="/chat/forget" id="chat-forget-form">
                 <button type="submit">New conversation</button>
             </form>
             <form class="inline" method="post" action="/chat/logout">
@@ -113,7 +135,9 @@
     </div>
 
     <div class="card">
-        <div id="chat-messages">
+        <div id="chat-status" class="visually-hidden" role="status" aria-live="polite"></div>
+        <div id="chat-messages" role="log" aria-live="polite" aria-atomic="false"
+             aria-label="Conversation with Mister Fritz">
             {% if messages %}
                 {% for m in messages %}
                 <div class="chat-bubble {{ m.role }}">
@@ -163,9 +187,33 @@
 // Hijack the form submit to use SSE streaming. If JavaScript is disabled or
 // fails to load, the form still POSTs to /chat/send (sync fallback).
 (function() {
+    // Registered FIRST, above the early-return guard below. "New conversation"
+    // calls privacy.forget_conversation, which DELETEs from `checkpoints` and
+    // `writes` — unrecoverable. If this listener ever moves below the guard,
+    // a missing composer silently disarms the confirmation again.
+    const forgetForm = document.getElementById("chat-forget-form");
+    if (forgetForm) {
+        forgetForm.addEventListener("submit", function(ev) {
+            const ok = window.confirm(
+                "Start a fresh conversation? Your memories and schedules stay; " +
+                "only this thread's context is reset."
+            );
+            if (!ok) ev.preventDefault();
+        });
+    }
+
     const form = document.getElementById("chat-form");
     const list = document.getElementById("chat-messages");
+    const statusRegion = document.getElementById("chat-status");
     if (!form || !list) return;
+
+    // Screen readers get an explicit spoken status; sighted users have the
+    // streaming caret. aria-busy tells AT the log is mid-update so it doesn't
+    // announce every partial token.
+    function setStatus(text, busy) {
+        if (statusRegion) statusRegion.textContent = text || "";
+        list.setAttribute("aria-busy", busy ? "true" : "false");
+    }
 
     const shell = document.querySelector(".chat-shell");
     const attachBtn = document.getElementById("chat-attach-btn");
@@ -319,6 +367,7 @@
         textarea.value = "";
         textarea.disabled = true;
         form.querySelector("button[type=submit]").disabled = true;
+        setStatus("Mister Fritz is composing a reply.", true);
 
         const fd = new FormData();
         fd.append("message", message);
@@ -375,11 +424,13 @@
                             fritzBubble.classList.remove("streaming");
                             for (const line of progressLines) line.remove();
                             progressLines.length = 0;
+                            setStatus("Mister Fritz has replied.", false);
                         } else if (eventName === "error") {
                             body.textContent = "Error: " + data;
                             fritzBubble.classList.remove("streaming");
                             for (const line of progressLines) line.remove();
                             progressLines.length = 0;
+                            setStatus("The reply failed.", false);
                         }
                         lastEvent = eventName;
                     }
@@ -389,11 +440,16 @@
             .catch((err) => {
                 body.textContent = "Network error: " + err.message;
                 fritzBubble.classList.remove("streaming");
+                setStatus("The reply failed.", false);
             })
             .finally(() => {
                 textarea.disabled = false;
                 form.querySelector("button[type=submit]").disabled = false;
-                textarea.focus();
+                list.setAttribute("aria-busy", "false");
+                // Only pull focus back on a device with a real keyboard —
+                // re-focusing on touch re-opens the soft keyboard after every
+                // send and covers the reply the user is waiting to read.
+                if (!window.matchMedia("(pointer: coarse)").matches) textarea.focus();
                 window.scrollTo(0, document.body.scrollHeight);
             });
     });

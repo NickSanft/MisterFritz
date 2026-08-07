@@ -492,9 +492,13 @@ async def chat_send(request: Request) -> Response:
                   attached_images=len(pending_images), result="error", error=str(e))
         return templates.TemplateResponse(request, "chat.html", {
             "username": user,
+            "is_admin": fritz_utils.is_admin(user),
             "messages": [
-                {"role": "user", "content": message},
-                {"role": "fritz", "content": f"❌ An error occurred: {e}"},
+                # `html` must be present on both dicts: chat.html branches on
+                # `m.role == "fritz" and m.html`, and an absent key silently
+                # takes the plain-text path.
+                {"role": "user", "content": message, "html": None},
+                {"role": "fritz", "content": f"❌ An error occurred: {e}", "html": None},
             ],
         })
 
@@ -503,6 +507,9 @@ async def chat_send(request: Request) -> Response:
 
     return templates.TemplateResponse(request, "chat.html", {
         "username": user,
+        # Without this the {% if is_admin %} upload panel silently disappears
+        # after a no-JS send, because Jinja treats the missing key as falsey.
+        "is_admin": fritz_utils.is_admin(user),
         "messages": [
             {"role": "user", "content": message, "html": None},
             {"role": "fritz", "content": reply or "(no response)",

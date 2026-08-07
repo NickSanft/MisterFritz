@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}Mister Fritz Admin{% endblock %}</title>
     <style>
         :root {
@@ -66,6 +67,31 @@
         }
         button.danger:hover { background: var(--danger); color: #fff; }
         form.inline { display: inline; margin: 0; }
+
+        /* Mobile. The panel was desktop-only: fixed 2rem gutters and tables
+           that force a horizontal body scroll on a phone. */
+        @media (max-width: 700px) {
+            header {
+                padding: 0.75rem 1rem; flex-direction: column;
+                align-items: flex-start; gap: 0.5rem;
+            }
+            header nav a { margin-right: 0.9rem; }
+            main { padding: 1rem; }
+            .card { padding: 0.9rem; }
+            /* Wide tables scroll inside their own box rather than the page. */
+            table { display: block; overflow-x: auto; white-space: nowrap; }
+        }
+
+        /* Respect the OS "reduce motion" setting. Anything decorative that
+           moves must stop; nothing here conveys state by motion alone. */
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+                scroll-behavior: auto !important;
+            }
+        }
     </style>
 </head>
 <body>
