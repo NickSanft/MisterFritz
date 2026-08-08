@@ -32,9 +32,16 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Re
 from starlette.routing import Route
 from starlette.templating import Jinja2Templates
 
+import io
+
 import markdown as md_lib
 import nh3
 from starlette.responses import FileResponse
+
+try:
+    from PIL import Image as _PILImage
+except ImportError:  # pragma: no cover — Pillow ships with the image extra
+    _PILImage = None
 
 import chat_auth
 import fritz_utils
@@ -43,6 +50,7 @@ import workspace_store
 from fritz_utils import (
     ADMIN_PANEL_PASSWORD,
     ADMIN_PANEL_PORT,
+    CHAT_ALLOWED_IMAGE_FORMATS,
     CHAT_ALLOWED_IMAGE_TYPES,
     CHAT_ALLOWED_USERS,
     CHAT_COOKIE_SECRET,
@@ -681,6 +689,25 @@ def _chat_asset_url(path: str) -> str | None:
     return None
 
 
+# Extension → Content-Type allowlist for /chat/assets. Deriving the type here
+# rather than letting Starlette guess is the point: a file that somehow lands
+# in a root with an executable extension becomes a 404, not a same-origin HTML
+# document served next to the chat session's cookie.
+_CHAT_ASSET_CONTENT_TYPES = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".webp": "image/webp",
+}
+# Deliberately NOT Content-Disposition: attachment — thumbnails and generated
+# images have to render inline. An allowlisted image type plus nosniff plus a
+# sandboxing CSP gets the same safety without breaking them.
+_CHAT_ASSET_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; sandbox; frame-ancestors 'none'",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "private, max-age=60",
+}
+
+
 async def chat_asset(request: Request) -> Response:
     """Serve a file from one of the chat-asset roots (./output, ./temp_images).
     Requires an authed chat user; rejects paths that escape the roots."""
@@ -690,12 +717,27 @@ async def chat_asset(request: Request) -> Response:
     rel = request.path_params["path"]
     if not rel:
         return Response(status_code=404)
+    media_type = _CHAT_ASSET_CONTENT_TYPES.get(os.path.splitext(rel)[1].lower())
+    if media_type is None:
+        return Response(status_code=404)
+    safe_user = re.sub(r"[^a-zA-Z0-9_-]", "_", user)
     for root in _chat_asset_roots():
         root_parent = os.path.dirname(root)
         full = os.path.abspath(os.path.join(root_parent, rel))
         if full == root or full.startswith(root + os.sep):
-            if os.path.isfile(full):
-                return FileResponse(full)
+            if not os.path.isfile(full):
+                continue
+            # temp_images holds uploads, named "<safe_user>_<ts>_<name>" by
+            # chat_upload_image, so only the uploader may fetch their own.
+            # ./output holds images Fritz generated; those are named
+            # generated_image-<ts>.png with no owner recorded anywhere, so they
+            # stay readable by any signed-in chat user until there is a registry.
+            if os.path.basename(root) == "temp_images" and \
+                    not os.path.basename(full).startswith(f"{safe_user}_"):
+                audit_log("chat_asset_denied", user_id=user, path=rel)
+                return Response(status_code=404)
+            return FileResponse(full, media_type=media_type,
+                                headers=dict(_CHAT_ASSET_HEADERS))
     return Response(status_code=404)
 
 
@@ -752,6 +794,42 @@ def _safe_filename(name: str) -> str:
     return f"{safe_stem}.{safe_ext}" if safe_ext else safe_stem
 
 
+def _safe_stem(name: str) -> str:
+    """Sanitised basename with any client-supplied extension discarded.
+
+    The caller appends a canonical extension derived from the sniffed content —
+    never from the upload's filename or its declared Content-Type. _safe_filename
+    keeps whatever extension the client sent, and "html" and "svg" survive its
+    character filter intact, which is how an uploaded file could end up served
+    back as a same-origin document.
+    """
+    base = os.path.basename(name or "upload")
+    stem, dot, _ext = base.rpartition(".")
+    stem = stem if dot else base
+    return re.sub(r"[^a-zA-Z0-9._-]", "_", stem)[:80] or "upload"
+
+
+def _sniff_image_format(raw: bytes) -> str | None:
+    """Return the Pillow format name if `raw` really is an allowed image, else None.
+
+    The declared Content-Type is not evidence — any script can send
+    `image/png` with an HTML or SVG body. Verified against Pillow 12: open()
+    raises UnidentifiedImageError on an HTML document, on an SVG document, and
+    even on PNG magic bytes followed by HTML. verify() checks structure without
+    decoding pixels, so a decompression bomb is not materialised here; the size
+    cap applied before this call is the other half of that guarantee.
+    """
+    if not raw or _PILImage is None:
+        return None
+    try:
+        with _PILImage.open(io.BytesIO(raw)) as img:
+            fmt = img.format
+            img.verify()
+    except Exception:
+        return None
+    return fmt if fmt in CHAT_ALLOWED_IMAGE_FORMATS else None
+
+
 async def chat_upload_image(request: Request) -> Response:
     """Accept a multipart-form image, save it to ./temp_images/, and stash
     the path in the per-user pending list. The next /chat/send or
@@ -765,7 +843,9 @@ async def chat_upload_image(request: Request) -> Response:
     if upload is None or not hasattr(upload, "read"):
         return JSONResponse({"error": "missing file field"}, status_code=400)
 
-    content_type = (getattr(upload, "content_type", "") or "").lower()
+    # Order matters: cheap header check, then the size cap, then the decode.
+    # Keeping the cap before the sniff bounds what Pillow is asked to parse.
+    content_type = (getattr(upload, "content_type", "") or "").lower().split(";")[0].strip()
     if content_type not in CHAT_ALLOWED_IMAGE_TYPES:
         audit_log("chat_upload_image", user_id=user, result="rejected_type",
                   content_type=content_type)
@@ -783,9 +863,20 @@ async def chat_upload_image(request: Request) -> Response:
             status_code=413,
         )
 
+    fmt = _sniff_image_format(raw)
+    if fmt is None:
+        audit_log("chat_upload_image", user_id=user, result="rejected_content",
+                  declared_type=content_type, bytes=len(raw))
+        return JSONResponse(
+            {"error": "file content is not a supported image"},
+            status_code=415,
+        )
+    canonical_ext, _canonical_mime = CHAT_ALLOWED_IMAGE_FORMATS[fmt]
+
     os.makedirs("temp_images", exist_ok=True)
     ts = int(time.time())
-    safe_name = _safe_filename(getattr(upload, "filename", "upload"))
+    # Extension comes from what the bytes actually are, never from the client.
+    safe_name = f"{_safe_stem(getattr(upload, 'filename', 'upload'))}.{canonical_ext}"
     safe_user = re.sub(r"[^a-zA-Z0-9_-]", "_", user)
     target = os.path.abspath(os.path.join("temp_images", f"{safe_user}_{ts}_{safe_name}"))
     with open(target, "wb") as f:

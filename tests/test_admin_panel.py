@@ -884,21 +884,81 @@ class TestChatAsset(unittest.TestCase):
         r = client.get("/chat/assets/../etc/passwd")
         self.assertEqual(r.status_code, 404)
 
-    def test_serves_existing_file_under_output(self):
+    def test_serves_existing_image_under_output(self):
         client = _build_client()
         _login(client)
 
-        # Create a file under ./output for the test.
         os.makedirs("output", exist_ok=True)
-        marker = os.path.join("output", "_admin_panel_test_marker.txt")
-        with open(marker, "w") as f:
-            f.write("hello world")
+        marker = os.path.join("output", "_admin_panel_test_marker.png")
+        with open(marker, "wb") as f:
+            f.write(_TINY_PNG)
         try:
-            r = client.get("/chat/assets/output/_admin_panel_test_marker.txt")
+            r = client.get("/chat/assets/output/_admin_panel_test_marker.png")
             self.assertEqual(r.status_code, 200)
-            self.assertEqual(r.text, "hello world")
+            self.assertEqual(r.content, _TINY_PNG)
         finally:
             os.unlink(marker)
+
+    def test_response_carries_hardening_headers(self):
+        client = _build_client()
+        _login(client)
+        os.makedirs("output", exist_ok=True)
+        marker = os.path.join("output", "_admin_panel_hdr_marker.png")
+        with open(marker, "wb") as f:
+            f.write(_TINY_PNG)
+        try:
+            r = client.get("/chat/assets/output/_admin_panel_hdr_marker.png")
+            self.assertEqual(r.headers["content-type"], "image/png")
+            self.assertEqual(r.headers["x-content-type-options"], "nosniff")
+            csp = r.headers["content-security-policy"]
+            self.assertIn("default-src 'none'", csp)
+            self.assertIn("sandbox", csp)
+        finally:
+            os.unlink(marker)
+
+    def test_non_image_extension_is_404(self):
+        # The whole point: a stored .html must never be served back as a
+        # same-origin document next to the chat session's cookie.
+        client = _build_client()
+        _login(client)
+        os.makedirs("output", exist_ok=True)
+        marker = os.path.join("output", "_admin_panel_test_marker.html")
+        with open(marker, "w") as f:
+            f.write("<script>alert(1)</script>")
+        try:
+            r = client.get("/chat/assets/output/_admin_panel_test_marker.html")
+            self.assertEqual(r.status_code, 404)
+        finally:
+            os.unlink(marker)
+
+    def test_user_cannot_fetch_another_users_upload(self):
+        client = _build_client()
+        _login(client, "bob")
+        os.makedirs("temp_images", exist_ok=True)
+        # Named as chat_upload_image would name one of alice's uploads.
+        victim = os.path.join("temp_images", "alice_123_secret.png")
+        with open(victim, "wb") as f:
+            f.write(_TINY_PNG)
+        try:
+            with patch.object(admin_panel, "audit_log") as audit:
+                r = client.get("/chat/assets/temp_images/alice_123_secret.png")
+            self.assertEqual(r.status_code, 404)
+            self.assertEqual(audit.call_args.args[0], "chat_asset_denied")
+        finally:
+            os.unlink(victim)
+
+    def test_user_can_fetch_their_own_upload(self):
+        client = _build_client()
+        _login(client, "alice")
+        os.makedirs("temp_images", exist_ok=True)
+        mine = os.path.join("temp_images", "alice_123_mine.png")
+        with open(mine, "wb") as f:
+            f.write(_TINY_PNG)
+        try:
+            r = client.get("/chat/assets/temp_images/alice_123_mine.png")
+            self.assertEqual(r.status_code, 200)
+        finally:
+            os.unlink(mine)
 
 
 class TestChatAssetUrlHelper(unittest.TestCase):
@@ -917,9 +977,19 @@ class TestChatAssetUrlHelper(unittest.TestCase):
 
 # ── Phase web-chat-4: file uploads ──────────────────────────────────────────
 
-# Tiny payload we claim is an image — admin_panel validates the content-type
-# header, not the actual file bytes, so this is enough for the tests.
-_TINY_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+# A real, decodable 1x1 PNG. The previous fixture was PNG magic bytes followed
+# by nulls, which Pillow rejects with UnidentifiedImageError — it only ever
+# passed because the upload route trusted the declared Content-Type and never
+# looked at the body.
+_TINY_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\xcf\xc0"
+    b"\x00\x00\x03\x01\x01\x00\xc9\xfe\x92\xef\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+# Payloads that declare an image type but are not one.
+_HTML_PAYLOAD = b"<html><script>alert(1)</script></html>"
+_SVG_PAYLOAD = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
 
 
 def _drain_for_user(user: str):
@@ -992,6 +1062,84 @@ class TestChatUploadImage(unittest.TestCase):
         _login(client)
         r = client.post("/chat/upload/image", data={"not_file": "x"})
         self.assertEqual(r.status_code, 400)
+
+
+class TestChatUploadImageSniffing(unittest.TestCase):
+    """The declared Content-Type is not evidence — the bytes are."""
+
+    def setUp(self):
+        _drain_for_user("alice")
+
+    def tearDown(self):
+        _drain_for_user("alice")
+        if os.path.isdir("temp_images"):
+            for f in os.listdir("temp_images"):
+                if f.startswith("alice_"):
+                    try:
+                        os.unlink(os.path.join("temp_images", f))
+                    except OSError:
+                        pass
+
+    def _upload(self, filename, body, declared="image/png"):
+        client = _build_client()
+        _login(client)
+        with patch.object(admin_panel, "audit_log"):
+            return client.post(
+                "/chat/upload/image",
+                files={"file": (filename, body, declared)},
+            )
+
+    def test_html_declared_as_png_is_rejected(self):
+        r = self._upload("evil.png", _HTML_PAYLOAD)
+        self.assertEqual(r.status_code, 415)
+
+    def test_svg_declared_as_png_is_rejected(self):
+        r = self._upload("evil.png", _SVG_PAYLOAD)
+        self.assertEqual(r.status_code, 415)
+
+    def test_png_magic_followed_by_html_is_rejected(self):
+        # Magic-byte prefix matching alone would let this through.
+        r = self._upload("evil.png", b"\x89PNG\r\n\x1a\n<html><script>x</script>")
+        self.assertEqual(r.status_code, 415)
+
+    def test_rejected_content_writes_nothing_to_temp_images(self):
+        before = set(os.listdir("temp_images")) if os.path.isdir("temp_images") else set()
+        self._upload("evil.png", _HTML_PAYLOAD)
+        after = set(os.listdir("temp_images")) if os.path.isdir("temp_images") else set()
+        self.assertEqual(before, after)
+
+    def test_extension_comes_from_content_not_filename(self):
+        # A genuine PNG uploaded as "evil.html" must be stored as .png.
+        r = self._upload("evil.html", _TINY_PNG)
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["name"].endswith(".png"))
+        with admin_panel._pending_images_lock:
+            pending = list(admin_panel._pending_images.get("alice", []))
+        self.assertEqual(len(pending), 1)
+        self.assertTrue(pending[0].endswith(".png"))
+        self.assertNotIn(".html", os.path.basename(pending[0]))
+
+    def test_gif_body_declared_png_is_stored_as_gif(self):
+        # The canonical extension follows the sniffed format, not the claim.
+        import io as _io
+
+        from PIL import Image as _Image
+        buf = _io.BytesIO()
+        _Image.new("RGB", (1, 1), (0, 255, 0)).save(buf, format="GIF")
+        r = self._upload("thing.png", buf.getvalue())
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["name"].endswith(".gif"))
+
+    def test_sniff_helper_rejects_non_images(self):
+        self.assertIsNone(admin_panel._sniff_image_format(_HTML_PAYLOAD))
+        self.assertIsNone(admin_panel._sniff_image_format(_SVG_PAYLOAD))
+        self.assertIsNone(admin_panel._sniff_image_format(b""))
+        self.assertEqual(admin_panel._sniff_image_format(_TINY_PNG), "PNG")
+
+    def test_safe_stem_discards_client_extension(self):
+        self.assertEqual(admin_panel._safe_stem("evil.html"), "evil")
+        self.assertEqual(admin_panel._safe_stem("../../etc/passwd"), "passwd")
+        self.assertEqual(admin_panel._safe_stem(""), "upload")
 
 
 class TestChatUploadDocument(unittest.TestCase):

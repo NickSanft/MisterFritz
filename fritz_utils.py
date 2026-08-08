@@ -225,11 +225,23 @@ CHAT_IMAGE_UPLOAD_MAX_BYTES: int = int(
 CHAT_DOC_UPLOAD_MAX_BYTES: int = int(
     os.environ.get("CHAT_DOC_UPLOAD_MAX_BYTES", str(10 * 1024 * 1024))
 )
-# Allowed MIME types for image uploads. Strict whitelist — no SVG (XSS risk),
-# no animated formats beyond GIF.
-CHAT_ALLOWED_IMAGE_TYPES: frozenset[str] = frozenset({
-    "image/jpeg", "image/png", "image/webp", "image/gif",
-})
+# Image formats accepted on chat upload, keyed by the format name Pillow
+# reports after actually decoding the header. The value is the canonical
+# (extension, mime) we store under and serve back — the Content-Type the
+# *client* declares is advisory only, since anything can claim image/png over
+# an HTML or SVG body. No SVG entry: Pillow won't decode one, which is exactly
+# the property we want.
+CHAT_ALLOWED_IMAGE_FORMATS: dict[str, tuple[str, str]] = {
+    "JPEG": ("jpg", "image/jpeg"),
+    "PNG": ("png", "image/png"),
+    "WEBP": ("webp", "image/webp"),
+    "GIF": ("gif", "image/gif"),
+}
+# Derived so the two lists cannot drift apart. Still used as the cheap
+# first-pass check on the declared Content-Type before anything is read.
+CHAT_ALLOWED_IMAGE_TYPES: frozenset[str] = frozenset(
+    mime for _ext, mime in CHAT_ALLOWED_IMAGE_FORMATS.values()
+)
 
 # Syntax-highlight fenced code blocks in web-chat replies (Pygments via the
 # markdown codehilite extension). Escape hatch: set false if highlighting
