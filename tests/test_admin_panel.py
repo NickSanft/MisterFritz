@@ -7,6 +7,7 @@ exercise routing, templating, and auth without spinning up uvicorn.
 import base64
 import importlib
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -856,7 +857,9 @@ class TestChatForget(unittest.TestCase):
             r = client.post("/chat/forget", follow_redirects=False)
         self.assertEqual(r.status_code, 303)
         self.assertEqual(r.headers["location"], "/chat")
-        fc.assert_called_once_with("alice")
+        # Must target the WEB thread — clearing "alice" here would wipe the
+        # Discord conversation instead of the one the user is looking at.
+        fc.assert_called_once_with("alice", thread_id="web-alice")
         # Audit entry recorded.
         calls = [c for c in audit.call_args_list if c.args and c.args[0] == "chat_forget_conversation"]
         self.assertEqual(len(calls), 1)
@@ -869,6 +872,53 @@ class TestChatForget(unittest.TestCase):
             r = client.post("/chat/forget", follow_redirects=False)
         self.assertEqual(r.status_code, 303)
         fc.assert_not_called()
+
+
+class TestChatThreadId(unittest.TestCase):
+    """The chat cookie's username is self-asserted, so the web chat must not
+    share a LangGraph checkpoint with the Discord user of the same name."""
+
+    def test_web_thread_is_namespaced(self):
+        self.assertEqual(admin_panel._chat_thread_id("alice"), "web-alice")
+
+    def test_web_thread_cannot_collide_with_a_discord_user(self):
+        # A Discord user literally named "webalice" gets thread "webalice"
+        # (alphanumerics only). Keeping the dash is what keeps these apart.
+        self.assertNotEqual(
+            admin_panel._chat_thread_id("alice"),
+            re.sub(r"[^a-zA-Z0-9]", "", "webalice"),
+        )
+
+    def test_punctuation_is_stripped_but_dash_and_underscore_survive(self):
+        self.assertEqual(admin_panel._chat_thread_id("al.i/ce"), "web-alice")
+        self.assertEqual(admin_panel._chat_thread_id("a_b-c"), "web-a_b-c")
+
+    def test_empty_user_gives_empty_thread(self):
+        self.assertEqual(admin_panel._chat_thread_id(""), "")
+
+    def test_share_flag_restores_the_discord_thread(self):
+        # The rollback lever, and the single-user case where continuing one
+        # conversation across Discord and the browser is the point.
+        with patch.object(admin_panel, "CHAT_SHARE_DISCORD_THREAD", True):
+            self.assertEqual(admin_panel._chat_thread_id("alice"), "alice")
+
+    def test_history_load_uses_the_same_thread_as_the_write_path(self):
+        # The read path used to re-derive the thread id with its own inline
+        # copy of the regex; that drift is the /forget bug for punctuated names.
+        captured = {}
+
+        def _fake_get_state(config):
+            captured["thread_id"] = config["configurable"]["thread_id"]
+            raise RuntimeError("stop here — we only want the config")
+
+        fake_mf = MagicMock()
+        fake_mf.app.get_state.side_effect = _fake_get_state
+        fake_mf.get_config_values.side_effect = lambda c: {
+            "configurable": {"thread_id": c["metadata"]["thread_id"]},
+        }
+        with patch.dict(sys.modules, {"mister_fritz": fake_mf}):
+            admin_panel._load_chat_history("alice")
+        self.assertEqual(captured["thread_id"], admin_panel._chat_thread_id("alice"))
 
 
 class TestChatAsset(unittest.TestCase):

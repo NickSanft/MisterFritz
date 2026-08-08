@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import functools
 import json
 import logging
 import os
@@ -58,6 +59,8 @@ from fritz_utils import (
     CHAT_DOC_UPLOAD_MAX_BYTES,
     CHAT_IMAGE_UPLOAD_MAX_BYTES,
     CHAT_PASSWORD,
+    CHAT_SHARE_DISCORD_THREAD,
+    CHAT_THREAD_PREFIX,
     DOC_FOLDER,
     MessageSource,
     __version__,
@@ -322,6 +325,26 @@ def _chat_user(request: Request) -> str | None:
     return chat_auth.verify_cookie(token, CHAT_COOKIE_SECRET)
 
 
+def _chat_thread_id(user_id: str) -> str:
+    """LangGraph thread id for a web-chat user.
+
+    Namespaced away from the Discord thread by default: the chat cookie's
+    username is self-asserted, so without this a chat session could read and
+    overwrite the Discord conversation of whoever owns that name. Keeping `_`
+    and `-` means "web-alice" cannot collide with a Discord user literally
+    called "webalice", whose own thread is stripped to alphanumerics.
+
+    This is the single place the thread id is derived for the chat surface —
+    the same regex used to be inlined in _load_chat_history, which is how the
+    read path and the write path drift apart.
+    """
+    if not user_id:
+        return ""
+    if CHAT_SHARE_DISCORD_THREAD:
+        return re.sub(r"[^a-zA-Z0-9]", "", user_id)
+    return re.sub(r"[^a-zA-Z0-9_-]", "", f"{CHAT_THREAD_PREFIX}-{user_id}")
+
+
 # Markdown extensions enabled for Fritz's replies. fenced_code handles ```py
 # blocks; tables / nl2br polish the natural prose he tends to emit.
 _MARKDOWN_EXTENSIONS = ["fenced_code", "tables", "nl2br"]
@@ -392,7 +415,7 @@ def _load_chat_history(user_id: str, limit: int = 40) -> list[dict]:
     try:
         # Lazy import — same reasoning as in chat_send.
         from mister_fritz import app as agent_app, get_config_values
-        thread_id = re.sub(r"[^a-zA-Z0-9]", "", user_id)
+        thread_id = _chat_thread_id(user_id)
         if not thread_id:
             return []
         config = get_config_values({"metadata": {"user_id": thread_id, "thread_id": thread_id}})
@@ -530,6 +553,7 @@ async def chat_send(request: Request) -> Response:
             user,
             user_image_paths=pending_images or None,
             schedule_manager=schedule_manager,
+            thread_id=_chat_thread_id(user),
         )
 
     try:
@@ -613,6 +637,7 @@ async def chat_stream(request: Request) -> Response:
                 streaming_callback=_streaming_callback,
                 user_image_paths=pending_images or None,
                 schedule_manager=schedule_manager,
+                thread_id=_chat_thread_id(user),
             )
             reply = response_data.get("text") if isinstance(response_data, dict) else str(response_data)
             image_paths = response_data.get("image_paths", []) if isinstance(response_data, dict) else []
@@ -760,7 +785,8 @@ async def chat_forget(request: Request) -> Response:
     if not user:
         return RedirectResponse(url="/chat", status_code=303)
     removed = await asyncio.get_running_loop().run_in_executor(
-        None, privacy.forget_conversation, user,
+        None, functools.partial(privacy.forget_conversation, user,
+                                thread_id=_chat_thread_id(user)),
     )
     audit_log("chat_forget_conversation", user_id=user, removed=removed)
     return RedirectResponse(url="/chat", status_code=303)

@@ -536,10 +536,22 @@ def ask_stuff(
     workspace_root: str = None,
     channel_id: int | None = None,
     schedule_manager=None,
+    *,
+    thread_id: str | None = None,
 ) -> dict:
-    """Process user input and return structured output with text and attachments."""
+    """Process user input and return structured output with text and attachments.
+
+    `user_id` selects the memory namespace; `thread_id` selects the LangGraph
+    checkpoint. They are the same thing for Discord, Telegram and the
+    scheduler, which pass nothing. The web chat passes its own thread so a web
+    session cannot read or overwrite the Discord history of the same name.
+    """
     import re as _re
     user_id_clean = _re.sub(r'[^a-zA-Z0-9]', '', user_id)
+    # An explicit thread id keeps _ and - so a namespaced thread ("web-alice")
+    # cannot collide with an alnum-only Discord thread for a user literally
+    # named "webalice".
+    thread_id_clean = _re.sub(r'[^a-zA-Z0-9_-]', '', thread_id) if thread_id else user_id_clean
     if user_image_paths:
         full_prompt = format_prompt(base_prompt, source, user_id_clean, f" User has attached images: {user_image_paths}")
     else:
@@ -552,10 +564,10 @@ def ask_stuff(
     logger.debug("Prompt to ask: %s", full_prompt)
 
     config = {
-        "configurable": {"user_id": user_id_clean, "thread_id": user_id_clean},
+        "configurable": {"user_id": user_id_clean, "thread_id": thread_id_clean},
         "metadata": {
             "user_id": user_id_clean,
-            "thread_id": user_id_clean,
+            "thread_id": thread_id_clean,
             "progress_callback": progress_callback,
             "streaming_callback": streaming_callback,
             "user_image_paths": user_image_paths,

@@ -58,15 +58,24 @@ def export_memories(user_id: str) -> list[dict]:
 
 # ── Conversation checkpoints (LangGraph SqliteSaver) ─────────────────────────
 
-def forget_conversation(user_id: str) -> int:
-    """Drop the LangGraph SqliteSaver state for this user's thread.
+def forget_conversation(user_id: str, thread_id: str | None = None) -> int:
+    """Drop the LangGraph SqliteSaver state for a thread.
+
+    Defaults to the thread derived from user_id (the Discord thread). Pass
+    thread_id explicitly to target a surface-specific thread, e.g. the web
+    chat's "web-<user>" — otherwise /chat's "New conversation" would clear the
+    Discord history instead of the one the user is looking at.
 
     Returns the total number of rows removed across the checkpoints + writes
     tables. Next message starts a fresh conversation.
     """
-    if not user_id:
+    if not user_id and not thread_id:
         return 0
-    thread_id = _sanitise_thread_id(user_id)
+    if thread_id:
+        # Explicit thread ids keep _ and - so the namespace prefix survives.
+        thread_id = re.sub(r"[^a-zA-Z0-9_-]", "", thread_id)
+    else:
+        thread_id = _sanitise_thread_id(user_id)
     if not thread_id:
         return 0
     try:

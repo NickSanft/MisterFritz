@@ -110,6 +110,39 @@ class TestForgetConversation(unittest.TestCase):
         count = self.privacy.forget_conversation("nobody")
         self.assertEqual(count, 0)
 
+    def test_explicit_thread_id_targets_that_thread_only(self):
+        # The web chat lives on "web-alice"; clearing it must not touch the
+        # Discord thread "alice".
+        with sqlite3.connect(self.db_path) as c:
+            c.execute("INSERT INTO checkpoints VALUES ('web-alice', 'x')")
+            c.execute("INSERT INTO writes VALUES ('web-alice', 'wx')")
+            c.commit()
+
+        count = self.privacy.forget_conversation("alice", thread_id="web-alice")
+        self.assertEqual(count, 2)
+        with sqlite3.connect(self.db_path) as c:
+            web_left = c.execute(
+                "SELECT COUNT(*) FROM checkpoints WHERE thread_id = 'web-alice'"
+            ).fetchone()[0]
+            discord_left = c.execute(
+                "SELECT COUNT(*) FROM checkpoints WHERE thread_id = 'alice'"
+            ).fetchone()[0]
+        self.assertEqual(web_left, 0)
+        self.assertEqual(discord_left, 2)  # Discord thread untouched.
+
+    def test_explicit_thread_id_keeps_dash_and_underscore(self):
+        # _sanitise_thread_id strips these; an explicit thread id must not be
+        # put through it, or "web-alice" would collapse to "webalice".
+        with sqlite3.connect(self.db_path) as c:
+            c.execute("INSERT INTO checkpoints VALUES ('web-a_b', 'y')")
+            c.commit()
+        self.assertEqual(self.privacy.forget_conversation("a_b", thread_id="web-a_b"), 1)
+
+    def test_thread_id_alone_is_enough(self):
+        self.assertEqual(
+            self.privacy.forget_conversation("", thread_id="alice"), 3,
+        )
+
     def test_count_conversation_checkpoints(self):
         self.assertEqual(self.privacy.count_conversation_checkpoints("alice"), 2)
         self.assertEqual(self.privacy.count_conversation_checkpoints("bob"), 1)

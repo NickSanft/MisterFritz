@@ -186,6 +186,16 @@ CHAT_ALLOWED_USERS: frozenset[str] = frozenset(
 # over plain http through an SSH tunnel, where Secure would silently break login.
 CHAT_COOKIE_SECURE: bool = os.environ.get("CHAT_COOKIE_SECURE", "").lower() in ("1", "true", "yes")
 
+# The web chat gets its own LangGraph thread, so a chat identity cannot read or
+# overwrite the Discord conversation belonging to the same name. Set true to
+# restore the old shared thread (rollback lever, and the single-user case where
+# continuing one conversation across both surfaces is the point).
+CHAT_SHARE_DISCORD_THREAD: bool = os.environ.get("CHAT_SHARE_DISCORD_THREAD", "").lower() in ("1", "true", "yes")
+# Prefix for the web chat's thread ids: "web-alice". The separator is a dash,
+# not a colon — a colon is illegal in Windows filenames and creates a silent
+# NTFS alternate data stream on write.
+CHAT_THREAD_PREFIX: str = os.environ.get("CHAT_THREAD_PREFIX", "web")
+
 
 # Secret used to HMAC-sign the chat identity cookie. If unset, we auto-generate
 # one and persist it to .chat_cookie_secret on first boot so cookies survive
