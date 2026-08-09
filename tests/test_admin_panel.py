@@ -1192,60 +1192,86 @@ class TestChatUploadImageSniffing(unittest.TestCase):
         self.assertEqual(admin_panel._safe_stem(""), "upload")
 
 
-class TestChatUploadDocument(unittest.TestCase):
+class TestAdminUploadDocument(unittest.TestCase):
+    """Document upload moved off /chat. DOC_FOLDER is shared knowledge every
+    user's RAG queries read from, and the chat cookie is a self-asserted name —
+    gating on is_admin(cookie_name) meant anyone holding the chat password
+    could type the owner's username and inject into the shared corpus.
+    """
+
     def setUp(self):
-        # Pretend "alice" is an admin for the admin-gated tests.
-        self._patch = patch.object(admin_panel.fritz_utils, "is_admin",
-                                    side_effect=lambda u: u == "alice")
-        self._patch.start()
-        # Use a temp DOC_FOLDER so test files don't pollute the real one.
         self.tmp_doc_dir = tempfile.mkdtemp()
         self._doc_patch = patch.object(admin_panel, "DOC_FOLDER", self.tmp_doc_dir)
         self._doc_patch.start()
 
     def tearDown(self):
-        self._patch.stop()
         self._doc_patch.stop()
 
-    def test_unauthed_returns_401(self):
+    def test_chat_route_is_gone(self):
         client = _build_client()
+        _login(client)
         r = client.post("/chat/upload/document",
+                        files={"file": ("notes.md", b"# hi", "text/markdown")})
+        self.assertEqual(r.status_code, 404)
+
+    def test_requires_basic_auth(self):
+        client = _build_client()
+        r = client.post("/documents/upload",
                         files={"file": ("notes.md", b"# hi", "text/markdown")})
         self.assertEqual(r.status_code, 401)
 
-    def test_non_admin_returns_403(self):
+    def test_a_chat_cookie_does_not_open_it(self):
+        # The regression this move exists to prevent.
         client = _build_client()
-        _login(client, "bob")  # not "alice"
-        with patch.object(admin_panel, "audit_log"):
-            r = client.post(
-                "/chat/upload/document",
-                files={"file": ("notes.md", b"# hi", "text/markdown")},
-            )
-        self.assertEqual(r.status_code, 403)
+        _login(client, "alice")
+        r = client.post("/documents/upload",
+                        files={"file": ("notes.md", b"# hi", "text/markdown")})
+        self.assertEqual(r.status_code, 401)
 
     def test_admin_happy_path_writes_to_doc_folder(self):
         client = _build_client()
-        _login(client)
         with patch.object(admin_panel, "audit_log"):
             r = client.post(
-                "/chat/upload/document",
-                files={"file": ("notes.md", b"# hi from alice", "text/markdown")},
+                "/documents/upload",
+                files={"file": ("notes.md", b"# hi from the admin", "text/markdown")},
+                headers=_auth_header(),
+                follow_redirects=False,
             )
-        self.assertEqual(r.status_code, 200)
-        self.assertTrue(r.json()["ok"])
-        # Verify the file was written into the (patched) DOC_FOLDER.
-        written = os.path.join(self.tmp_doc_dir, "notes.md")
-        self.assertTrue(os.path.isfile(written))
+        self.assertEqual(r.status_code, 303)
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp_doc_dir, "notes.md")))
 
-    def test_admin_rejected_for_bad_extension(self):
+    def test_bad_extension_is_rejected_and_audited(self):
+        client = _build_client()
+        with patch.object(admin_panel, "audit_log") as audit:
+            r = client.post(
+                "/documents/upload",
+                files={"file": ("malware.exe", b"MZ\x90\x00", "application/octet-stream")},
+                headers=_auth_header(),
+                follow_redirects=False,
+            )
+        self.assertEqual(r.status_code, 303)
+        self.assertFalse(os.path.isfile(os.path.join(self.tmp_doc_dir, "malware.exe")))
+        self.assertEqual(audit.call_args.kwargs["result"], "bad_ext")
+
+    def test_oversized_document_is_rejected(self):
+        client = _build_client()
+        with patch.object(admin_panel, "CHAT_DOC_UPLOAD_MAX_BYTES", 4), \
+             patch.object(admin_panel, "audit_log") as audit:
+            client.post(
+                "/documents/upload",
+                files={"file": ("notes.md", b"far too long", "text/markdown")},
+                headers=_auth_header(),
+                follow_redirects=False,
+            )
+        self.assertFalse(os.path.isfile(os.path.join(self.tmp_doc_dir, "notes.md")))
+        self.assertEqual(audit.call_args.kwargs["result"], "rejected_size")
+
+    def test_chat_page_no_longer_offers_document_upload(self):
         client = _build_client()
         _login(client)
-        with patch.object(admin_panel, "audit_log"):
-            r = client.post(
-                "/chat/upload/document",
-                files={"file": ("malware.exe", b"MZ\x90\x00", "application/octet-stream")},
-            )
-        self.assertEqual(r.status_code, 415)
+        page = client.get("/chat").text
+        self.assertNotIn("chat-doc-input", page)
+        self.assertNotIn("/chat/upload/document", page)
 
 
 class TestPendingImagePlumbing(unittest.TestCase):

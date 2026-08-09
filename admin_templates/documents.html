@@ -3,6 +3,21 @@
 
 {% block body %}
 <div class="card">
+    <h2>Add a document</h2>
+    <p class="muted">
+        Dropped into <code>{{ doc_folder }}</code>, where the watchdog ingests it
+        into the shared knowledge base every user's questions are answered from.
+        This lives here rather than on the chat page because the chat cookie is a
+        self-asserted name, not a credential.
+    </p>
+    <form method="post" action="/documents/upload" enctype="multipart/form-data">
+        <input type="file" name="file" required
+               accept=".pdf,.docx,.xlsx,.csv,.txt,.md">
+        <button type="submit">Upload</button>
+    </form>
+</div>
+
+<div class="card">
     <h2>Documents in <code>{{ doc_folder }}</code> <span class="pill">{{ docs | length }}</span></h2>
     {% if docs %}
     <table>

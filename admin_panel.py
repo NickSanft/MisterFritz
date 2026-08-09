@@ -45,7 +45,6 @@ except ImportError:  # pragma: no cover — Pillow ships with the image extra
     _PILImage = None
 
 import chat_auth
-import fritz_utils
 import privacy
 import workspace_store
 from fritz_utils import (
@@ -456,7 +455,6 @@ async def chat_page(request: Request) -> HTMLResponse:
     response = templates.TemplateResponse(request, "chat.html", {
         "username": user,
         "messages": history,
-        "is_admin": fritz_utils.is_admin(user),
     })
     _set_chat_cookie(response, user)
     return response
@@ -564,7 +562,6 @@ async def chat_send(request: Request) -> Response:
                   attached_images=len(pending_images), result="error", error=str(e))
         return templates.TemplateResponse(request, "chat.html", {
             "username": user,
-            "is_admin": fritz_utils.is_admin(user),
             "messages": [
                 # `html` must be present on both dicts: chat.html branches on
                 # `m.role == "fritz" and m.html`, and an absent key silently
@@ -579,9 +576,6 @@ async def chat_send(request: Request) -> Response:
 
     return templates.TemplateResponse(request, "chat.html", {
         "username": user,
-        # Without this the {% if is_admin %} upload panel silently disappears
-        # after a no-JS send, because Jinja treats the missing key as falsey.
-        "is_admin": fritz_utils.is_admin(user),
         "messages": [
             {"role": "user", "content": message, "html": None},
             {"role": "fritz", "content": reply or "(no response)",
@@ -918,26 +912,22 @@ async def chat_upload_image(request: Request) -> Response:
     })
 
 
-async def chat_upload_document(request: Request) -> Response:
-    """Accept a multipart-form document and drop it into DOC_FOLDER for the
-    watchdog to ingest. Admin-only — DOC_FOLDER is shared knowledge."""
-    user = _chat_user(request)
-    if not user:
-        return JSONResponse({"error": "not signed in"}, status_code=401)
-    if not fritz_utils.is_admin(user):
-        audit_log("chat_upload_document", user_id=user, result="not_admin")
-        return JSONResponse(
-            {"error": "document upload is admin-only — DOC_FOLDER is shared knowledge"},
-            status_code=403,
-        )
+async def upload_document_action(request: Request) -> Response:
+    """Accept a document and drop it into DOC_FOLDER for the watchdog.
 
+    Lives on the admin surface rather than /chat, because DOC_FOLDER is shared
+    knowledge that every user's RAG queries read from. The chat cookie carries
+    a self-asserted name, not a credential — gating on is_admin(cookie_name)
+    meant anyone who knew the chat password could type the owner's username and
+    inject documents into the shared corpus. _BasicAuthMiddleware has already
+    required ADMIN_PANEL_PASSWORD by the time this runs.
+    """
     form = await request.form()
     upload = form.get("file")
     if upload is None or not hasattr(upload, "read"):
-        return JSONResponse({"error": "missing file field"}, status_code=400)
+        return RedirectResponse(url="/documents", status_code=303)
 
-    raw_name = getattr(upload, "filename", "upload")
-    safe_name = _safe_filename(raw_name)
+    safe_name = _safe_filename(getattr(upload, "filename", "upload"))
     # Defer to document_engine's supported extensions list.
     try:
         from document_engine import SUPPORTED_EXTENSIONS
@@ -945,37 +935,31 @@ async def chat_upload_document(request: Request) -> Response:
         SUPPORTED_EXTENSIONS = (".docx", ".pdf", ".xlsx", ".csv", ".txt", ".md")
     _, dot, ext = safe_name.rpartition(".")
     if not dot or f".{ext.lower()}" not in SUPPORTED_EXTENSIONS:
-        audit_log("chat_upload_document", user_id=user, result="bad_ext",
-                  filename=safe_name)
-        return JSONResponse(
-            {"error": f"unsupported extension; allowed: {', '.join(SUPPORTED_EXTENSIONS)}"},
-            status_code=415,
-        )
+        audit_log("admin_upload_document", admin=_admin(request),
+                  result="bad_ext", filename=safe_name)
+        return RedirectResponse(url="/documents", status_code=303)
 
     raw = await upload.read()
     if len(raw) > CHAT_DOC_UPLOAD_MAX_BYTES:
-        audit_log("chat_upload_document", user_id=user, result="rejected_size",
-                  bytes=len(raw), cap=CHAT_DOC_UPLOAD_MAX_BYTES)
-        return JSONResponse(
-            {"error": f"document exceeds {CHAT_DOC_UPLOAD_MAX_BYTES} byte cap"},
-            status_code=413,
-        )
+        audit_log("admin_upload_document", admin=_admin(request),
+                  result="rejected_size", bytes=len(raw), cap=CHAT_DOC_UPLOAD_MAX_BYTES)
+        return RedirectResponse(url="/documents", status_code=303)
 
     os.makedirs(DOC_FOLDER, exist_ok=True)
     target = os.path.abspath(os.path.join(DOC_FOLDER, safe_name))
     # Guard against path-escape via filename (extra belt to _safe_filename).
     doc_root = os.path.abspath(DOC_FOLDER)
     if not (target == doc_root or target.startswith(doc_root + os.sep)):
-        audit_log("chat_upload_document", user_id=user, result="path_escape",
-                  filename=safe_name)
-        return JSONResponse({"error": "invalid filename"}, status_code=400)
+        audit_log("admin_upload_document", admin=_admin(request),
+                  result="path_escape", filename=safe_name)
+        return RedirectResponse(url="/documents", status_code=303)
 
     with open(target, "wb") as f:
         f.write(raw)
 
-    audit_log("chat_upload_document", user_id=user, result="ok",
-              path=target, bytes=len(raw))
-    return JSONResponse({"ok": True, "name": safe_name})
+    audit_log("admin_upload_document", admin=_admin(request),
+              result="ok", path=target, bytes=len(raw))
+    return RedirectResponse(url="/documents", status_code=303)
 
 
 # ── App factory + server boot ───────────────────────────────────────────────
@@ -1011,6 +995,8 @@ def create_app(password: str, schedule_manager=None, chat_password: str | None =
               methods=["POST"], name="cancel_schedule"),
         Route("/documents/reindex", reindex_document_action,
               methods=["POST"], name="reindex_document"),
+        Route("/documents/upload", upload_document_action,
+              methods=["POST"], name="upload_document"),
         # Chat surface (cookie auth; no admin password required).
         Route("/chat", chat_page, name="chat"),
         Route("/chat/login", chat_login, methods=["POST"], name="chat_login"),
@@ -1022,8 +1008,6 @@ def create_app(password: str, schedule_manager=None, chat_password: str | None =
         Route("/chat/assets/{path:path}", chat_asset, name="chat_asset"),
         Route("/chat/upload/image", chat_upload_image,
               methods=["POST"], name="chat_upload_image"),
-        Route("/chat/upload/document", chat_upload_document,
-              methods=["POST"], name="chat_upload_document"),
     ]
     app = Starlette(
         routes=routes,

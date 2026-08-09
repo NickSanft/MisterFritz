@@ -84,12 +84,6 @@
     .chat-shell.dragover .card {
         outline: 2px dashed var(--accent); outline-offset: -4px;
     }
-    .chat-doc-upload {
-        margin-top: 0.75rem; padding: 0.5rem; border: 1px dashed var(--border);
-        border-radius: 4px; background: #f9f8f3; font-size: 0.85rem;
-        display: flex; gap: 0.5rem; align-items: center;
-    }
-    .chat-doc-upload label { color: var(--muted); }
     .chat-header {
         display: flex; justify-content: space-between; align-items: center;
         margin-bottom: 1rem; gap: 0.5rem;
@@ -172,14 +166,10 @@
             <button type="submit">Send</button>
         </form>
 
-        {% if is_admin %}
-        <div class="chat-doc-upload">
-            <label>📚 Add to shared docs (admin):</label>
-            <input type="file" id="chat-doc-input"
-                   accept=".pdf,.docx,.xlsx,.csv,.txt,.md">
-            <span id="chat-doc-status" class="muted"></span>
-        </div>
-        {% endif %}
+        {# Document upload moved to the admin panel (POST /documents/upload).
+           DOC_FOLDER is shared knowledge every user's RAG queries read from,
+           and the chat cookie is a self-asserted name rather than a
+           credential — so this control cannot live on this surface. #}
     </div>
 </div>
 
@@ -222,8 +212,6 @@
     const pendingImg = document.getElementById("chat-pending-img");
     const pendingName = document.getElementById("chat-pending-name");
     const pendingRemove = document.getElementById("chat-pending-remove");
-    const docInput = document.getElementById("chat-doc-input");
-    const docStatus = document.getElementById("chat-doc-status");
 
     function clearPending() {
         pendingRow.classList.remove("active");
@@ -254,32 +242,12 @@
           .catch(err => alert("Upload failed: " + err.message));
     }
 
-    function uploadDocument(file) {
-        if (!file || !docStatus) return;
-        docStatus.textContent = "uploading...";
-        const fd = new FormData();
-        fd.append("file", file);
-        fetch("/chat/upload/document", {
-            method: "POST", body: fd, credentials: "same-origin",
-        }).then(r => r.json().then(j => ({ ok: r.ok, body: j })))
-          .then(({ ok, body }) => {
-              docStatus.textContent = ok
-                  ? "✓ " + (body.name || "uploaded")
-                  : "✗ " + (body.error || "failed");
-              if (ok) docInput.value = "";
-          })
-          .catch(err => { docStatus.textContent = "✗ " + err.message; });
-    }
-
     if (attachBtn) attachBtn.addEventListener("click", () => imageInput.click());
     if (imageInput) imageInput.addEventListener("change", (e) => {
         if (e.target.files && e.target.files[0]) uploadImage(e.target.files[0]);
         imageInput.value = "";
     });
     if (pendingRemove) pendingRemove.addEventListener("click", clearPending);
-    if (docInput) docInput.addEventListener("change", (e) => {
-        if (e.target.files && e.target.files[0]) uploadDocument(e.target.files[0]);
-    });
 
     // Drag-and-drop on the chat shell: dropping an image triggers upload.
     if (shell) {
