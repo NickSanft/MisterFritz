@@ -30,7 +30,8 @@ from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
-from starlette.routing import Route
+from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
 from starlette.templating import Jinja2Templates
 
 import io
@@ -69,6 +70,7 @@ from observability import audit_log, get_health_snapshot
 logger = logging.getLogger(__name__)
 
 _TEMPLATES_DIR = Path(__file__).parent / "admin_templates"
+_STATIC_DIR = Path(__file__).parent / "admin_static"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 
@@ -87,8 +89,11 @@ class _BasicAuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         # The chat surface has its own cookie-based identity model and must
-        # NOT require the admin password. Everything else needs Basic auth.
-        if request.url.path == "/chat" or request.url.path.startswith("/chat/"):
+        # NOT require the admin password. /static is public — fonts and CSS,
+        # and gating them would render /chat/login unstyled behind the admin
+        # password prompt. Everything else needs Basic auth.
+        path = request.url.path
+        if path == "/chat" or path.startswith("/chat/") or path.startswith("/static/"):
             return await call_next(request)
 
         auth = request.headers.get("authorization", "")
@@ -1008,6 +1013,9 @@ def create_app(password: str, schedule_manager=None, chat_password: str | None =
         Route("/chat/assets/{path:path}", chat_asset, name="chat_asset"),
         Route("/chat/upload/image", chat_upload_image,
               methods=["POST"], name="chat_upload_image"),
+        # Public static assets (self-hosted fonts + CSS). Exempt from Basic
+        # auth in _BasicAuthMiddleware so /chat/login can style itself.
+        Mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static"),
     ]
     app = Starlette(
         routes=routes,

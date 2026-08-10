@@ -99,6 +99,24 @@ class TestAuth(unittest.TestCase):
         self.assertEqual(r.status_code, 401)
 
 
+class TestStaticMount(unittest.TestCase):
+    """Fonts/CSS at /static are public: gating them would render /chat/login
+    unstyled behind the admin password prompt."""
+
+    def test_static_is_exempt_from_basic_auth(self):
+        # README.md exists in admin_static/; served without any auth header.
+        client = _build_client()
+        r = client.get("/static/README.md")
+        self.assertNotEqual(r.status_code, 401)
+        self.assertEqual(r.status_code, 200)
+
+    def test_missing_static_file_is_404_not_401(self):
+        # A miss must not fall through to the auth gate.
+        client = _build_client()
+        r = client.get("/static/does-not-exist.woff2")
+        self.assertEqual(r.status_code, 404)
+
+
 class TestOverviewPage(unittest.TestCase):
     def test_renders_version_and_uptime(self):
         client = _build_client()

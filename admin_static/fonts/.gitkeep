@@ -1,0 +1,3 @@
+# Placeholder so admin_static/fonts/ is tracked in git before the woff2 files
+# are added. StaticFiles needs the directory to exist at app-construction time.
+# See ../README.md for the seven font files that belong here.
