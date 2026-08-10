@@ -572,14 +572,91 @@ class TestChatPageWithCookie(unittest.TestCase):
         _login(client)
         r = client.get("/chat")
         self.assertEqual(r.status_code, 200)
+        # Identity moved into the presence row but is still on the page.
         self.assertIn("alice", r.text)
-        self.assertIn("Type a message", r.text)
+        # The placeholder changed with the restyle: "Type a message..." became
+        # "Address the butler…". This assertion is the reason the copy change
+        # is not silent.
+        self.assertIn("Address the butler", r.text)
 
     def test_tampered_cookie_renders_login(self):
         client = _build_client()
         client.cookies.set("fritz_chat_id", "alice:9999999999:deadbeef")
         r = client.get("/chat")
         self.assertIn("Sign in to chat", r.text)
+
+
+class TestChatChrome(unittest.TestCase):
+    """The chat surface has its own chrome. Nothing else in the suite reads
+    chat.html's markup, so without these a completely broken page would keep
+    every other chat test green."""
+
+    def _page(self) -> str:
+        client = _build_client()
+        _login(client)
+        return client.get("/chat").text
+
+    def test_chat_extends_chat_base_not_admin_base(self):
+        self.assertIn('extends "chat_base.html"', _template("chat.html"))
+
+    def test_chat_base_has_no_admin_nav(self):
+        # Chat users would otherwise see six admin links, five of which lead
+        # straight to a Basic-auth prompt they do not have the password for.
+        page = self._page()
+        for href in ('href="/users"', 'href="/schedules"', 'href="/documents"',
+                     'href="/health"'):
+            with self.subTest(href=href):
+                self.assertNotIn(href, page)
+
+    def test_chat_uses_the_chat_palette_not_the_admin_one(self):
+        page = self._page()
+        self.assertIn("--amethyst", page)
+        self.assertNotIn("--muted: #5b6a78", page)
+
+    def test_identity_and_signout_are_present(self):
+        page = self._page()
+        self.assertIn("presence-user", page)
+        self.assertIn("/chat/logout", page)
+
+    def test_faceted_controls_carry_a_focus_wrapper(self):
+        # clip-path clips outline AND outer box-shadow, so a faceted control
+        # without the unclipped .facet wrapper has NO visible focus indicator.
+        # Guarding this because any new faceted control repeats the bug.
+        src = _template("chat.html")
+        for control in ("btn-ghost", "attach-btn", "send-btn"):
+            with self.subTest(control=control):
+                idx = src.index(f'class="{control}"')
+                # The wrapper opens within a few hundred chars before it.
+                self.assertIn('<span class="facet">', src[max(0, idx - 400):idx])
+
+    def test_transcript_scrolls_its_own_container(self):
+        # The shell is fixed/overflow-hidden, so the window-level scroll APIs
+        # are wrong here; scroll helpers must drive scrollTop on the transcript.
+        # Strip comments first — the prose explaining the rule names the very
+        # APIs being banned, and matching that would be a false positive.
+        src = _template("chat.html")
+        self.assertIn("transcript.scrollTop", src)
+        code = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+        code = re.sub(r"^\s*//.*$", "", code, flags=re.M)
+        code = re.sub(r"\{#.*?#\}", "", code, flags=re.S)
+        self.assertNotIn("scrollIntoView", code)
+        self.assertNotIn("window.scrollTo", code)
+
+    def test_composer_font_size_avoids_ios_zoom(self):
+        self.assertRegex(_template("chat.html"), r"font-size:\s*16\.5px")
+
+    def test_enter_to_send_guards_ime_and_touch(self):
+        # A bare Enter handler swallows the character an IME is composing, and
+        # soft keyboards have no reliable Shift for Shift+Enter.
+        src = _template("chat.html")
+        self.assertIn("isComposing", src)
+        self.assertIn("keyCode === 229", src)
+        self.assertIn("pointer: coarse", src)
+
+    def test_empty_state_offers_suggestions(self):
+        src = _template("chat.html")
+        self.assertIn("The study is lit", src)
+        self.assertIn("suggestion", src)
 
 
 class TestChatCorrectnessAndA11y(unittest.TestCase):

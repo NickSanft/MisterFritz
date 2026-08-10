@@ -1,192 +1,361 @@
-{% extends "base.html" %}
+{% extends "chat_base.html" %}
 {% block title %}Chat · Mister Fritz{% endblock %}
+
+{% block header_extra %}
+<div class="presence">
+    <span class="presence-dot" aria-hidden="true"></span>
+    <span class="presence-label">In attendance · the candles are lit</span>
+    <span class="presence-user">· {{ username }}</span>
+</div>
+<div class="header-actions">
+    {# No onsubmit attribute. The one this replaced contained a literal \\'
+       sequence; HTML does not unescape backslashes, so the handler was a
+       SyntaxError, compiled to null, and POST /chat/forget fired with no
+       prompt at all — destroying the thread's checkpoint unrecoverably. The
+       confirmation is registered in JS below, ABOVE the early-return guard. #}
+    <form method="post" action="/chat/forget" id="chat-forget-form" style="margin:0">
+        <span class="facet">
+            <button type="submit" class="btn-ghost" aria-label="New conversation">
+                <span aria-hidden="true">✦</span> <span class="btn-label">New conversation</span>
+            </button>
+        </span>
+    </form>
+    <form method="post" action="/chat/logout" style="margin:0">
+        <button type="submit" class="link-ghost">Sign out</button>
+    </form>
+</div>
+{% endblock %}
 
 {% block body %}
 <style>
-    .chat-shell { max-width: 760px; margin: 0 auto; }
-    .chat-bubble {
-        margin: 0.5rem 0; padding: 0.75rem 1rem; border-radius: 8px;
-        word-wrap: break-word;
+    /* ── Transcript ───────────────────────────────────────────────────────*/
+    .transcript {
+        flex: 1 1 auto; min-height: 0;
+        overflow-y: auto; overflow-x: hidden;
+        padding: 30px var(--gutter);
+        scrollbar-color: #2c2140 var(--bg-void);
+        scrollbar-width: thin;
     }
-    .chat-bubble.user {
-        background: #e8e5dc; color: var(--fg);
-        margin-left: 4rem;
+    .transcript::-webkit-scrollbar { width: 10px; }
+    .transcript::-webkit-scrollbar-track { background: var(--bg-void); }
+    .transcript::-webkit-scrollbar-thumb { background: #2c2140; }
+    .transcript-col {
+        max-width: var(--col-max); margin: 0 auto;
+        display: flex; flex-direction: column; gap: 26px;
+    }
+
+    .msg-row { display: flex; gap: 12px; animation: msgIn 0.35s ease both; }
+    .msg-row.user { justify-content: flex-end; }
+
+    .avatar {
+        flex: 0 0 auto; width: 34px; height: 34px;
+        display: grid; place-items: center;
+        clip-path: var(--clip-seal);
+        background: linear-gradient(135deg, #241638, var(--obsidian));
+        border: 1px solid var(--edge);
+        font-family: var(--font-display); font-weight: 700; font-size: 15px;
+        color: var(--amethyst-bright);
+    }
+
+    .bubble { padding: 14px 18px 15px; min-width: 0; }
+    .msg-row.fritz .bubble {
+        max-width: 78%;
+        background: linear-gradient(160deg, rgba(32,20,52,0.75), rgba(19,12,32,0.75));
+        border: 1px solid var(--edge);
+        border-left: 2px solid rgba(var(--amethyst-bright-rgb), 0.55);
+        clip-path: var(--clip-facet-l);
+    }
+    .msg-row.user .bubble {
+        max-width: 72%;
+        background: rgba(var(--amethyst-rgb), 0.09);
+        border: 1px solid rgba(var(--amethyst-rgb), 0.24);
+        clip-path: var(--clip-facet-r);
+        color: #c4b8d8;
         white-space: pre-wrap;
     }
-    .chat-bubble.fritz {
-        background: #fff; border: 1px solid var(--border); color: var(--fg);
-        margin-right: 4rem;
+
+    .speaker {
+        display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px;
+        font-family: var(--font-display); font-weight: 600; font-size: 15px;
+        text-transform: uppercase; letter-spacing: 0.12em;
     }
-    .chat-bubble.fritz.streaming::after {
-        content: "▌"; opacity: 0.5; margin-left: 2px;
-        animation: blink 1s steps(2, start) infinite;
+    .msg-row.fritz .speaker { color: var(--amethyst-bright); }
+    .msg-row.user .speaker { color: var(--text-meta); }
+    .speaker time { font-family: var(--font-mono); font-size: 10px;
+                    letter-spacing: 0.06em; color: var(--text-meta); }
+
+    /* ── Markdown inside a Fritz bubble ───────────────────────────────────
+       Scoped to .fritz-md so the theme cannot leak into the admin panel. */
+    .fritz-md > :first-child { margin-top: 0; }
+    .fritz-md > :last-child { margin-bottom: 0; }
+    .fritz-md p { margin: 0 0 0.7em; }
+    .fritz-md em { color: var(--lilac); }
+    .fritz-md strong { color: var(--text-hi); font-weight: 600; }
+    .fritz-md a { color: var(--amethyst-bright); text-underline-offset: 3px; }
+    .fritz-md ul, .fritz-md ol { margin: 0 0 0.7em; padding-left: 1.3em; }
+    .fritz-md li { margin: 0.2em 0; }
+    .fritz-md code {
+        font-family: var(--font-mono); font-size: 0.82em;
+        background: var(--fill-soft); border: 1px solid var(--edge-subtle);
+        color: var(--lavender-ink); padding: 0.08em 0.35em;
     }
-    @keyframes blink { to { visibility: hidden; } }
-    .chat-bubble .role {
-        display: block; font-size: 0.7rem; color: var(--muted);
-        text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.3rem;
+    .fritz-md pre {
+        margin: 12px 0 0; padding: 14px 16px; overflow-x: auto;
+        background: linear-gradient(180deg, rgba(8,5,14,0.92), rgba(6,4,11,0.92));
+        border: 1px solid rgba(var(--amethyst-rgb), 0.32);
+        font-family: var(--font-mono); font-size: 13px; line-height: 1.6;
+        color: #c9bce0;
     }
-    .chat-bubble .bubble-body p:first-child { margin-top: 0; }
-    .chat-bubble .bubble-body p:last-child { margin-bottom: 0; }
-    .chat-bubble .bubble-body pre {
-        background: #ecebe5; padding: 0.6rem 0.8rem; border-radius: 4px;
-        overflow-x: auto; font-size: 0.85rem;
+    .fritz-md pre code {
+        background: none; border: 0; padding: 0; font-size: inherit; color: inherit;
     }
-    .chat-bubble .bubble-body code {
-        background: #ecebe5; padding: 0.1rem 0.3rem; border-radius: 2px;
-        font-size: 0.88em;
+    .fritz-md table { border-collapse: collapse; margin: 0.6em 0; }
+    .fritz-md th, .fritz-md td {
+        border: 1px solid var(--edge-subtle); padding: 0.3em 0.6em; text-align: left;
     }
-    .chat-bubble .bubble-body pre code { background: transparent; padding: 0; }
-    .chat-bubble .bubble-body img {
-        max-width: 100%; border-radius: 4px; margin-top: 0.5rem;
-    }
-    .chat-bubble .bubble-body table { border-collapse: collapse; margin: 0.5rem 0; }
-    .chat-bubble .bubble-body th, .chat-bubble .bubble-body td {
-        border: 1px solid var(--border); padding: 0.25rem 0.5rem; text-align: left;
-    }
+    .fritz-md img { max-width: 100%; margin-top: 8px; }
+
+    /* Progress lines while a tool runs. */
     .chat-progress {
-        font-style: italic; color: var(--muted); margin: 0.3rem 4rem 0.3rem 0;
-        font-size: 0.85rem; padding: 0.1rem 0.5rem;
+        margin-left: 46px; font-style: italic; font-size: 14.5px;
+        color: var(--text-dim);
     }
-    .chat-input-row {
-        display: flex; gap: 0.5rem; margin-top: 1.5rem;
-        padding-top: 1rem; border-top: 1px solid var(--border);
-        align-items: stretch;
+
+    /* ── Empty state ──────────────────────────────────────────────────────*/
+    .empty-state {
+        display: flex; flex-direction: column; align-items: center;
+        text-align: center; gap: 18px; padding: 8vh 0 4vh;
     }
-    .chat-input-row textarea {
-        flex: 1; padding: 0.6rem 0.75rem; border: 1px solid var(--border);
-        border-radius: 4px; font-family: inherit;
-        /* 16px floor: iOS Safari force-zooms the whole page when a focused
-           input's text is smaller, and never zooms back out. */
-        font-size: 16px;
-        resize: vertical; min-height: 3rem;
+    .empty-seal {
+        width: 92px; height: 92px; display: grid; place-items: center;
+        clip-path: var(--clip-seal);
+        background: linear-gradient(135deg, #241638, var(--obsidian));
+        border: 1px solid var(--edge-strong);
+        font-family: var(--font-display); font-weight: 700; font-size: 40px;
+        color: var(--amethyst-bright);
+        animation: sealPulse 5s ease-in-out infinite;
     }
-    .chat-input-row button { padding: 0.5rem 1.25rem; }
-    .chat-input-row .icon-btn {
-        padding: 0.4rem 0.7rem; font-size: 1rem;
-        background: #fff; border: 1px dashed var(--border);
+    .empty-title {
+        font-family: var(--font-display); font-weight: 600; font-size: 34px;
+        color: var(--text-hi); margin: 0; line-height: 1.2;
     }
-    .chat-input-row .icon-btn:hover { background: #f5f3ed; }
-    .chat-pending-attach {
-        display: none; margin-top: 0.5rem; padding: 0.4rem 0.6rem;
-        border: 1px solid var(--border); border-radius: 4px;
-        background: #f5f3ed; font-size: 0.85rem; color: var(--muted);
-        align-items: center; gap: 0.5rem;
+    .empty-sub {
+        max-width: 520px; margin: 0; font-size: 17px; font-style: italic;
+        color: var(--text-dim);
     }
-    .chat-pending-attach.active { display: flex; }
-    .chat-pending-attach img {
-        max-height: 40px; border-radius: 2px;
+    .suggestions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
+    .suggestion {
+        font-family: var(--font-body); font-style: italic; font-size: 15.5px;
+        padding: 9px 16px; cursor: pointer;
+        color: var(--lilac); background: var(--fill-ghost);
+        border: 1px solid var(--edge); clip-path: var(--clip-cut-sm);
+        transition: background 0.2s ease, color 0.2s ease;
     }
-    .chat-pending-attach .name { flex: 1; }
-    .chat-pending-attach button {
-        padding: 0.1rem 0.4rem; font-size: 0.75rem;
+    .suggestion:hover { background: var(--fill-hover); color: var(--text-hi); }
+
+    /* ── Composer ─────────────────────────────────────────────────────────*/
+    .composer {
+        flex: 0 0 auto; position: relative; z-index: 3;
+        padding: 12px var(--gutter) 10px;
+        border-top: 1px solid var(--edge-subtle);
+        background: linear-gradient(180deg, var(--panel-hi), var(--panel-lo));
+        backdrop-filter: blur(8px);
     }
-    .chat-shell.dragover .card {
-        outline: 2px dashed var(--accent); outline-offset: -4px;
+    .composer-col { max-width: var(--col-max); margin: 0 auto; }
+    .composer-row { display: flex; gap: 10px; align-items: flex-end; }
+
+    .attach-btn {
+        flex: 0 0 auto; width: 46px; height: 46px;
+        display: grid; place-items: center; cursor: pointer;
+        clip-path: var(--clip-hex-flat);
+        background: var(--fill-faint); border: 1px solid var(--edge);
+        color: var(--lilac); font-size: 18px;
+        transition: background 0.2s ease;
     }
-    .chat-header {
-        display: flex; justify-content: space-between; align-items: center;
-        margin-bottom: 1rem; gap: 0.5rem;
+    .attach-btn:hover { background: var(--fill-hover); }
+
+    .composer textarea {
+        /* min-width: 0 is load-bearing. A flex item defaults to
+           min-width: auto, so the textarea refuses to shrink below its content
+           width and shoves the send button off the right edge on a narrow
+           viewport — where the shell's overflow:hidden then clips it, leaving
+           an untappable button. */
+        flex: 1 1 auto; min-width: 0;
+        min-height: 46px; max-height: 150px;
+        padding: 12px 14px; resize: none; overflow-y: auto;
+        font-family: var(--font-body);
+        /* 16.5px — at or above 16px, or iOS Safari force-zooms the page on
+           focus and never zooms back out. */
+        font-size: 16.5px; line-height: 1.4;
+        color: var(--text-body); background: rgba(var(--void-rgb), 0.75);
+        border: 1px solid rgba(var(--amethyst-rgb), 0.35);
     }
-    .chat-header .right { display: flex; gap: 0.5rem; }
-    .chat-empty {
-        text-align: center; color: var(--muted); padding: 3rem 1rem;
-        font-style: italic;
+    .composer textarea::placeholder { color: var(--text-meta); font-style: italic; }
+    .composer textarea:focus {
+        outline: none;
+        border-color: var(--amethyst-bright);
+        /* Solid, not the design's 0.35-alpha wash: a focus indicator has to
+           clear 3:1 in its own right (WCAG 1.4.11). */
+        box-shadow: 0 0 0 1px var(--amethyst-bright),
+                    0 0 22px rgba(var(--amethyst-rgb), 0.15);
     }
-    /* Announced to screen readers, not shown — the transcript itself is the
-       visual feedback. Not display:none, which removes it from the a11y tree. */
-    .visually-hidden {
-        position: absolute; width: 1px; height: 1px; overflow: hidden;
-        clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+
+    .send-btn {
+        flex: 0 0 auto; height: 46px; padding: 0 22px; cursor: pointer;
+        font-family: var(--font-display); font-weight: 600; font-size: 17px;
+        letter-spacing: 0.12em; color: var(--text-hi);
+        background: var(--send-grad);
+        border: 1px solid rgba(var(--amethyst-bright-rgb), 0.55);
+        clip-path: var(--clip-cut-lg);
+        transition: background 0.2s ease, filter 0.2s ease;
     }
-    @media (max-width: 700px) {
-        /* The 4rem bubble insets leave almost no line length on a phone. */
-        .chat-bubble.user { margin-left: 1.5rem; }
-        .chat-bubble.fritz { margin-right: 1.5rem; }
-        .chat-progress { margin-right: 1.5rem; }
-        .chat-input-row { flex-wrap: wrap; }
-        .chat-input-row textarea { flex: 1 0 100%; order: -1; }
-        .chat-header { flex-direction: column; align-items: flex-start; }
+    .send-btn:hover:not(:disabled) {
+        background: var(--send-grad-hover);
+        filter: drop-shadow(0 0 10px rgba(var(--amethyst-rgb), 0.35));
+    }
+    /* The design never disables Send — it lets you click and scolds you. Keep
+       the scolding (next PR) but also say so visually and to assistive tech. */
+    .send-btn:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
+
+    .attach-chip {
+        display: none; align-items: center; gap: 10px; margin-bottom: 8px;
+        padding: 7px 10px; font-family: var(--font-mono); font-size: 11px;
+        color: var(--text-dim);
+        background: var(--fill-ghost); border: 1px solid var(--edge);
+        clip-path: var(--clip-cut-sm);
+    }
+    .attach-chip.active { display: flex; }
+    .attach-chip .gem {
+        width: 16px; height: 16px; flex: 0 0 auto;
+        clip-path: var(--clip-gem); background: var(--amethyst);
+    }
+    .attach-chip img { max-height: 28px; }
+    .attach-chip .name { flex: 1 1 auto; min-width: 0; overflow: hidden;
+                         text-overflow: ellipsis; white-space: nowrap; }
+    .attach-chip button {
+        background: none; border: 0; cursor: pointer; padding: 2px 4px;
+        color: var(--text-meta); font-size: 14px;
+    }
+    .attach-chip button:hover { color: var(--rose); }
+
+    .hint-row {
+        display: flex; justify-content: space-between; gap: 12px; margin-top: 8px;
+        font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em;
+        text-transform: uppercase; color: var(--text-meta);
+    }
+
+    .chat-shell.dragover .composer { background: var(--fill-soft); }
+
+    @media (max-width: 640px) {
+        .transcript { padding: 18px 14px; }
+        .transcript-col { gap: 18px; }
+        .msg-row.fritz .bubble { max-width: 92%; }
+        .msg-row.user .bubble { max-width: 88%; }
+        .composer { padding: 10px 14px 8px; }
+        .composer-row { gap: 8px; }
+        /* "Dispatch ❖" at 17px Cormorant plus 22px of side padding does not
+           fit beside a 46px attach button on a 375px screen. Drop to the
+           glyph; the accessible name is carried by aria-label. */
+        .send-btn { padding: 0 14px; }
+        .send-btn .send-label { display: none; }
+        .empty-title { font-size: 26px; }
+        .empty-seal { width: 72px; height: 72px; font-size: 32px; }
+        /* Keep only the left half of the hint row. */
+        .hint-row .hint-right { display: none; }
     }
 </style>
 
-<div class="chat-shell">
-    <div class="chat-header">
-        <span class="muted">Signed in as <code>{{ username }}</code></span>
-        <span class="right">
-            {# No onsubmit attribute: the confirmation is registered in JS
-               below, above the early-return guard. The attribute this
-               replaced contained a literal \\' sequence, which HTML does not
-               unescape, so the handler failed to compile and the thread was
-               destroyed with no prompt at all. #}
-            <form class="inline" method="post" action="/chat/forget" id="chat-forget-form">
-                <button type="submit">New conversation</button>
-            </form>
-            <form class="inline" method="post" action="/chat/logout">
-                <button type="submit">Switch user</button>
-            </form>
-        </span>
-    </div>
+<div id="chat-status" class="visually-hidden" role="status" aria-live="polite"></div>
 
-    <div class="card">
-        <div id="chat-status" class="visually-hidden" role="status" aria-live="polite"></div>
-        <div id="chat-messages" role="log" aria-live="polite" aria-atomic="false"
-             aria-label="Conversation with Mister Fritz">
-            {% if messages %}
-                {% for m in messages %}
-                <div class="chat-bubble {{ m.role }}">
-                    <span class="role">{{ "you" if m.role == "user" else "mister fritz" }}</span>
+<div class="transcript" id="transcript">
+    <div class="transcript-col" id="chat-messages" role="log" aria-live="polite"
+         aria-atomic="false" aria-label="Conversation with Mister Fritz">
+        {% if messages %}
+            {% for m in messages %}
+            <div class="msg-row {{ m.role }}">
+                {% if m.role != "user" %}<div class="avatar" aria-hidden="true">F</div>{% endif %}
+                <div class="bubble">
+                    <div class="speaker">
+                        <span>{{ "You" if m.role == "user" else "Mister Fritz" }}</span>
+                        {# Checkpointed history carries no timestamp. Render the
+                           speaker line without one rather than inventing a
+                           wrong time — see plan 07 §7.1. #}
+                        {% if m.ts %}<time datetime="{{ m.ts }}">{{ m.ts }}</time>{% endif %}
+                    </div>
                     {% if m.role == "fritz" and m.html %}
-                    <div class="bubble-body">{{ m.html | safe }}</div>
+                    <div class="fritz-md">{{ m.html | safe }}</div>
                     {% else %}
-                    <div class="bubble-body">{{ m.content }}</div>
+                    <div>{{ m.content }}</div>
                     {% endif %}
                 </div>
-                {% endfor %}
-            {% else %}
-                <div class="chat-empty">
-                    Say hello to Fritz. He'll be delighted, in his own theatrical way.
+            </div>
+            {% endfor %}
+        {% else %}
+            <div class="empty-state" id="chat-empty">
+                <div class="empty-seal" aria-hidden="true">F</div>
+                <h2 class="empty-title">The study is lit. The ledger is open.</h2>
+                <p class="empty-sub">
+                    Ask, and one shall consult the archives. One makes no promises
+                    as to enthusiasm.
+                </p>
+                <div class="suggestions">
+                    <button type="button" class="suggestion">What is dirtying my git status?</button>
+                    <button type="button" class="suggestion">Run ruff and report back.</button>
+                    <button type="button" class="suggestion">Are my secrets safe in exec?</button>
                 </div>
-            {% endif %}
-        </div>
-
-        <div id="chat-pending-attach" class="chat-pending-attach">
-            <img id="chat-pending-img" alt="">
-            <span class="name" id="chat-pending-name"></span>
-            <button type="button" id="chat-pending-remove">Remove</button>
-        </div>
-
-        <form class="chat-input-row" id="chat-form" method="post" action="/chat/send">
-            <button type="button" class="icon-btn" id="chat-attach-btn"
-                    title="Attach an image">📎</button>
-            <input type="file" id="chat-image-input" accept="image/*"
-                   style="display: none;">
-            <textarea name="message" placeholder="Type a message... (or drop an image anywhere)"
-                      required autofocus rows="2"></textarea>
-            <button type="submit">Send</button>
-        </form>
-
-        {# Document upload moved to the admin panel (POST /documents/upload).
-           DOC_FOLDER is shared knowledge every user's RAG queries read from,
-           and the chat cookie is a self-asserted name rather than a
-           credential — so this control cannot live on this surface. #}
+            </div>
+        {% endif %}
     </div>
 </div>
 
+<div class="composer">
+    <div class="composer-col">
+        <div class="attach-chip" id="chat-pending-attach">
+            <span class="gem" aria-hidden="true"></span>
+            <img id="chat-pending-img" alt="">
+            <span class="name" id="chat-pending-name"></span>
+            <button type="button" id="chat-pending-remove" aria-label="Remove attachment">×</button>
+        </div>
+
+        <form class="composer-row" id="chat-form" method="post" action="/chat/send">
+            <span class="facet">
+                <button type="button" class="attach-btn" id="chat-attach-btn"
+                        aria-label="Attach an image"><span aria-hidden="true">✧</span></button>
+            </span>
+            <input type="file" id="chat-image-input" accept="image/*" hidden>
+            <label for="chat-textarea" class="visually-hidden">Message</label>
+            <textarea id="chat-textarea" name="message" rows="1" required autofocus
+                      placeholder="Address the butler…"></textarea>
+            <span class="facet">
+                <button type="submit" class="send-btn" id="chat-send-btn" aria-label="Dispatch">
+                    <span class="send-label">Dispatch</span> <span aria-hidden="true">❖</span>
+                </button>
+            </span>
+        </form>
+
+        <div class="hint-row">
+            <span>Enter to dispatch · Shift+Enter for a new line</span>
+            <span class="hint-right" aria-hidden="true">Candle no. 7 still burning</span>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
 <script>
-// Hijack the form submit to use SSE streaming. If JavaScript is disabled or
-// fails to load, the form still POSTs to /chat/send (sync fallback).
+// SSE streaming client. The form still POSTs to /chat/send if JS is disabled.
 (function() {
     // Registered FIRST, above the early-return guard below. "New conversation"
     // calls privacy.forget_conversation, which DELETEs from `checkpoints` and
-    // `writes` — unrecoverable. If this listener ever moves below the guard,
-    // a missing composer silently disarms the confirmation again.
+    // `writes` — unrecoverable. If this listener ever moves below the guard, a
+    // missing composer silently disarms the confirmation again.
     const forgetForm = document.getElementById("chat-forget-form");
     if (forgetForm) {
         forgetForm.addEventListener("submit", function(ev) {
             const ok = window.confirm(
-                "Start a fresh conversation? Your memories and schedules stay; " +
-                "only this thread's context is reset."
+                "Burn the correspondence? The present conversation goes to the " +
+                "fire — every word. Your memories and schedules survive; only " +
+                "this thread's context is reset."
             );
             if (!ok) ev.preventDefault();
         });
@@ -194,18 +363,13 @@
 
     const form = document.getElementById("chat-form");
     const list = document.getElementById("chat-messages");
+    const transcript = document.getElementById("transcript");
     const statusRegion = document.getElementById("chat-status");
+    const shell = document.getElementById("chat-shell");
     if (!form || !list) return;
 
-    // Screen readers get an explicit spoken status; sighted users have the
-    // streaming caret. aria-busy tells AT the log is mid-update so it doesn't
-    // announce every partial token.
-    function setStatus(text, busy) {
-        if (statusRegion) statusRegion.textContent = text || "";
-        list.setAttribute("aria-busy", busy ? "true" : "false");
-    }
-
-    const shell = document.querySelector(".chat-shell");
+    const textarea = document.getElementById("chat-textarea");
+    const sendBtn = document.getElementById("chat-send-btn");
     const attachBtn = document.getElementById("chat-attach-btn");
     const imageInput = document.getElementById("chat-image-input");
     const pendingRow = document.getElementById("chat-pending-attach");
@@ -213,6 +377,65 @@
     const pendingName = document.getElementById("chat-pending-name");
     const pendingRemove = document.getElementById("chat-pending-remove");
 
+    // ── Status / busy ────────────────────────────────────────────────────
+    // Screen readers get an explicit spoken status; sighted users get the
+    // caret. aria-busy tells AT the log is mid-update so it does not try to
+    // announce every partial token.
+    function setStatus(text, busy) {
+        if (statusRegion) statusRegion.textContent = text || "";
+        list.setAttribute("aria-busy", busy ? "true" : "false");
+        if (shell) shell.setAttribute("data-streaming", busy ? "true" : "false");
+        const label = document.querySelector(".presence-label");
+        if (label) {
+            label.textContent = busy
+                ? "Occupied — composing a reply"
+                : "In attendance · the candles are lit";
+        }
+    }
+
+    // ── Scrolling ────────────────────────────────────────────────────────
+    // The shell is a fixed flex column, so the TRANSCRIPT scrolls, not the
+    // window. Read and write scrollTop on that container; window.scrollY and
+    // scrollIntoView are both wrong here (the latter also yanks the page when
+    // the user has deliberately scrolled up).
+    function isPinnedToBottom(slack) {
+        const gap = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight;
+        return gap <= (slack === undefined ? 80 : slack);
+    }
+    function followScroll(force) {
+        if (!force && !isPinnedToBottom()) return;
+        transcript.scrollTop = transcript.scrollHeight;
+    }
+
+    // ── Composer ─────────────────────────────────────────────────────────
+    function autoGrow() {
+        textarea.style.height = "auto";
+        textarea.style.height = Math.min(textarea.scrollHeight, 150) + "px";
+    }
+    textarea.addEventListener("input", autoGrow);
+
+    // Enter dispatches, Shift+Enter newlines — but never while an IME is
+    // composing (isComposing / keyCode 229), which would swallow the character
+    // being composed, and never on a touch device, where soft keyboards have
+    // no reliable Shift.
+    const coarsePointer = window.matchMedia("(pointer: coarse)").matches;
+    textarea.addEventListener("keydown", function(ev) {
+        if (ev.key !== "Enter" || ev.shiftKey) return;
+        if (ev.isComposing || ev.keyCode === 229) return;
+        if (coarsePointer) return;
+        ev.preventDefault();
+        form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event("submit", {cancelable: true}));
+    });
+
+    document.querySelectorAll(".suggestion").forEach(function(chip) {
+        chip.addEventListener("click", function() {
+            textarea.value = chip.textContent.trim();
+            autoGrow();
+            textarea.focus();
+        });
+    });
+
+    // ── Attachments ──────────────────────────────────────────────────────
     function clearPending() {
         pendingRow.classList.remove("active");
         pendingImg.src = "";
@@ -222,7 +445,7 @@
     function uploadImage(file) {
         if (!file) return;
         if (!file.type.startsWith("image/")) {
-            alert("That doesn't look like an image.");
+            setStatus("That does not appear to be an image.", false);
             return;
         }
         const fd = new FormData();
@@ -232,14 +455,14 @@
         }).then(r => r.json().then(j => ({ ok: r.ok, body: j })))
           .then(({ ok, body }) => {
               if (!ok) {
-                  alert("Upload failed: " + (body.error || "unknown"));
+                  setStatus("Upload refused: " + (body.error || "unknown"), false);
                   return;
               }
               pendingImg.src = body.url;
               pendingName.textContent = body.name || "attachment";
               pendingRow.classList.add("active");
           })
-          .catch(err => alert("Upload failed: " + err.message));
+          .catch(err => setStatus("Upload failed: " + err.message, false));
     }
 
     if (attachBtn) attachBtn.addEventListener("click", () => imageInput.click());
@@ -249,7 +472,6 @@
     });
     if (pendingRemove) pendingRemove.addEventListener("click", clearPending);
 
-    // Drag-and-drop on the chat shell: dropping an image triggers upload.
     if (shell) {
         let dragDepth = 0;
         shell.addEventListener("dragenter", (e) => {
@@ -269,17 +491,35 @@
         });
     }
 
-    function makeBubble(role) {
-        const div = document.createElement("div");
-        div.className = "chat-bubble " + role;
-        const roleSpan = document.createElement("span");
-        roleSpan.className = "role";
-        roleSpan.textContent = role === "user" ? "you" : "mister fritz";
-        div.appendChild(roleSpan);
+    // ── Message construction ─────────────────────────────────────────────
+    function makeRow(role) {
+        const row = document.createElement("div");
+        row.className = "msg-row " + role;
+        if (role !== "user") {
+            const av = document.createElement("div");
+            av.className = "avatar";
+            av.setAttribute("aria-hidden", "true");
+            av.textContent = "F";
+            row.appendChild(av);
+        }
+        const bubble = document.createElement("div");
+        bubble.className = "bubble";
+        const speaker = document.createElement("div");
+        speaker.className = "speaker";
+        const who = document.createElement("span");
+        who.textContent = role === "user" ? "You" : "Mister Fritz";
+        speaker.appendChild(who);
+        const t = document.createElement("time");
+        const now = new Date();
+        t.dateTime = now.toISOString();
+        t.textContent = now.toTimeString().slice(0, 5);
+        speaker.appendChild(t);
+        bubble.appendChild(speaker);
         const body = document.createElement("div");
-        body.className = "bubble-body";
-        div.appendChild(body);
-        return div;
+        bubble.appendChild(body);
+        row.appendChild(bubble);
+        row._body = body;
+        return row;
     }
 
     function makeProgressLine(text) {
@@ -290,52 +530,47 @@
     }
 
     function clearEmptyState() {
-        const empty = list.querySelector(".chat-empty");
+        const empty = document.getElementById("chat-empty");
         if (empty) empty.remove();
     }
 
     form.addEventListener("submit", function(ev) {
         ev.preventDefault();
-        const textarea = form.querySelector("textarea[name=message]");
         const message = textarea.value.trim();
         if (!message) return;
 
         clearEmptyState();
 
-        // User bubble: plain text (no markdown). If there's a pending image
-        // attached, show its thumbnail in the user bubble so the user can see
-        // what they sent.
-        const userBubble = makeBubble("user");
-        const userBody = userBubble.querySelector(".bubble-body");
+        const userRow = makeRow("user");
         if (pendingRow.classList.contains("active") && pendingImg.src) {
             const img = document.createElement("img");
             img.src = pendingImg.src;
             img.alt = "attached image";
-            img.style.maxWidth = "200px";
-            img.style.borderRadius = "4px";
+            img.style.maxWidth = "240px";
             img.style.display = "block";
-            img.style.marginBottom = "0.5rem";
-            userBody.appendChild(img);
+            img.style.marginBottom = "8px";
+            userRow._body.appendChild(img);
         }
         const textSpan = document.createElement("span");
         textSpan.textContent = message;
-        userBody.appendChild(textSpan);
-        list.appendChild(userBubble);
+        userRow._body.appendChild(textSpan);
+        list.appendChild(userRow);
         clearPending();
 
-        // Progress lines collected here so we can remove them when 'done' lands.
         const progressLines = [];
 
-        // Assistant bubble: starts empty, streams tokens in.
-        const fritzBubble = makeBubble("fritz");
-        fritzBubble.classList.add("streaming");
-        const body = fritzBubble.querySelector(".bubble-body");
-        list.appendChild(fritzBubble);
+        const fritzRow = makeRow("fritz");
+        const body = fritzRow._body;
+        body.className = "fritz-md";
+        list.appendChild(fritzRow);
 
         textarea.value = "";
+        autoGrow();
         textarea.disabled = true;
-        form.querySelector("button[type=submit]").disabled = true;
+        sendBtn.disabled = true;
+        sendBtn.setAttribute("aria-disabled", "true");
         setStatus("Mister Fritz is composing a reply.", true);
+        followScroll(true);
 
         const fd = new FormData();
         fd.append("message", message);
@@ -344,7 +579,6 @@
             .then(async (resp) => {
                 if (!resp.ok) {
                     body.textContent = "Error: HTTP " + resp.status;
-                    fritzBubble.classList.remove("streaming");
                     return;
                 }
                 const reader = resp.body.getReader();
@@ -367,16 +601,17 @@
                         }
                         const data = dataLines.join("\n");
                         if (eventName === "token") {
-                            // During streaming, render as plain text (no markdown yet).
+                            // Token frames are CUMULATIVE today, so this
+                            // assigns rather than appends. When the wire format
+                            // flips to deltas this is the one line that changes.
                             body.textContent = data;
+                            followScroll();
                         } else if (eventName === "progress") {
-                            // Progress message: ephemeral italic line above the
-                            // assistant bubble. Stacks if multiple arrive.
                             const line = makeProgressLine(data);
-                            list.insertBefore(line, fritzBubble);
+                            list.insertBefore(line, fritzRow);
                             progressLines.push(line);
+                            followScroll();
                         } else if (eventName === "done") {
-                            // Final frame: payload is JSON with text, html, images.
                             try {
                                 const payload = JSON.parse(data);
                                 body.innerHTML = payload.html || (payload.text ? escapeText(payload.text) : "(no response)");
@@ -389,13 +624,12 @@
                             } catch (e) {
                                 body.textContent = data || "(no response)";
                             }
-                            fritzBubble.classList.remove("streaming");
                             for (const line of progressLines) line.remove();
                             progressLines.length = 0;
                             setStatus("Mister Fritz has replied.", false);
+                            followScroll();
                         } else if (eventName === "error") {
                             body.textContent = "Error: " + data;
-                            fritzBubble.classList.remove("streaming");
                             for (const line of progressLines) line.remove();
                             progressLines.length = 0;
                             setStatus("The reply failed.", false);
@@ -403,22 +637,22 @@
                         lastEvent = eventName;
                     }
                 }
-                fritzBubble.classList.remove("streaming");
             })
             .catch((err) => {
                 body.textContent = "Network error: " + err.message;
-                fritzBubble.classList.remove("streaming");
                 setStatus("The reply failed.", false);
             })
             .finally(() => {
                 textarea.disabled = false;
-                form.querySelector("button[type=submit]").disabled = false;
+                sendBtn.disabled = false;
+                sendBtn.removeAttribute("aria-disabled");
                 list.setAttribute("aria-busy", "false");
-                // Only pull focus back on a device with a real keyboard —
-                // re-focusing on touch re-opens the soft keyboard after every
-                // send and covers the reply the user is waiting to read.
-                if (!window.matchMedia("(pointer: coarse)").matches) textarea.focus();
-                window.scrollTo(0, document.body.scrollHeight);
+                if (shell) shell.setAttribute("data-streaming", "false");
+                // Only pull focus back where there is a real keyboard —
+                // re-focusing on touch re-opens the soft keyboard over the
+                // reply the user is waiting to read.
+                if (!coarsePointer) textarea.focus();
+                followScroll();
             });
     });
 
@@ -427,6 +661,9 @@
         div.textContent = s;
         return div.innerHTML;
     }
+
+    // Start pinned to the newest message.
+    followScroll(true);
 })();
 </script>
 {% endblock %}

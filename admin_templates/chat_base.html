@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>{% block title %}Chat · Mister Fritz{% endblock %}</title>
+    {% include "_theme_base.html" %}
+    {% include "_theme_chat.html" %}
+    {#
+      Chat chrome, separate from base.html on purpose.
+
+      Two reasons it cannot live inside the admin chrome:
+        1. The shell is `position: fixed; inset: 0; flex column; overflow:
+           hidden` so the transcript scrolls in its own container. That cannot
+           exist inside base.html's `main { padding: 2rem; max-width: 1100px }`.
+        2. Chat users would otherwise see six admin nav links, five of which
+           lead straight to a Basic-auth password prompt they do not have.
+
+      Because the transcript is container-scrolled, every scroll helper reads
+      and writes `scrollTop` on that container — NOT window.scrollY /
+      window.scrollTo, and never scrollIntoView.
+    #}
+    <style>
+        html, body { height: 100%; }
+        body {
+            font-family: var(--font-body);
+            font-size: 17px; line-height: 1.65;
+            color: var(--text-body);
+            background: var(--bg-void);
+            /* dvh, not vh: mobile browser chrome collapses the viewport and vh
+               leaves the composer stranded under the URL bar. */
+            min-height: 100dvh;
+        }
+
+        .chat-shell {
+            position: fixed; inset: 0;
+            display: flex; flex-direction: column;
+            overflow: hidden;
+            background:
+                radial-gradient(ellipse 120% 90% at 50% -20%,
+                                var(--bg-raised) 0%, var(--bg-deep) 48%, var(--bg-void) 100%);
+        }
+
+        /* ── Atmosphere ───────────────────────────────────────────────────
+           Both layers are pointer-events:none and aria-hidden. The scan lines
+           sit BENEATH the content (z-index 1 vs the shell's children at 2+):
+           the design handoff describes them as above, but the prototype
+           actually renders them below, and an above-content
+           mix-blend-mode: overlay layer tints every glyph — which would undo
+           the contrast work the palette just did. Beneath is what ships. */
+        .atmos { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+        .atmos-scan {
+            background: repeating-linear-gradient(
+                0deg, transparent 0 3px, rgba(20, 10, 34, 0.14) 4px);
+            animation: scanDrift 9s linear infinite;
+        }
+        .atmos-candle {
+            top: -140px; left: 50%; transform: translateX(-50%);
+            width: min(720px, 92vw); height: 420px; inset: auto;
+            background: radial-gradient(ellipse,
+                rgba(var(--amethyst-rgb), 0.16) 0%, transparent 65%);
+            animation: candleFlicker 7s ease-in-out infinite;
+        }
+
+        /* ── Header ───────────────────────────────────────────────────────*/
+        .chat-header {
+            position: relative; z-index: 3; flex: 0 0 auto;
+            display: flex; align-items: center; gap: 16px;
+            padding: 14px var(--gutter);
+            border-bottom: 1px solid var(--edge-subtle);
+            background: linear-gradient(180deg, var(--panel-hi), var(--panel-lo));
+            backdrop-filter: blur(8px);
+        }
+        .seal {
+            flex: 0 0 auto;
+            width: 44px; height: 44px;
+            display: grid; place-items: center;
+            clip-path: var(--clip-seal);
+            background: linear-gradient(135deg, #241638, var(--obsidian));
+            /* drop-shadow, not box-shadow: clip-path clips box-shadow, so the
+               design's "pulsing purple glow" is invisible in the prototype.
+               drop-shadow follows the clipped silhouette. */
+            animation: sealPulse 5s ease-in-out infinite;
+            font-family: var(--font-display);
+            font-weight: 700; font-size: 20px; color: var(--amethyst-bright);
+            border: 1px solid var(--edge-strong);
+        }
+        .chat-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+        .wordmark {
+            font-family: var(--font-display); font-weight: 600;
+            font-size: 26px; letter-spacing: 0.06em; color: var(--text-hi);
+            margin: 0; line-height: 1.1;
+            animation: glitchShiftA 8s steps(1, end) infinite;
+        }
+        .kicker {
+            font-family: var(--font-mono); font-size: 10.5px;
+            text-transform: uppercase; letter-spacing: 0.22em;
+            color: var(--text-meta);
+        }
+        .presence {
+            display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+            font-size: 13.5px; font-style: italic; color: var(--text-dim);
+        }
+        .presence-dot {
+            width: 7px; height: 7px; flex: 0 0 auto;
+            clip-path: var(--clip-diamond);
+            background: var(--presence-idle);
+            filter: drop-shadow(0 0 4px var(--presence-idle));
+        }
+        .chat-shell[data-streaming="true"] .presence-dot {
+            background: var(--presence-busy);
+            filter: drop-shadow(0 0 4px var(--presence-busy));
+        }
+        .presence-user { color: var(--text-meta); font-style: normal; }
+        .header-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+
+        /* Faceted controls clip their own outline, so the focus ring lives on
+           an unclipped wrapper (see _theme_base.html). */
+        .facet { display: inline-flex; }
+
+        .btn-ghost {
+            font-family: var(--font-display); font-size: 16px;
+            padding: 8px 18px; cursor: pointer;
+            color: var(--lilac); background: transparent;
+            border: 1px solid rgba(var(--amethyst-rgb), 0.4);
+            clip-path: var(--clip-cut-sm);
+            transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+        }
+        .btn-ghost:hover {
+            background: var(--fill-hover); color: var(--text-hi);
+            border-color: var(--edge-max);
+        }
+        .link-ghost {
+            font-family: var(--font-body); font-style: italic; font-size: 13.5px;
+            color: var(--text-meta); background: none; border: 0; padding: 4px 2px;
+            cursor: pointer; text-decoration: underline;
+            text-underline-offset: 3px; text-decoration-color: var(--edge);
+        }
+        .link-ghost:hover { color: var(--text-dim); }
+
+        /* ── Main region ──────────────────────────────────────────────────*/
+        .chat-main {
+            position: relative; z-index: 2;
+            flex: 1 1 auto; min-height: 0;
+            display: flex; flex-direction: column;
+        }
+
+        /* ── Responsive. The design is desktop-only — no @media at all — so
+           this is written from scratch rather than ported. ───────────────*/
+        @media (max-width: 640px) {
+            body { font-size: 16px; }
+            .chat-header { padding: 10px 14px; gap: 10px; flex-wrap: wrap; }
+            .kicker { display: none; }
+            .wordmark { font-size: 21px; }
+            .seal { width: 36px; height: 36px; font-size: 16px; }
+            .presence { flex-basis: 100%; font-size: 12.5px; }
+            .header-actions { margin-left: auto; }
+            /* Collapse "✦ New conversation" to the glyph; the accessible name
+               is carried by aria-label on the button itself. */
+            .btn-ghost .btn-label { display: none; }
+            .btn-ghost { padding: 8px 12px; }
+        }
+    </style>
+    {% block head_extra %}{% endblock %}
+</head>
+<body>
+<div class="chat-shell" id="chat-shell" data-streaming="false">
+    <div class="atmos atmos-scan" aria-hidden="true"></div>
+    <div class="atmos atmos-candle" aria-hidden="true"></div>
+
+    <header class="chat-header">
+        <div class="seal" aria-hidden="true">F</div>
+        <div class="chat-title">
+            <h1 class="wordmark">Mister Fritz</h1>
+            <span class="kicker">est. MMXXIV — the household model</span>
+        </div>
+        {% block header_extra %}{% endblock %}
+    </header>
+
+    <main class="chat-main" id="main-content">
+        {% block body %}{% endblock %}
+    </main>
+</div>
+{% block scripts %}{% endblock %}
+</body>
+</html>
