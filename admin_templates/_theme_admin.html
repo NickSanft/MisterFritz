@@ -1,0 +1,95 @@
+{#
+  Admin-panel palette and components. Plain utility look, deliberately NOT the
+  chat surface's dark academia (DECISIONS.md #12) — these are data grids, and
+  faceted geometry fights the mobile `table { display: block }` rule.
+
+  Moved verbatim out of base.html when the theme split landed, with one
+  substantive change: the --muted contrast fix below.
+#}
+<style>
+    :root {
+        --fg: #1f2933;
+        /* WAS #738291 — 3.67:1 on --bg and 3.94:1 on --card, both under the
+           4.5:1 AA floor, and 3.30:1 on the --pill/code ground. That was a real
+           audit finding and it survives the chat-only rescope of the redesign.
+           The blast radius was undercounted: `h2 { color: var(--muted) }` below
+           means EVERY section heading on EVERY admin page was sub-AA, not just
+           incidental captions.
+           #5b6a78 measures 5.18:1 on --bg, 5.56:1 on --card, 4.65:1 on the pill
+           ground — the lightest value in this hue that clears AA on all three. */
+        --muted: #5b6a78;
+        --bg: #f7f7f5;
+        --card: #ffffff;
+        --accent: #5b3f30;
+        --border: #e2e1dc;
+        --danger: #b3261e;
+        --focus: #1f2933;
+    }
+    body {
+        font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        background: var(--bg); color: var(--fg);
+        line-height: 1.5;
+    }
+    header {
+        background: var(--accent); color: #fff;
+        padding: 1rem 2rem; display: flex; align-items: baseline; gap: 2rem;
+    }
+    header h1 { margin: 0; font-size: 1.1rem; font-weight: 600; }
+    header nav a {
+        color: rgba(255,255,255,0.85); text-decoration: none;
+        margin-right: 1.25rem; font-size: 0.9rem;
+    }
+    header nav a:hover { color: #fff; text-decoration: underline; }
+    header :focus-visible { outline-color: #fff; }
+    main { padding: 2rem; max-width: 1100px; margin: 0 auto; }
+    h2 { margin-top: 2rem; font-size: 1.1rem; color: var(--muted); font-weight: 500; }
+    h2:first-child { margin-top: 0; }
+    .card {
+        background: var(--card); border: 1px solid var(--border);
+        border-radius: 6px; padding: 1.25rem; margin-bottom: 1rem;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    th, td {
+        text-align: left; padding: 0.5rem 0.75rem;
+        border-bottom: 1px solid var(--border);
+    }
+    th { color: var(--muted); font-weight: 600; }
+    tr:last-child td { border-bottom: none; }
+    code, pre {
+        background: #ecebe5; padding: 0.1rem 0.35rem; border-radius: 3px;
+        font-size: 0.85rem;
+    }
+    pre { padding: 0.75rem; overflow-x: auto; }
+    .muted { color: var(--muted); }
+    .pill {
+        display: inline-block; padding: 0.05rem 0.5rem; border-radius: 10px;
+        background: #ecebe5; font-size: 0.8rem; color: var(--muted);
+    }
+    a { color: var(--accent); }
+    button {
+        font-family: inherit; font-size: 0.85rem;
+        padding: 0.25rem 0.6rem; border-radius: 3px;
+        border: 1px solid var(--border); background: #ecebe5;
+        color: var(--fg); cursor: pointer;
+    }
+    button:hover { background: #e0dfd9; }
+    button.danger {
+        border-color: var(--danger); color: var(--danger); background: #fff;
+    }
+    button.danger:hover { background: var(--danger); color: #fff; }
+    form.inline { display: inline; margin: 0; }
+
+    /* Mobile. The panel was desktop-only: fixed 2rem gutters and tables that
+       force a horizontal body scroll on a phone. */
+    @media (max-width: 700px) {
+        header {
+            padding: 0.75rem 1rem; flex-direction: column;
+            align-items: flex-start; gap: 0.5rem;
+        }
+        header nav a { margin-right: 0.9rem; }
+        main { padding: 1rem; }
+        .card { padding: 0.9rem; }
+        /* Wide tables scroll inside their own box rather than the page. */
+        table { display: block; overflow-x: auto; white-space: nowrap; }
+    }
+</style>

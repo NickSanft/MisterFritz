@@ -1,0 +1,205 @@
+{#
+  Dark-academia theme for the chat surface: candle-lit purple, serif type, zero
+  border-radius, faceted clip-path geometry throughout.
+
+  Chat only (DECISIONS.md #12) — the admin panel keeps its plain utility look.
+
+  THREE TOKEN LAYERS, deliberately. The design prototype hand-typed ~41 rgba()
+  strings off four base colours, so tuning an accent meant a find-and-replace
+  across dozens of literals. Layer 1 holds channel triplets, layer 2 names the
+  alpha steps, layer 3 is semantic. Change --amethyst-rgb once and every edge,
+  fill and glow moves with it.
+
+  CONTRAST: every text token carries its MEASURED ratio against the composited
+  ground it actually sits on — the bubble is 0.75 alpha over the page gradient
+  and code is 0.92 over the bubble, so measuring against the raw #0b0710 page
+  hex flatters every number by roughly a full point. Three of the design's
+  declared colours failed AA and were lightened per DECISIONS.md #14. The
+  handoff calls its colours final, so these comments are the only thing stopping
+  someone "restoring" them and silently reintroducing the exact defect this
+  redesign exists to fix.
+#}
+<style>
+    /* ── Fonts ────────────────────────────────────────────────────────────
+       Self-hosted: a 127.0.0.1 panel should not beacon to a third party on
+       every page load, it must render on an egress-less host or in Docker, and
+       a CDN would force fonts.googleapis.com / fonts.gstatic.com into the CSP.
+
+       Six faces, latin subset (the prototype's Google request pulls 13 and uses
+       6, and omits EB Garamond 600, which .fritz-md strong needs).
+
+       The woff2 files are NOT in the repo — see admin_static/README.md for the
+       filenames. Until they are dropped in, every stack below falls through to
+       a system serif and the page is fully usable, just not in the intended
+       faces. font-display: swap so text is never invisible waiting on them. */
+    @font-face {
+        font-family: 'Cormorant Garamond'; font-style: normal; font-weight: 400;
+        font-display: swap;
+        src: url('/static/fonts/cormorant-garamond-400.woff2') format('woff2');
+    }
+    @font-face {
+        font-family: 'Cormorant Garamond'; font-style: normal; font-weight: 600;
+        font-display: swap;
+        src: url('/static/fonts/cormorant-garamond-600.woff2') format('woff2');
+    }
+    @font-face {
+        font-family: 'Cormorant Garamond'; font-style: normal; font-weight: 700;
+        font-display: swap;
+        src: url('/static/fonts/cormorant-garamond-700.woff2') format('woff2');
+    }
+    @font-face {
+        font-family: 'EB Garamond'; font-style: normal; font-weight: 400;
+        font-display: swap;
+        src: url('/static/fonts/eb-garamond-400.woff2') format('woff2');
+    }
+    @font-face {
+        font-family: 'EB Garamond'; font-style: italic; font-weight: 400;
+        font-display: swap;
+        src: url('/static/fonts/eb-garamond-400-italic.woff2') format('woff2');
+    }
+    @font-face {
+        font-family: 'EB Garamond'; font-style: normal; font-weight: 600;
+        font-display: swap;
+        src: url('/static/fonts/eb-garamond-600.woff2') format('woff2');
+    }
+    @font-face {
+        font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400;
+        font-display: swap;
+        src: url('/static/fonts/jetbrains-mono-400.woff2') format('woff2');
+    }
+
+    :root {
+        /* ── Layer 1 — channel triplets ───────────────────────────────────
+           Only the colours that carry alpha ladders need to be channels. */
+        --amethyst-rgb: 147, 100, 210;
+        --amethyst-bright-rgb: 180, 140, 235;
+        --rose-rgb: 178, 82, 102;
+        --rose-border-rgb: 198, 106, 126;
+        --void-rgb: 11, 7, 16;
+
+        /* ── Layer 2 — named alpha steps ──────────────────────────────────
+           Every border in the design is one of three amethyst alphas and every
+           fill is one of four. Naming them stops a fifth appearing by accident. */
+        --edge-subtle: rgba(var(--amethyst-rgb), 0.22);
+        --edge:        rgba(var(--amethyst-rgb), 0.30);
+        --edge-strong: rgba(var(--amethyst-rgb), 0.45);
+        --edge-max:    rgba(var(--amethyst-rgb), 0.50);
+        --fill-ghost:  rgba(var(--amethyst-rgb), 0.06);
+        --fill-faint:  rgba(var(--amethyst-rgb), 0.08);
+        --fill-soft:   rgba(var(--amethyst-rgb), 0.12);
+        --fill-hover:  rgba(var(--amethyst-rgb), 0.16);
+
+        /* ── Layer 3 — semantic ───────────────────────────────────────────
+           Ground */
+        --bg-void:   #0b0710;
+        --bg-deep:   #0e0916;
+        --bg-raised: #1a1128;
+        --obsidian:  #120b1e;   /* seal gradient tail; the design had two
+                                   near-identical values (#120b1e/#100a1b) */
+        --panel-hi: rgba(24, 15, 38, 0.85);
+        --panel-lo: rgba(15, 10, 24, 0.65);
+
+        /* Accents */
+        --amethyst:        #9364d2;
+        --amethyst-bright: #b48ceb;   /* 6.62:1 on bubble — AA */
+        --lilac:           #cdb9ea;
+        --lavender-ink:    #d8c7f0;
+
+        /* Text. Ratios measured against the composited bubble (worst case)
+           and the page gradient. */
+        --text-hi:   #f0e9fa;   /* 14.87:1 — AAA */
+        --text-body: #d5cbe5;   /* 11.32:1 — AAA */
+        --text-dim:  #9d8bc0;   /*  5.77:1 — AA  */
+        /* Collapses the design's #574a75 (2.21:1 — FAILS even the 3:1 non-text
+           floor, and worse than the 3.67:1 admin bug this redesign exists to
+           fix), #6f5f92 (3.13:1 — fails AA) and #8d7fa8 (4.81:1 — passes, but
+           only just) into one token. Used for timestamps, the kicker, the image
+           meta caption, speaker names and dismiss glyphs. 5.00:1 worst case. */
+        --text-meta: #9082aa;
+        /* Code operator colour. The design reused #9d8bc0 for both this and
+           --text-dim; emitted separately so tuning one cannot silently move
+           the other. Starts equal on purpose. */
+        --code-operator: #9d8bc0;
+
+        /* States */
+        --rose:        #d89aac;
+        --rose-edge:   rgba(var(--rose-border-rgb), 0.45);
+        --rose-edge-hi: rgba(var(--rose-border-rgb), 0.60);
+        --rose-fill:   rgba(var(--rose-rgb), 0.08);
+        --rose-grad:   linear-gradient(135deg, #7c3350, #5a2138);
+        --presence-idle: #7fc98f;
+        --presence-busy: #d8b45a;
+
+        /* Send button */
+        --send-grad:       linear-gradient(135deg, #4b2f78, #33205a);
+        --send-grad-hover: linear-gradient(135deg, #5d3b96, #41296f);
+
+        /* Focus ring. Deliberately NOT amethyst: it has to read against the
+           purple borders it sits beside. 7.69:1 on every dark ground here. */
+        --focus: #c9a75f;
+
+        /* ── Type ─────────────────────────────────────────────────────────
+           Full fallback stacks — the design's bare 'Cormorant Garamond', serif
+           drops to Times the moment the woff2 is missing, which is exactly the
+           state this repo ships in. */
+        --font-display: 'Cormorant Garamond', Cormorant, Garamond, 'Palatino Linotype', Palatino, 'Book Antiqua', Georgia, serif;
+        --font-body: 'EB Garamond', Garamond, Georgia, 'Times New Roman', serif;
+        --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+        /* ── Geometry ─────────────────────────────────────────────────────
+           No border-radius anywhere; facets via clip-path. Naming them as
+           tokens makes "no rounded corners" enforceable by review, and custom
+           properties hold clip-path values fine.
+
+           The design drifted to four parallelogram skews (8/9/10/12px);
+           collapsed to two. */
+        --cut-sm: 8px;
+        --cut-lg: 12px;
+        --clip-seal: polygon(50% 0%, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%);
+        --clip-hex-flat: polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%);
+        --clip-diamond: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+        --clip-gem: polygon(50% 0%, 100% 38%, 82% 100%, 18% 100%, 0% 38%);
+        --clip-cut-sm: polygon(var(--cut-sm) 0%, 100% 0%, calc(100% - var(--cut-sm)) 100%, 0% 100%);
+        --clip-cut-lg: polygon(var(--cut-lg) 0%, 100% 0%, calc(100% - var(--cut-lg)) 100%, 0% 100%);
+        /* Fritz bubble: top-left and bottom-right cut. */
+        --clip-facet-l: polygon(14px 0%, 100% 0%, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0% 100%, 0% 14px);
+        /* User bubble: mirrored — top-right and bottom-left. */
+        --clip-facet-r: polygon(0% 0%, calc(100% - 14px) 0%, 100% 14px, 100% 100%, 14px 100%, 0% calc(100% - 14px));
+        /* Dialog / login card: same idea at 24px. */
+        --clip-facet-lg: polygon(24px 0%, 100% 0%, 100% calc(100% - 24px), calc(100% - 24px) 100%, 0% 100%, 0% 24px);
+
+        /* ── Rhythm ───────────────────────────────────────────────────────*/
+        --col-max: 860px;
+        --gutter: 26px;
+    }
+
+    /* ── Motion ───────────────────────────────────────────────────────────
+       All decorative. _theme_base.html's reduced-motion block stops every one
+       of these; nothing below conveys state by movement alone. */
+    @keyframes scanDrift   { to { background-position: 0 128px; } }
+    @keyframes candleFlicker {
+        0%, 100% { opacity: 0.62; }
+        12%      { opacity: 0.71; }
+        26%      { opacity: 0.54; }
+        41%      { opacity: 0.75; }
+        58%      { opacity: 0.58; }
+        73%      { opacity: 0.68; }
+        88%      { opacity: 0.50; }
+    }
+    @keyframes sealPulse {
+        0%, 100% { filter: drop-shadow(0 0 6px rgba(var(--amethyst-rgb), 0.30)); }
+        50%      { filter: drop-shadow(0 0 16px rgba(var(--amethyst-rgb), 0.55)); }
+    }
+    @keyframes glitchShiftA {
+        0%, 92%, 100% { transform: translate(0); clip-path: none; }
+        93% { transform: translate(-2px, 1px); clip-path: inset(12% 0 62% 0); }
+        95% { transform: translate(2px, -1px); clip-path: inset(58% 0 18% 0); }
+        97% { transform: translate(-1px, 0);   clip-path: inset(32% 0 44% 0); }
+    }
+    @keyframes prismSweep  { from { transform: translateX(-120%); } to { transform: translateX(320%); } }
+    @keyframes quillBlink  { 0%, 45% { opacity: 1; } 55%, 100% { opacity: 0; } }
+    @keyframes msgIn       { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+    @keyframes noticeIn    { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+    @keyframes cardIn      { from { opacity: 0; transform: translateY(8px) scale(0.99); } to { opacity: 1; transform: none; } }
+    @keyframes veilIn      { from { opacity: 0; } to { opacity: 1; } }
+</style>

@@ -99,6 +99,97 @@ class TestAuth(unittest.TestCase):
         self.assertEqual(r.status_code, 401)
 
 
+_TEMPLATE_DIR = Path(admin_panel.__file__).parent / "admin_templates"
+
+
+def _template(name: str) -> str:
+    return (_TEMPLATE_DIR / name).read_text(encoding="utf-8")
+
+
+def _relative_luminance(hex_colour: str) -> float:
+    h = hex_colour.lstrip("#")
+    channels = []
+    for i in (0, 2, 4):
+        c = int(h[i:i + 2], 16) / 255
+        channels.append(c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4)
+    r, g, b = channels
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _contrast(fg: str, bg: str) -> float:
+    a, b = _relative_luminance(fg), _relative_luminance(bg)
+    hi, lo = max(a, b), min(a, b)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+class TestThemeSplit(unittest.TestCase):
+    """The theme splits three ways (DECISIONS.md #12): a shared base, the admin
+    palette, and the chat surface's dark academia. These guard the seams — a
+    dropped include breaks every page at once, and the contrast fix is easy to
+    undo by anyone 'restoring' the design's declared hexes."""
+
+    def test_theme_includes_exist(self):
+        for name in ("_theme_base.html", "_theme_admin.html", "_theme_chat.html"):
+            self.assertTrue((_TEMPLATE_DIR / name).is_file(), name)
+
+    def test_base_consumes_base_and_admin_themes(self):
+        src = _template("base.html")
+        self.assertIn('include "_theme_base.html"', src)
+        self.assertIn('include "_theme_admin.html"', src)
+
+    def test_admin_panel_does_not_get_the_chat_palette(self):
+        # Decision 12: candle-lit purple buys nothing on a data grid, and the
+        # faceted clip-paths fight the mobile `table { display: block }` rule.
+        self.assertNotIn('include "_theme_chat.html"', _template("base.html"))
+
+    def test_admin_muted_passes_aa_on_every_ground(self):
+        # WAS #738291: 3.67:1 on --bg, 3.94:1 on --card, 3.30:1 on the pill
+        # ground. `h2 { color: var(--muted) }` means this governed every section
+        # heading on every admin page, so it was never merely decorative.
+        src = _template("_theme_admin.html")
+        match = re.search(r"--muted:\s*(#[0-9a-fA-F]{6})", src)
+        self.assertIsNotNone(match, "--muted not found in the admin theme")
+        muted = match.group(1)
+        for ground, label in (("#f7f7f5", "--bg"), ("#ffffff", "--card"),
+                              ("#ecebe5", "pill/code")):
+            with self.subTest(ground=label):
+                self.assertGreaterEqual(
+                    _contrast(muted, ground), 4.5,
+                    f"--muted {muted} fails AA against {label} ({ground})",
+                )
+
+    def test_chat_theme_uses_layered_tokens_not_literal_rgba(self):
+        # Layer 1 channel triplets exist so an accent can be retuned in one
+        # place instead of across ~41 hand-typed rgba() literals.
+        src = _template("_theme_chat.html")
+        self.assertIn("--amethyst-rgb:", src)
+        self.assertIn("rgba(var(--amethyst-rgb)", src)
+
+    def test_chat_theme_has_no_border_radius(self):
+        # "No rounded corners anywhere; facets via clip-path" is the design
+        # rule. Strip comments first — the prose explaining the rule naturally
+        # names the property, and matching that would be a false positive.
+        src = _template("_theme_chat.html")
+        src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)      # CSS comments
+        src = re.sub(r"\{#.*?#\}", "", src, flags=re.S)      # Jinja comments
+        self.assertNotRegex(src, r"border-radius\s*:")
+
+    def test_chat_theme_font_stacks_have_real_fallbacks(self):
+        # The woff2 files are not in the repo; a bare "'EB Garamond', serif"
+        # would drop straight to Times.
+        src = _template("_theme_chat.html")
+        self.assertIn("--font-body:", src)
+        self.assertIn("Georgia", src)
+
+    def test_reduced_motion_block_lives_in_the_shared_base(self):
+        self.assertIn("prefers-reduced-motion", _template("_theme_base.html"))
+
+    def test_focus_ring_survives_clip_path(self):
+        # clip-path clips outline and outer box-shadow, so faceted controls
+        # carry their ring on an unclipped .facet wrapper via :focus-within.
+        self.assertIn(".facet:focus-within", _template("_theme_base.html"))
+
+
 class TestStaticMount(unittest.TestCase):
     """Fonts/CSS at /static are public: gating them would render /chat/login
     unstyled behind the admin password prompt."""

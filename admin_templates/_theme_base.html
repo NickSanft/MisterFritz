@@ -1,0 +1,70 @@
+{#
+  Shared foundation for BOTH chromes (base.html for the admin panel,
+  chat_base.html for the chat surface): reset, accessibility, motion policy.
+
+  Nothing palette-specific belongs here. The admin panel keeps a plain utility
+  look (_theme_admin.html) and the chat surface is dark academia
+  (_theme_chat.html); per DECISIONS.md #12 those palettes are deliberately not
+  shared, because the chat's faceted clip-paths fight the admin's mobile table
+  rule and candle-lit purple buys nothing on a data grid.
+#}
+<style>
+    *, *::before, *::after { box-sizing: border-box; }
+
+    html, body { margin: 0; padding: 0; }
+
+    /* Keyboard focus must always be visible. clip-path (used heavily by the
+       chat theme) CLIPS both outline and outer box-shadow, so faceted controls
+       wrap themselves in an unclipped .facet span that carries the ring via
+       :focus-within — see _theme_chat.html. This rule is the baseline for
+       everything not faceted. */
+    :focus-visible {
+        outline: 2px solid var(--focus, #c9a75f);
+        outline-offset: 2px;
+    }
+    /* Only suppress the default ring where we provide our own; never blanket
+       `outline: none`. */
+    .facet:focus-within { outline: 2px solid var(--focus, #c9a75f); outline-offset: 2px; }
+    .facet > :focus-visible { outline: none; }
+
+    /* Announced to assistive tech, invisible on screen. Not display:none,
+       which would remove it from the accessibility tree entirely. */
+    .visually-hidden {
+        position: absolute; width: 1px; height: 1px; overflow: hidden;
+        clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+    }
+
+    /* Skip repeated chrome. Visually hidden until focused. */
+    .skip-link {
+        position: absolute; left: 8px; top: -48px; z-index: 100;
+        padding: 8px 14px; background: #000; color: #fff; text-decoration: none;
+        transition: top 0.15s ease;
+    }
+    .skip-link:focus { top: 8px; }
+
+    img, svg, video { max-width: 100%; height: auto; }
+
+    /* Respect the OS "reduce motion" setting.
+
+       The chat theme ships an atmosphere layer — drifting scan lines, a
+       flickering candle glow, a pulsing seal, a wordmark glitch, a prism sweep
+       across the status chip. All of it is decorative; nothing conveys state by
+       motion alone, so all of it can stop. Entrances collapse to opacity-only
+       rather than vanishing, so messages still register as arriving.
+
+       Per plan 07 §5.6 this is a checklist, not a blanket rule — but the
+       blanket rule is the safety net that catches any animation added later
+       without thinking about it. */
+    @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+            animation-duration: 0.01ms !important;
+            animation-iteration-count: 1 !important;
+            transition-duration: 0.01ms !important;
+            scroll-behavior: auto !important;
+        }
+        /* Entrances: keep the fade, drop the travel. */
+        .msg-row, .chat-notice, .confirm-card, .confirm-veil {
+            transform: none !important;
+        }
+    }
+</style>
