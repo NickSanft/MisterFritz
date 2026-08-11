@@ -293,3 +293,5 @@ Markdown>=3.5
 # HTML sanitiser for rendered chat markdown (Phase 15). python-markdown passes
 # raw HTML through verbatim and the chat template renders it with | safe.
 nh3>=0.3,<0.4
+# Syntax highlighting for chat code blocks via markdown's codehilite (Phase 15).
+Pygments>=2.17

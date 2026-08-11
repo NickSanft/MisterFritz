@@ -54,6 +54,7 @@ from fritz_utils import (
     CHAT_ALLOWED_IMAGE_FORMATS,
     CHAT_ALLOWED_IMAGE_TYPES,
     CHAT_ALLOWED_USERS,
+    CHAT_CODE_HIGHLIGHT,
     CHAT_COOKIE_SECRET,
     CHAT_COOKIE_SECURE,
     CHAT_DOC_UPLOAD_MAX_BYTES,
@@ -113,6 +114,60 @@ class _BasicAuthMiddleware(BaseHTTPMiddleware):
         # admins can distinguish each other in practice.
         request.state.admin_username = username or "(unset)"
         return await call_next(request)
+
+
+class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """CSP nonce plus baseline hardening headers on every response.
+
+    script-src is nonce-only, which kills both an injected <script> tag and an
+    inline `onerror=` handler if anything ever slips past the nh3 sanitiser in
+    _render_markdown. Defence in depth: the sanitiser is the primary control.
+
+    style-src deliberately keeps 'unsafe-inline'. The templates are full of
+    <style> blocks and style="…" attributes, and inline CSS is not the
+    injection vector here — script is. NEVER write
+    `style-src 'nonce-x' 'unsafe-inline'`: a nonce makes 'unsafe-inline' be
+    ignored outright, and every style attribute on the page dies.
+
+    font-src 'self' is required or every @font-face is blocked, self-hosted or
+    not. Handlers that set their own stricter CSP (chat_asset) are left alone —
+    setdefault, not assignment.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        nonce = secrets.token_urlsafe(16)
+        request.state.csp_nonce = nonce
+        response = await call_next(request)
+        response.headers.setdefault("Content-Security-Policy", "; ".join([
+            "default-src 'none'",
+            f"script-src 'nonce-{nonce}'",
+            "style-src 'self' 'unsafe-inline'",
+            "font-src 'self'",
+            "img-src 'self' data:",
+            "connect-src 'self'",
+            "form-action 'self'",
+            "base-uri 'none'",
+            "frame-ancestors 'none'",
+            "object-src 'none'",
+        ]))
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        return response
+
+
+def _csp_nonce(request: Request) -> str:
+    """Nonce for this response's inline <script>. Exposed to templates as a
+    Jinja global. The lazy fallback keeps templates renderable if a handler is
+    exercised without the middleware stack (as some tests do)."""
+    nonce = getattr(request.state, "csp_nonce", None)
+    if nonce is None:
+        nonce = secrets.token_urlsafe(16)
+        request.state.csp_nonce = nonce
+    return nonce
+
+
+templates.env.globals["csp_nonce"] = _csp_nonce
 
 
 def _unauthorized() -> Response:
@@ -351,7 +406,49 @@ def _chat_thread_id(user_id: str) -> str:
 
 # Markdown extensions enabled for Fritz's replies. fenced_code handles ```py
 # blocks; tables / nl2br polish the natural prose he tends to emit.
+#
+# codehilite adds Pygments syntax highlighting, gated by CHAT_CODE_HIGHLIGHT so
+# it can be switched off without a deploy if it ever misbehaves. guess_lang is
+# off deliberately: with it on, Pygments guesses a language for every unlabelled
+# fence and cheerfully colours prose, shell transcripts and log dumps as if they
+# were code.
 _MARKDOWN_EXTENSIONS = ["fenced_code", "tables", "nl2br"]
+_MARKDOWN_CONFIGS: dict = {}
+if CHAT_CODE_HIGHLIGHT:
+    _MARKDOWN_EXTENSIONS = ["fenced_code", "codehilite", "tables", "nl2br"]
+    _MARKDOWN_CONFIGS = {"codehilite": {"guess_lang": False}}
+
+# Fence languages, in document order: ```python -> "python".
+_FENCE_LANG_RE = re.compile(r"^[ \t]*(?:```|~~~)[ \t]*([A-Za-z0-9_+#.-]+)", re.M)
+_CODEHILITE_DIV_RE = re.compile(r'<div class="codehilite">')
+
+
+def _label_code_languages(html: str, source: str) -> str:
+    """Re-attach each fence's language to its rendered block as `data-lang`.
+
+    codehilite REMOVES the `class="language-python"` that fenced_code emits on
+    its own (verified), so by the time the HTML exists the language is gone —
+    and a fence carries no filename either. Rather than a custom treeprocessor,
+    read the languages back off the markdown source and zip them onto the
+    rendered blocks, which appear in the same order.
+
+    Unlabelled fences produce no data-lang and the client falls back to a plain
+    "code" chip, so a mismatch degrades to the design's zero-cost fallback
+    rather than mislabelling anything.
+    """
+    langs = _FENCE_LANG_RE.findall(source or "")
+    if not langs:
+        return html
+    counter = {"i": 0}
+
+    def _sub(match):
+        i = counter["i"]
+        counter["i"] += 1
+        if i >= len(langs):
+            return match.group(0)
+        return f'<div class="codehilite" data-lang="{langs[i].lower()}">'
+
+    return _CODEHILITE_DIV_RE.sub(_sub, html)
 
 # Attribute allowlist for _sanitise_html.
 #
@@ -369,6 +466,9 @@ _MARKDOWN_EXTENSIONS = ["fenced_code", "tables", "nl2br"]
 _NH3_ATTRIBUTES = dict(nh3.ALLOWED_ATTRIBUTES)
 for _tag in ("div", "pre", "code", "span", "table"):
     _NH3_ATTRIBUTES[_tag] = (_NH3_ATTRIBUTES.get(_tag) or set()) | {"class"}
+# data-lang carries the fence's language to the code block's title chip. Values
+# are constrained to [A-Za-z0-9_+#.-] by _FENCE_LANG_RE before they get here.
+_NH3_ATTRIBUTES["div"] = _NH3_ATTRIBUTES["div"] | {"data-lang"}
 
 
 def _sanitise_html(html: str) -> str:
@@ -389,7 +489,12 @@ def _render_markdown(text: str) -> str:
     history and for the final state of a streamed message."""
     if not text:
         return ""
-    return _sanitise_html(md_lib.markdown(text, extensions=_MARKDOWN_EXTENSIONS))
+    html = md_lib.markdown(
+        text, extensions=_MARKDOWN_EXTENSIONS,
+        extension_configs=_MARKDOWN_CONFIGS,
+    )
+    html = _label_code_languages(html, text)
+    return _sanitise_html(html)
 
 
 def _doc_to_message(checkpoint_msg) -> dict | None:
@@ -1019,7 +1124,12 @@ def create_app(password: str, schedule_manager=None, chat_password: str | None =
     ]
     app = Starlette(
         routes=routes,
-        middleware=[Middleware(_BasicAuthMiddleware, password=password)],
+        middleware=[
+            # Outermost: the nonce must exist before a handler renders a
+            # template, and the headers apply to auth failures too.
+            Middleware(_SecurityHeadersMiddleware),
+            Middleware(_BasicAuthMiddleware, password=password),
+        ],
     )
     app.state.schedule_manager = schedule_manager
     app.state.chat_password = CHAT_PASSWORD if chat_password is _UNSET else chat_password

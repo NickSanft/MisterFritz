@@ -1,46 +1,127 @@
-{% extends "base.html" %}
-{% block title %}Chat · Mister Fritz{% endblock %}
+{% extends "chat_base.html" %}
+{% block title %}Sign in · Mister Fritz{% endblock %}
 
 {% block body %}
-<div class="card" style="max-width: 480px; margin: 2rem auto;">
-    <h2 style="margin-top: 0;">Sign in to chat</h2>
-    <p class="muted">
-        Pick a username so Fritz can keep your conversation, memories, and
-        schedules separate from anyone else using this instance. Use the
-        same Discord username you've been using if you want a continuous
-        thread across surfaces.
-    </p>
+<style>
+    /* Reuses the confirm dialog's card shape — 24px faceted cuts, radial
+       ground — so the login page matches with no new design work. */
+    .login-wrap {
+        flex: 1 1 auto; min-height: 0; overflow-y: auto;
+        display: flex; align-items: center; justify-content: center;
+        padding: 32px 20px;
+    }
+    .login-card {
+        width: min(480px, 100%); padding: 34px 36px 30px;
+        background: linear-gradient(160deg, #1c1230, #100a1b);
+        border: 1px solid var(--edge-max);
+        clip-path: var(--clip-facet-lg);
+    }
+    .login-seal {
+        width: 44px; height: 44px; display: grid; place-items: center;
+        clip-path: var(--clip-seal);
+        background: linear-gradient(135deg, #241638, var(--obsidian));
+        border: 1px solid var(--edge-strong);
+        font-family: var(--font-display); font-weight: 700; font-size: 20px;
+        color: var(--amethyst-bright);
+        margin-bottom: 18px;
+    }
+    .login-card h2 {
+        margin: 0 0 10px; font-family: var(--font-display); font-weight: 600;
+        font-size: 26px; color: var(--text-hi);
+    }
+    .login-lede { margin: 0 0 22px; font-style: italic; color: var(--text-dim); }
+    .login-error {
+        margin: 0 0 18px; padding: 9px 12px;
+        border-left: 3px solid var(--rose-edge-hi);
+        background: rgba(var(--rose-rgb), 0.10);
+        color: var(--rose); font-style: italic;
+    }
+    .login-field { display: block; margin-bottom: 14px; }
+    .login-field span {
+        display: block; margin-bottom: 5px;
+        font-family: var(--font-mono); font-size: 10.5px;
+        text-transform: uppercase; letter-spacing: 0.18em; color: var(--text-meta);
+    }
+    .login-field input {
+        width: 100%; padding: 11px 13px;
+        font-family: var(--font-body);
+        /* 16px floor — iOS Safari force-zooms below it and never returns. */
+        font-size: 16.5px;
+        color: var(--text-body); background: rgba(var(--void-rgb), 0.75);
+        border: 1px solid rgba(var(--amethyst-rgb), 0.35);
+    }
+    .login-field input:focus {
+        outline: none; border-color: var(--amethyst-bright);
+        box-shadow: 0 0 0 1px var(--amethyst-bright),
+                    0 0 22px rgba(var(--amethyst-rgb), 0.15);
+    }
+    .login-actions { display: flex; justify-content: flex-end; margin-top: 20px; }
+    .login-note {
+        margin: 22px 0 0; font-size: 13px; font-style: italic;
+        color: var(--text-meta); line-height: 1.55;
+    }
+    .login-note code {
+        font-family: var(--font-mono); font-size: 0.85em; font-style: normal;
+        color: var(--text-dim);
+    }
+</style>
 
-    {% if error %}
-    <p style="color: var(--danger);">{{ error }}</p>
-    {% endif %}
+<div class="login-wrap">
+    <div class="login-card">
+        <div class="login-seal" aria-hidden="true">F</div>
+        {# "Sign in to chat" is asserted by three tests — keep it verbatim. #}
+        <h2>Sign in to chat</h2>
+        <p class="login-lede">
+            Pick a username so Fritz can keep your conversation, memories, and
+            schedules separate from anyone else using this instance.
+        </p>
 
-    <form method="post" action="/chat/login">
-        <label for="username" style="display: block; margin-bottom: 0.4rem; color: var(--muted); font-size: 0.85rem;">
-            Username
-        </label>
-        <input type="text" id="username" name="username" autofocus
-               placeholder="e.g. nick" required maxlength="64"
-               autocomplete="username"
-               style="width: 100%; padding: 0.5rem 0.6rem; border: 1px solid var(--border);
-                      border-radius: 3px; font-family: inherit; font-size: 16px; margin-bottom: 1rem;">
-        <label for="password" style="display: block; margin-bottom: 0.4rem; color: var(--muted); font-size: 0.85rem;">
-            Password
-        </label>
-        <input type="password" id="password" name="password" required
-               autocomplete="current-password"
-               style="width: 100%; padding: 0.5rem 0.6rem; border: 1px solid var(--border);
-                      border-radius: 3px; font-family: inherit; font-size: 16px; margin-bottom: 1rem;">
-        <button type="submit">Start chatting</button>
-    </form>
+        {# The {% if error %} block carries "at least one letter", asserted by
+           test_empty_username_renders_error. Keep it. #}
+        {% if error %}
+        <p class="login-error">{{ error }}</p>
+        {% endif %}
 
-    <p class="muted" style="margin-top: 1.5rem; font-size: 0.8rem;">
-        This chat surface is bound to localhost and gated by a shared password
-        (<code>CHAT_PASSWORD</code>), separate from the admin panel's. The
-        password decides whether you may be here at all; the username only
-        decides whose memories and thread you get. Anyone who knows the
-        password can still type someone else's name — set
-        <code>CHAT_ALLOWED_USERS</code> to narrow that.
-    </p>
+        <form method="post" action="/chat/login">
+            <label class="login-field" for="username">
+                <span>Username</span>
+                <input type="text" id="username" name="username" autofocus
+                       placeholder="e.g. nick" required maxlength="64"
+                       autocomplete="username">
+            </label>
+            <label class="login-field" for="password">
+                <span>Password</span>
+                <input type="password" id="password" name="password" required
+                       autocomplete="current-password">
+            </label>
+            <div class="login-actions">
+                <span class="facet">
+                    <button type="submit" class="send-btn-login">Start chatting</button>
+                </span>
+            </div>
+        </form>
+
+        <p class="login-note">
+            Bound to localhost and gated by a shared password
+            (<code>CHAT_PASSWORD</code>), separate from the admin panel's. The
+            password decides whether you may be here at all; the username only
+            decides whose memories and thread you get. Anyone who knows the
+            password can still type someone else's name — set
+            <code>CHAT_ALLOWED_USERS</code> to narrow that.
+        </p>
+    </div>
 </div>
+
+<style>
+    .send-btn-login {
+        height: 46px; padding: 0 22px; cursor: pointer;
+        font-family: var(--font-display); font-weight: 600; font-size: 17px;
+        letter-spacing: 0.12em; color: var(--text-hi);
+        background: var(--send-grad);
+        border: 1px solid rgba(var(--amethyst-bright-rgb), 0.55);
+        clip-path: var(--clip-cut-lg);
+        transition: background 0.2s ease;
+    }
+    .send-btn-login:hover { background: var(--send-grad-hover); }
+</style>
 {% endblock %}

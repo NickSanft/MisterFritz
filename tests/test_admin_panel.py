@@ -728,6 +728,137 @@ class TestChatStreamingUx(unittest.TestCase):
         self.assertIn("renderEmptyState", code)
 
 
+class TestCodeHighlighting(unittest.TestCase):
+    """codehilite is inert unless nh3 allows `class` on div/pre/code/span. That
+    failure is silent — Pygments runs, spans are emitted, styling hooks are
+    stripped, and both '<pre>' and the code text still appear."""
+
+    _FENCE = "Here:\n\n```python\n# note\ndef f(x):\n    return x + 1\n```\n"
+
+    def test_codehilite_classes_survive_the_sanitiser(self):
+        html = admin_panel._render_markdown(self._FENCE)
+        self.assertIn('class="codehilite"', html)
+        self.assertIn('class="k"', html)      # keyword
+        self.assertIn('class="c1"', html)     # comment
+
+    def test_language_is_reattached_as_data_lang(self):
+        # codehilite strips the class="language-python" fenced_code emits, so
+        # the language is read back off the markdown source.
+        html = admin_panel._render_markdown(self._FENCE)
+        self.assertIn('data-lang="python"', html)
+
+    def test_unlabelled_fence_gets_no_language(self):
+        # Degrades to the client's plain "code" chip rather than guessing.
+        html = admin_panel._render_markdown("```\nplain\n```\n")
+        self.assertNotIn("data-lang", html)
+
+    def test_data_lang_survives_the_sanitiser(self):
+        self.assertIn("data-lang", admin_panel._sanitise_html(
+            '<div class="codehilite" data-lang="python"><pre>x</pre></div>'))
+
+    def test_highlighting_is_gated_by_the_knob(self):
+        self.assertIn("codehilite", admin_panel._MARKDOWN_EXTENSIONS)
+        self.assertFalse(
+            admin_panel._MARKDOWN_CONFIGS["codehilite"]["guess_lang"],
+            "guess_lang must stay off, or Pygments colours prose and logs "
+            "as though they were code",
+        )
+
+    def test_theme_targets_real_pygments_classes(self):
+        # The design handoff's colour table used prototype-only names that
+        # never appear in production HTML — styling those would look like a
+        # working theme sitting over completely uncoloured code. Comments are
+        # stripped first because the note explaining that names them.
+        src = _template("chat.html")
+        rules = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+        self.assertNotIn(".hl-kw", rules)
+        for cls in (".k,", ".c1,", ".nf,", ".mi,", ".s2,"):
+            with self.subTest(cls=cls):
+                self.assertIn(cls, rules)
+
+    def test_copy_button_has_a_non_secure_context_fallback(self):
+        # navigator.clipboard is undefined over plain http — which is how this
+        # panel is normally reached — and rejects transiently when the document
+        # is not focused, so the legacy path must be chained, not an else-branch.
+        src = _template("chat.html")
+        self.assertIn("execCommand", src)
+        self.assertIn("isSecureContext", src)
+        self.assertIn(".catch(legacyCopy)", src)
+
+
+class TestSecurityHeaders(unittest.TestCase):
+    """CSP is applied last, to finished markup. It is also the single easiest
+    way to silently kill the chat client, so the nonce is asserted."""
+
+    def test_csp_present_on_chat(self):
+        client = _build_client()
+        _login(client)
+        csp = client.get("/chat").headers["content-security-policy"]
+        self.assertIn("default-src 'none'", csp)
+        self.assertIn("script-src 'nonce-", csp)
+        self.assertIn("object-src 'none'", csp)
+        self.assertIn("frame-ancestors 'none'", csp)
+
+    def test_font_src_is_allowed(self):
+        # Without font-src every @font-face is blocked, self-hosted or not.
+        client = _build_client()
+        csp = client.get("/chat").headers["content-security-policy"]
+        self.assertIn("font-src 'self'", csp)
+
+    def test_style_src_keeps_unsafe_inline_and_no_nonce(self):
+        # A nonce on style-src makes 'unsafe-inline' be IGNORED, killing every
+        # style="" attribute and <style> block on the page.
+        client = _build_client()
+        csp = client.get("/chat").headers["content-security-policy"]
+        style = [d for d in csp.split(";") if d.strip().startswith("style-src")][0]
+        self.assertIn("'unsafe-inline'", style)
+        self.assertNotIn("nonce-", style)
+
+    def test_inline_chat_script_carries_the_nonce(self):
+        # chat.html is one large inline script; without a matching nonce the
+        # whole client is dead and the page merely looks fine.
+        client = _build_client()
+        _login(client)
+        # ONE request: the nonce is per-response, so comparing a body from one
+        # request against a header from another would always fail.
+        r = client.get("/chat")
+        self.assertIn("<script nonce=", r.text)
+        # The nonce in the body must be the one the header authorises.
+        nonce = re.search(r'<script nonce="([^"]+)"', r.text).group(1)
+        self.assertIn(f"'nonce-{nonce}'", r.headers["content-security-policy"])
+
+    def test_nonce_differs_per_response(self):
+        client = _build_client()
+        _login(client)
+        a = re.search(r'<script nonce="([^"]+)"', client.get("/chat").text).group(1)
+        b = re.search(r'<script nonce="([^"]+)"', client.get("/chat").text).group(1)
+        self.assertNotEqual(a, b)
+
+    def test_baseline_headers_present(self):
+        client = _build_client()
+        r = client.get("/chat")
+        self.assertEqual(r.headers["x-content-type-options"], "nosniff")
+        self.assertEqual(r.headers["x-frame-options"], "DENY")
+        self.assertEqual(r.headers["referrer-policy"], "no-referrer")
+
+    def test_asset_route_keeps_its_stricter_own_csp(self):
+        # chat_asset sets a sandboxing CSP; the middleware uses setdefault so
+        # it must not be overwritten by the looser page policy.
+        client = _build_client()
+        _login(client)
+        os.makedirs("output", exist_ok=True)
+        marker = os.path.join("output", "_csp_marker.png")
+        with open(marker, "wb") as f:
+            f.write(_TINY_PNG)
+        try:
+            csp = client.get("/chat/assets/output/_csp_marker.png").headers[
+                "content-security-policy"]
+            self.assertIn("sandbox", csp)
+            self.assertNotIn("nonce-", csp)
+        finally:
+            os.unlink(marker)
+
+
 class TestChatCorrectnessAndA11y(unittest.TestCase):
     """Guards for the mobile / confirm-dialog / screen-reader fixes."""
 

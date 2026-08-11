@@ -109,6 +109,61 @@
     .fritz-md pre code {
         background: none; border: 0; padding: 0; font-size: inherit; color: inherit;
     }
+
+    /* ── Code block chrome ────────────────────────────────────────────────
+       The title bar is injected client-side (addCodeChrome) so the server
+       keeps emitting plain codehilite markup. */
+    .code-block { margin-top: 12px; border: 1px solid rgba(var(--amethyst-rgb), 0.32); }
+    .code-block .fritz-md-pre-wrap { margin: 0; }
+    .code-bar {
+        display: flex; align-items: center; gap: 8px;
+        padding: 7px 12px;
+        background: rgba(var(--amethyst-rgb), 0.07);
+        border-bottom: 1px solid rgba(var(--amethyst-rgb), 0.32);
+    }
+    .code-bar .diamond {
+        width: 6px; height: 6px; flex: 0 0 auto;
+        clip-path: var(--clip-diamond); background: var(--amethyst-bright);
+    }
+    .code-bar .lang {
+        flex: 1 1 auto; font-family: var(--font-mono); font-size: 10.5px;
+        text-transform: uppercase; letter-spacing: 0.18em; color: var(--text-meta);
+    }
+    .copy-btn {
+        flex: 0 0 auto; cursor: pointer; padding: 3px 9px;
+        font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.08em;
+        color: var(--text-dim); background: transparent;
+        border: 1px solid var(--edge); clip-path: var(--clip-cut-sm);
+    }
+    .copy-btn:hover { color: var(--text-hi); background: var(--fill-soft); }
+    /* The block owns the border once wrapped, so the pre must not double it. */
+    .code-block .fritz-md-pre-wrap, .code-block > pre, .code-block > .codehilite > pre {
+        border: 0; margin: 0;
+    }
+    .code-block .codehilite { margin: 0; }
+
+    /* ── Pygments tokens ──────────────────────────────────────────────────
+       Written against the classes codehilite ACTUALLY emits, confirmed by
+       rendering a real Python fence through the pipeline: c1 k mi n nb nf o p
+       s2 sa sd si w. The design handoff's table used prototype-only names
+       (.hl-kw, .hl-str …) that never appear in production HTML — styling those
+       would have looked like a working theme over uncoloured code. */
+    .fritz-md .k, .fritz-md .kn, .fritz-md .kd,
+    .fritz-md .kc, .fritz-md .kr, .fritz-md .kt { color: #c792ea; }
+    .fritz-md .s, .fritz-md .s1, .fritz-md .s2,
+    .fritz-md .sa, .fritz-md .sd, .fritz-md .si,
+    .fritz-md .sb, .fritz-md .sc, .fritz-md .se { color: #b8a1e3; }
+    .fritz-md .n, .fritz-md .nb, .fritz-md .nf,
+    .fritz-md .nc, .fritz-md .nt, .fritz-md .nn,
+    .fritz-md .nd, .fritz-md .nv { color: #e0cff5; }
+    /* Lightened from the design's #64578a (2.74:1 — fails). 5.11:1 on the
+       composited code ground. See _theme_chat.html. */
+    .fritz-md .c, .fritz-md .c1, .fritz-md .cm,
+    .fritz-md .cp, .fritz-md .cs { color: #8579ab; font-style: italic; }
+    .fritz-md .m, .fritz-md .mi, .fritz-md .mf,
+    .fritz-md .mh, .fritz-md .mo { color: #d4b8f0; }
+    .fritz-md .o, .fritz-md .ow, .fritz-md .p { color: var(--code-operator); }
+    .fritz-md .err { color: var(--rose); }
     .fritz-md table { border-collapse: collapse; margin: 0.6em 0; }
     .fritz-md th, .fritz-md td {
         border: 1px solid var(--edge-subtle); padding: 0.3em 0.6em; text-align: left;
@@ -481,7 +536,9 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
+{# The nonce is mandatory: script-src is nonce-only, and chat.html is one large
+   inline script. Without it the whole chat client is silently dead. #}
+<script nonce="{{ csp_nonce(request) }}">
 // SSE streaming client. The form still POSTs to /chat/send if JS is disabled.
 (function() {
     // ── Notices ──────────────────────────────────────────────────────────
@@ -907,6 +964,7 @@
                             } catch (e) {
                                 body.textContent = data || "(no response)";
                             }
+                            addCodeChrome(body);
                             for (const line of progressLines) line.remove();
                             progressLines.length = 0;
                             setStatus("Mister Fritz has replied.", false);
@@ -957,6 +1015,88 @@
         div.textContent = s;
         return div.innerHTML;
     }
+
+    // ── Code block chrome ────────────────────────────────────────────────
+    // Built client-side so the server keeps emitting plain codehilite markup
+    // (and so the sanitiser has less surface to allow). Idempotent: replies
+    // arrive once via the done frame, but history hydration and a re-render
+    // must not stack two title bars on one block.
+    function copyText(text, button) {
+        function feedback() {
+            const original = button.dataset.label || button.textContent;
+            button.dataset.label = original;
+            button.textContent = "✓ Transcribed";
+            setTimeout(function() { button.textContent = original; }, 2200);
+        }
+        // The legacy execCommand path. Still the only option on a non-secure
+        // origin — which is exactly how this panel is normally reached, over
+        // plain http through an SSH tunnel.
+        function legacyCopy() {
+            const ta = document.createElement("textarea");
+            ta.value = text;
+            ta.setAttribute("readonly", "");
+            ta.style.position = "fixed";
+            ta.style.opacity = "0";
+            document.body.appendChild(ta);
+            ta.select();
+            let ok = false;
+            try {
+                ok = document.execCommand("copy");
+            } catch (e) {
+                ok = false;
+            }
+            document.body.removeChild(ta);
+            if (ok) feedback();
+            else notice("error", "The clipboard refused. Select and copy by hand, sir.");
+        }
+
+        if (navigator.clipboard && window.isSecureContext) {
+            // Chain rather than give up on rejection: writeText also fails
+            // transiently with NotAllowedError when the document is not
+            // focused (verified), and the legacy path usually still works.
+            navigator.clipboard.writeText(text).then(feedback).catch(legacyCopy);
+            return;
+        }
+        legacyCopy();
+    }
+
+    function addCodeChrome(root) {
+        root.querySelectorAll("pre").forEach(function(pre) {
+            if (pre.closest(".code-block")) return;   // already wrapped
+            // codehilite wraps <pre> in div.codehilite; that div carries the
+            // language. A bare fence has neither.
+            const hl = pre.closest(".codehilite");
+            const target = hl || pre;
+            const wrap = document.createElement("div");
+            wrap.className = "code-block";
+            target.parentNode.insertBefore(wrap, target);
+
+            const bar = document.createElement("div");
+            bar.className = "code-bar";
+            const dot = document.createElement("span");
+            dot.className = "diamond";
+            dot.setAttribute("aria-hidden", "true");
+            const lang = document.createElement("span");
+            lang.className = "lang";
+            // Falls back to a plain "code" chip when the fence was unlabelled,
+            // which preserves the rhythm without inventing a language.
+            lang.textContent = (hl && hl.dataset.lang) ? hl.dataset.lang : "code";
+            const copy = document.createElement("button");
+            copy.type = "button";
+            copy.className = "copy-btn";
+            copy.textContent = "⧉ Copy";
+            copy.addEventListener("click", function() {
+                copyText(pre.innerText, copy);
+            });
+            bar.append(dot, lang, copy);
+
+            wrap.appendChild(bar);
+            wrap.appendChild(target);
+        });
+    }
+
+    // Server-rendered history gets its chrome on load.
+    addCodeChrome(list);
 
     // ── Burn the correspondence ──────────────────────────────────────────
     // Confirmed in the dialog above; this does the work. fetch rather than a
