@@ -659,6 +659,75 @@ class TestChatChrome(unittest.TestCase):
         self.assertIn("suggestion", src)
 
 
+class TestChatStreamingUx(unittest.TestCase):
+    """Status chip, Stop, notices and the confirm dialog. These are template
+    guards — the behaviour itself was exercised in a browser."""
+
+    def _code(self) -> str:
+        """chat.html with comments stripped, so prose describing a banned API
+        cannot masquerade as a use of it."""
+        src = _template("chat.html")
+        src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+        src = re.sub(r"^\s*//.*$", "", src, flags=re.M)
+        return re.sub(r"\{#.*?#\}", "", src, flags=re.S)
+
+    def test_no_alert_calls_remain(self):
+        # alert() steals focus, cannot be styled, and blocks the event loop the
+        # stream is running on. Replaced by the notice bar.
+        self.assertNotRegex(self._code(), r"\balert\s*\(")
+
+    def test_window_confirm_replaced_by_the_dialog(self):
+        code = self._code()
+        self.assertNotRegex(code, r"window\.confirm\s*\(")
+        self.assertIn("confirm-veil", code)
+        self.assertIn("Burn the correspondence?", code)
+
+    def test_dialog_is_a_labelled_modal(self):
+        src = _template("chat.html")
+        self.assertIn('role="dialog"', src)
+        self.assertIn('aria-modal="true"', src)
+        self.assertIn('aria-labelledby="confirm-title"', src)
+
+    def test_dialog_can_be_dismissed_three_ways(self):
+        code = self._code()
+        self.assertIn("confirm-cancel", code)          # Spare it
+        self.assertIn('veil.addEventListener("click"', code)
+        self.assertIn('e.key === "Escape"', code)
+        # A click inside the card must not bubble out to the cancelling veil.
+        self.assertIn("stopPropagation", code)
+
+    def test_apply_token_seam_exists(self):
+        # The wire format is cumulative today. This function is the only place
+        # that knows, so flipping to deltas is a two-line change.
+        code = self._code()
+        self.assertIn("function applyToken(delta, cumulative, restart)", code)
+
+    def test_stop_is_labelled_honestly(self):
+        # Aborting the client fetch cannot stop the server: chat_stream runs
+        # ask_stuff on a daemon thread and never checks is_disconnected().
+        # Claiming otherwise in the UI would be a lie.
+        src = _template("chat.html")
+        self.assertIn("Enough", src)
+        self.assertIn("AbortController", src)
+        self.assertIn("mutters on in the servants", src)
+
+    def test_stream_teardown_clears_every_timer(self):
+        # A missed timer leaves a zombie status chip that never goes away.
+        code = self._code()
+        self.assertIn("function clearStreamState()", code)
+        for cleared in ("statusSwapTimer", "activeCaret", "abortController"):
+            with self.subTest(cleared=cleared):
+                self.assertIn(cleared, code)
+
+    def test_sending_while_streaming_is_blocked(self):
+        self.assertIn("Fritz is mid-sentence", _template("chat.html"))
+
+    def test_forget_uses_fetch_not_a_reload(self):
+        code = self._code()
+        self.assertIn('fetch("/chat/forget"', code)
+        self.assertIn("renderEmptyState", code)
+
+
 class TestChatCorrectnessAndA11y(unittest.TestCase):
     """Guards for the mobile / confirm-dialog / screen-reader fixes."""
 

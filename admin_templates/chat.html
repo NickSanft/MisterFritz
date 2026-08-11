@@ -121,6 +121,106 @@
         color: var(--text-dim);
     }
 
+    /* ── Streaming caret ──────────────────────────────────────────────────*/
+    .caret {
+        display: inline-block; width: 9px; height: 18px;
+        margin-left: 2px; vertical-align: text-bottom;
+        background: linear-gradient(180deg, var(--amethyst-bright), #7a4fc0);
+        animation: quillBlink 1.1s steps(1, end) infinite;
+    }
+
+    /* ── Status row (chip + stop) ─────────────────────────────────────────*/
+    .status-row {
+        display: none; align-items: center; gap: 10px; margin-left: 46px;
+    }
+    .status-row.active { display: flex; }
+    .status-chip {
+        position: relative; overflow: hidden;
+        padding: 7px 14px; font-style: italic; font-size: 14.5px;
+        color: var(--text-dim);
+        background: var(--fill-ghost); border: 1px solid var(--edge);
+        clip-path: var(--clip-cut-sm);
+    }
+    /* The sweep must be clipped by the chip, or it paints outside the
+       parallelogram — hence overflow:hidden above and will-change here. */
+    .status-chip::after {
+        content: ""; position: absolute; inset: 0; width: 40%;
+        background: linear-gradient(90deg, transparent,
+                    rgba(var(--amethyst-bright-rgb), 0.14), transparent);
+        will-change: transform;
+        animation: prismSweep 2.2s ease-in-out infinite;
+    }
+    .stop-btn {
+        display: inline-flex; align-items: center; gap: 7px;
+        padding: 7px 14px; cursor: pointer;
+        font-family: var(--font-display); font-size: 15px;
+        color: var(--rose); background: var(--rose-fill);
+        border: 1px solid var(--rose-edge); clip-path: var(--clip-cut-sm);
+        transition: background 0.2s ease;
+    }
+    .stop-btn:hover { background: rgba(var(--rose-rgb), 0.16); }
+    .stop-glyph { width: 9px; height: 9px; background: currentColor; }
+
+    /* ── Notice bar ───────────────────────────────────────────────────────*/
+    .notice-slot { flex: 0 0 auto; position: relative; z-index: 3; }
+    .chat-notice {
+        display: flex; align-items: flex-start; gap: 10px;
+        padding: 10px 16px; font-style: italic;
+        border-left: 3px solid;
+        animation: noticeIn 0.3s ease both;
+    }
+    .chat-notice.info {
+        background: var(--fill-faint); border-left-color: rgba(var(--amethyst-rgb), 0.4);
+        color: var(--text-dim);
+    }
+    .chat-notice.error {
+        background: rgba(var(--rose-rgb), 0.10); border-left-color: var(--rose-edge-hi);
+        color: var(--rose);
+    }
+    .chat-notice .glyph { flex: 0 0 auto; font-style: normal; }
+    .chat-notice .text { flex: 1 1 auto; min-width: 0; }
+    .chat-notice .dismiss {
+        flex: 0 0 auto; background: none; border: 0; cursor: pointer;
+        color: var(--text-meta); font-size: 15px; line-height: 1; padding: 2px 4px;
+    }
+    .chat-notice .dismiss:hover { color: var(--text-hi); }
+
+    /* ── Confirm dialog ───────────────────────────────────────────────────*/
+    .confirm-veil {
+        position: fixed; inset: 0; z-index: 40;
+        display: none; align-items: center; justify-content: center; padding: 24px;
+        background: rgba(6, 4, 10, 0.72); backdrop-filter: blur(4px);
+        animation: veilIn 0.2s ease both;
+    }
+    .confirm-veil.open { display: flex; }
+    .confirm-card {
+        width: min(480px, 100%); padding: 34px 36px 30px;
+        background: linear-gradient(160deg, #1c1230, #100a1b);
+        border: 1px solid var(--edge-max);
+        clip-path: var(--clip-facet-lg);
+        animation: cardIn 0.25s ease both;
+    }
+    .confirm-badge {
+        width: 34px; height: 34px; display: grid; place-items: center;
+        clip-path: var(--clip-diamond); background: var(--rose-grad);
+        border: 1px solid var(--rose-edge);
+        color: var(--text-hi); font-family: var(--font-display); font-weight: 700;
+        margin-bottom: 16px;
+    }
+    .confirm-title {
+        margin: 0 0 10px; font-family: var(--font-display); font-weight: 600;
+        font-size: 26px; color: var(--text-hi);
+    }
+    .confirm-body { margin: 0 0 24px; font-style: italic; color: var(--text-dim); }
+    .confirm-actions { display: flex; justify-content: flex-end; gap: 10px; }
+    .btn-danger {
+        font-family: var(--font-display); font-size: 16px; padding: 9px 20px;
+        cursor: pointer; color: var(--text-hi);
+        background: var(--rose-grad); border: 1px solid var(--rose-edge-hi);
+        clip-path: var(--clip-cut-sm);
+    }
+    .btn-danger:hover { filter: brightness(1.15); }
+
     /* ── Empty state ──────────────────────────────────────────────────────*/
     .empty-state {
         display: flex; flex-direction: column; align-items: center;
@@ -267,6 +367,11 @@
 
 <div id="chat-status" class="visually-hidden" role="status" aria-live="polite"></div>
 
+{# Single notice slot below the header. Replaces every alert() call: a modal
+   alert steals focus, cannot be styled, and on a streaming page blocks the
+   event loop the stream is running on. #}
+<div class="notice-slot" id="notice-slot" aria-live="polite"></div>
+
 <div class="transcript" id="transcript">
     <div class="transcript-col" id="chat-messages" role="log" aria-live="polite"
          aria-atomic="false" aria-label="Conversation with Mister Fritz">
@@ -305,6 +410,17 @@
                 </div>
             </div>
         {% endif %}
+
+        {# Lives inside the scrolled column so it sits under the newest
+           message and travels with it. #}
+        <div class="status-row" id="status-row">
+            <span class="status-chip" id="status-chip"></span>
+            <span class="facet">
+                <button type="button" class="stop-btn" id="stop-btn">
+                    <span class="stop-glyph" aria-hidden="true"></span> Enough
+                </button>
+            </span>
+        </div>
     </div>
 </div>
 
@@ -339,25 +455,111 @@
         </div>
     </div>
 </div>
+
+{# Replaces window.confirm() for "New conversation". The thread's checkpoint is
+   deleted unrecoverably, so the prompt has to actually appear — and be
+   dismissible by veil click, Escape, or "Spare it". #}
+<div class="confirm-veil" id="confirm-veil" role="dialog" aria-modal="true"
+     aria-labelledby="confirm-title" aria-describedby="confirm-body">
+    <div class="confirm-card" id="confirm-card">
+        <div class="confirm-badge" aria-hidden="true">!</div>
+        <h2 class="confirm-title" id="confirm-title">Burn the correspondence?</h2>
+        <p class="confirm-body" id="confirm-body">
+            The present conversation shall be committed to the fire — every word,
+            every confession. The ashes cannot be reassembled, sir. Fritz has tried.
+        </p>
+        <div class="confirm-actions">
+            <span class="facet">
+                <button type="button" class="btn-ghost" id="confirm-cancel">Spare it</button>
+            </span>
+            <span class="facet">
+                <button type="button" class="btn-danger" id="confirm-accept">Into the fire</button>
+            </span>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
 // SSE streaming client. The form still POSTs to /chat/send if JS is disabled.
 (function() {
+    // ── Notices ──────────────────────────────────────────────────────────
+    // One slot below the header. Replaces every alert(): a modal alert steals
+    // focus, cannot be styled, and blocks the event loop the stream runs on.
+    const noticeSlot = document.getElementById("notice-slot");
+    let noticeTimer = null;
+
+    function dismissNotice() {
+        if (noticeTimer) { clearTimeout(noticeTimer); noticeTimer = null; }
+        if (noticeSlot) noticeSlot.innerHTML = "";
+    }
+
+    function notice(kind, text) {
+        if (!noticeSlot) return;
+        dismissNotice();
+        const bar = document.createElement("div");
+        bar.className = "chat-notice " + kind;
+        const glyph = document.createElement("span");
+        glyph.className = "glyph";
+        glyph.setAttribute("aria-hidden", "true");
+        glyph.textContent = kind === "error" ? "✕" : "❦";
+        const body = document.createElement("span");
+        body.className = "text";
+        body.textContent = text;
+        const close = document.createElement("button");
+        close.type = "button";
+        close.className = "dismiss";
+        close.setAttribute("aria-label", "Dismiss");
+        close.textContent = "×";
+        close.addEventListener("click", dismissNotice);
+        bar.append(glyph, body, close);
+        noticeSlot.appendChild(bar);
+        // Info is transient; errors stay until dismissed, because an error the
+        // user missed is worse than a bar they have to close.
+        if (kind === "info") noticeTimer = setTimeout(dismissNotice, 4500);
+    }
+
+    // ── Confirm dialog ───────────────────────────────────────────────────
     // Registered FIRST, above the early-return guard below. "New conversation"
     // calls privacy.forget_conversation, which DELETEs from `checkpoints` and
     // `writes` — unrecoverable. If this listener ever moves below the guard, a
     // missing composer silently disarms the confirmation again.
     const forgetForm = document.getElementById("chat-forget-form");
-    if (forgetForm) {
+    const veil = document.getElementById("confirm-veil");
+    const confirmCard = document.getElementById("confirm-card");
+    const confirmAccept = document.getElementById("confirm-accept");
+    const confirmCancel = document.getElementById("confirm-cancel");
+    let lastFocused = null;
+
+    function closeConfirm() {
+        if (!veil) return;
+        veil.classList.remove("open");
+        if (lastFocused && lastFocused.focus) lastFocused.focus();
+        lastFocused = null;
+    }
+
+    function openConfirm() {
+        if (!veil) return;
+        lastFocused = document.activeElement;
+        veil.classList.add("open");
+        if (confirmCancel) confirmCancel.focus();
+    }
+
+    if (forgetForm && veil) {
         forgetForm.addEventListener("submit", function(ev) {
-            const ok = window.confirm(
-                "Burn the correspondence? The present conversation goes to the " +
-                "fire — every word. Your memories and schedules survive; only " +
-                "this thread's context is reset."
-            );
-            if (!ok) ev.preventDefault();
+            // Always cancel the native POST — the dialog drives it from here.
+            // Without JS the form still submits normally, which is the
+            // pre-existing no-JS behaviour.
+            ev.preventDefault();
+            openConfirm();
+        });
+        if (confirmCancel) confirmCancel.addEventListener("click", closeConfirm);
+        // Veil click cancels; a click inside the card must not bubble out to it.
+        veil.addEventListener("click", closeConfirm);
+        if (confirmCard) confirmCard.addEventListener("click", (e) => e.stopPropagation());
+        document.addEventListener("keydown", function(e) {
+            if (e.key === "Escape" && veil.classList.contains("open")) closeConfirm();
         });
     }
 
@@ -405,6 +607,49 @@
     function followScroll(force) {
         if (!force && !isPinnedToBottom()) return;
         transcript.scrollTop = transcript.scrollHeight;
+    }
+
+    // ── Streaming state ──────────────────────────────────────────────────
+    // Every path that ends a stream (done, error, network failure, Stop,
+    // starting a fresh conversation) must clear ALL of: the fetch abort, the
+    // status-swap timeout, the accumulator, and the caret. Missing one is how
+    // you get a zombie status chip that never goes away.
+    const statusRow = document.getElementById("status-row");
+    const statusChip = document.getElementById("status-chip");
+    const stopBtn = document.getElementById("stop-btn");
+    let streaming = false;
+    let abortController = null;
+    let statusSwapTimer = null;
+    let activeCaret = null;
+
+    function showStatusChip() {
+        if (!statusRow || !statusChip) return;
+        statusChip.textContent = "Fritz is consulting the archives…";
+        statusRow.classList.add("active");
+        statusSwapTimer = setTimeout(function() {
+            statusChip.textContent = "Fritz is taking pen to paper…";
+        }, 1400);
+    }
+
+    function clearStreamState() {
+        streaming = false;
+        if (statusSwapTimer) { clearTimeout(statusSwapTimer); statusSwapTimer = null; }
+        if (statusRow) statusRow.classList.remove("active");
+        if (activeCaret) { activeCaret.remove(); activeCaret = null; }
+        abortController = null;
+    }
+
+    if (stopBtn) {
+        stopBtn.addEventListener("click", function() {
+            if (!streaming || !abortController) return;
+            abortController.abort();
+            // Honest copy. Aborting the client fetch does NOT stop the server:
+            // chat_stream runs ask_stuff on a plain daemon thread and never
+            // checks request.is_disconnected(). The model keeps generating.
+            notice("info",
+                "Very well — Fritz has set down his pen mid-sentence. The model, " +
+                "regrettably, mutters on in the servants' quarters.");
+        });
     }
 
     // ── Composer ─────────────────────────────────────────────────────────
@@ -538,7 +783,14 @@
         ev.preventDefault();
         const message = textarea.value.trim();
         if (!message) return;
+        if (streaming) {
+            notice("error",
+                "One moment, sir — Fritz is mid-sentence. Interrupt him with " +
+                "“Enough” if you must.");
+            return;
+        }
 
+        dismissNotice();
         clearEmptyState();
 
         const userRow = makeRow("user");
@@ -570,12 +822,41 @@
         sendBtn.disabled = true;
         sendBtn.setAttribute("aria-disabled", "true");
         setStatus("Mister Fritz is composing a reply.", true);
+        streaming = true;
+        abortController = new AbortController();
+        showStatusChip();
+
+        // The caret trails the text as it arrives.
+        activeCaret = document.createElement("span");
+        activeCaret.className = "caret";
+        activeCaret.setAttribute("aria-hidden", "true");
+        body.appendChild(activeCaret);
         followScroll(true);
+
+        // ── The wire-format seam ─────────────────────────────────────────
+        // Token frames are CUMULATIVE today: the server sends the whole reply
+        // so far each time. When that flips to deltas, this function is the
+        // only thing that changes — everything downstream already works off
+        // `accumulated`. Keeping the seam here is why that migration is a
+        // two-line edit rather than a rewrite of the stream reader.
+        let accumulated = "";
+        function applyToken(delta, cumulative, restart) {
+            if (restart) accumulated = "";
+            accumulated = (cumulative !== null && cumulative !== undefined)
+                ? cumulative
+                : accumulated + (delta || "");
+            body.textContent = accumulated;
+            if (activeCaret) body.appendChild(activeCaret);
+            followScroll();
+        }
 
         const fd = new FormData();
         fd.append("message", message);
 
-        fetch("/chat/stream", { method: "POST", body: fd, credentials: "same-origin" })
+        fetch("/chat/stream", {
+            method: "POST", body: fd, credentials: "same-origin",
+            signal: abortController.signal,
+        })
             .then(async (resp) => {
                 if (!resp.ok) {
                     body.textContent = "Error: HTTP " + resp.status;
@@ -601,19 +882,21 @@
                         }
                         const data = dataLines.join("\n");
                         if (eventName === "token") {
-                            // Token frames are CUMULATIVE today, so this
-                            // assigns rather than appends. When the wire format
-                            // flips to deltas this is the one line that changes.
-                            body.textContent = data;
-                            followScroll();
+                            // Cumulative wire format: pass `data` as the
+                            // accumulated value. Deltas would pass it as the
+                            // first argument instead.
+                            applyToken(null, data, false);
                         } else if (eventName === "progress") {
                             const line = makeProgressLine(data);
                             list.insertBefore(line, fritzRow);
                             progressLines.push(line);
                             followScroll();
                         } else if (eventName === "done") {
+                            if (activeCaret) { activeCaret.remove(); activeCaret = null; }
                             try {
                                 const payload = JSON.parse(data);
+                                // Server-sanitised HTML (nh3, class attributes
+                                // preserved so codehilite survives).
                                 body.innerHTML = payload.html || (payload.text ? escapeText(payload.text) : "(no response)");
                                 for (const url of (payload.images || [])) {
                                     const img = document.createElement("img");
@@ -633,16 +916,29 @@
                             for (const line of progressLines) line.remove();
                             progressLines.length = 0;
                             setStatus("The reply failed.", false);
+                            notice("error", "Fritz was unable to reply: " + data);
                         }
                         lastEvent = eventName;
                     }
                 }
             })
             .catch((err) => {
+                if (err && err.name === "AbortError") {
+                    // Stopped deliberately. Mark the reply as truncated rather
+                    // than reporting a failure — the notice already explained.
+                    if (activeCaret) { activeCaret.remove(); activeCaret = null; }
+                    body.textContent = (body.textContent || "") + " —";
+                    setStatus("Stopped.", false);
+                    return;
+                }
                 body.textContent = "Network error: " + err.message;
                 setStatus("The reply failed.", false);
+                notice("error", "The connection faltered: " + err.message);
             })
             .finally(() => {
+                clearStreamState();
+                for (const line of progressLines) line.remove();
+                progressLines.length = 0;
                 textarea.disabled = false;
                 sendBtn.disabled = false;
                 sendBtn.removeAttribute("aria-disabled");
@@ -660,6 +956,58 @@
         const div = document.createElement("div");
         div.textContent = s;
         return div.innerHTML;
+    }
+
+    // ── Burn the correspondence ──────────────────────────────────────────
+    // Confirmed in the dialog above; this does the work. fetch rather than a
+    // form POST so the page does not reload — the transcript is cleared in
+    // place and the empty state comes back.
+    function renderEmptyState() {
+        list.querySelectorAll(".msg-row, .chat-progress").forEach(n => n.remove());
+        if (document.getElementById("chat-empty")) return;
+        const wrap = document.createElement("div");
+        wrap.className = "empty-state";
+        wrap.id = "chat-empty";
+        wrap.innerHTML =
+            '<div class="empty-seal" aria-hidden="true">F</div>' +
+            '<h2 class="empty-title">The study is lit. The ledger is open.</h2>' +
+            '<p class="empty-sub">Ask, and one shall consult the archives. ' +
+            'One makes no promises as to enthusiasm.</p>';
+        const chips = document.createElement("div");
+        chips.className = "suggestions";
+        ["What is dirtying my git status?", "Run ruff and report back.",
+         "Are my secrets safe in exec?"].forEach(function(label) {
+            const b = document.createElement("button");
+            b.type = "button";
+            b.className = "suggestion";
+            b.textContent = label;
+            b.addEventListener("click", function() {
+                textarea.value = label; autoGrow(); textarea.focus();
+            });
+            chips.appendChild(b);
+        });
+        wrap.appendChild(chips);
+        list.insertBefore(wrap, document.getElementById("status-row"));
+    }
+
+    if (confirmAccept) {
+        confirmAccept.addEventListener("click", function() {
+            closeConfirm();
+            // Cancel any stream first, or its done-frame would repopulate the
+            // transcript we are about to clear.
+            if (abortController) abortController.abort();
+            clearStreamState();
+            fetch("/chat/forget", { method: "POST", credentials: "same-origin" })
+                .then(function() {
+                    renderEmptyState();
+                    setStatus("The conversation was cleared.", false);
+                    notice("info",
+                        "The correspondence has been burned. A fresh ledger awaits, sir.");
+                })
+                .catch(function(err) {
+                    notice("error", "The fire would not catch: " + err.message);
+                });
+        });
     }
 
     // Start pinned to the newest message.
