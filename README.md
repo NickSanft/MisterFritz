@@ -232,7 +232,15 @@ mister_fritz.py   ──  LangGraph state machine
     └─ SUMMARIZE_NODE   ──  auto-summarise at 15+ messages, store to Chroma
 ```
 
-Conversation state is checkpointed per-user in `chat_history.db` (SQLite).
+Conversation state is checkpointed per-user in `chat_history.db` (SQLite). Each
+turn the executor replays the newest slice of that transcript that fits
+`HISTORY_TOKEN_BUDGET` (default 4096 tokens) into the ReAct agent — that is the
+short-term memory, and it is the only one the sub-agent has, since it is
+compiled without a checkpointer of its own. Anything older is reachable only
+through the Chroma memory store, which the summariser writes to and which is
+auto-injected into the system prompt (capped at `MEMORY_INJECT_MAX_CHARS`) —
+long-term recall. Set `HISTORY_TOKEN_BUDGET=0` to disable the window and send
+only the latest message.
 
 ---
 

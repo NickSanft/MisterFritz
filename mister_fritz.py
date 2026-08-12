@@ -6,7 +6,16 @@ import threading
 from contextlib import ExitStack
 from typing import Annotated, Literal, TypedDict
 
-from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    RemoveMessage,
+    ToolMessage,
+    trim_messages,
+)
+# NOT re-exported from langchain_core.messages — importing it from there raises
+# ImportError on the pinned version (verified). It lives in .messages.utils.
+from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_ollama import ChatOllama
@@ -30,13 +39,15 @@ from agent_tools import (
 from fritz_utils import (
     CHAT_DB_NAME,
     FAST_OLLAMA_MODEL,
+    HISTORY_TOKEN_BUDGET,
+    MEMORY_INJECT_MAX_CHARS,
     MessageSource,
     OLLAMA_KEEP_ALIVE,
     OLLAMA_TIMEOUT,
     SUMMARIZE_THRESHOLD,
     THINKING_OLLAMA_MODEL,
 )
-from observability import init_logging
+from observability import METRICS, init_logging
 from storage import SQLiteStore
 
 PLANNER_NODE = "planner"
@@ -273,6 +284,51 @@ def summarize_conversation(state: EnhancedState, config: RunnableConfig):
     return {"messages": delete_messages}
 
 
+def _history_window(messages: list) -> list:
+    """Newest slice of the conversation that fits HISTORY_TOKEN_BUDGET.
+
+    The executor's ReAct sub-agent is compiled WITHOUT a checkpointer, so
+    whatever this returns is the model's entire short-term memory for the turn.
+    Chroma memory injection covers long-range recall across threads; this covers
+    continuity inside one.
+
+    Returns [] when there is nothing usable — callers MUST handle that and fall
+    back to sending the single latest message, because trim_messages returns []
+    when the newest message alone busts the budget (verified, not assumed).
+    """
+    if not messages or HISTORY_TOKEN_BUDGET <= 0:
+        return []
+    try:
+        window = trim_messages(
+            messages,
+            max_tokens=HISTORY_TOKEN_BUDGET,
+            # chars/4 heuristic. There is no tokenizer for gpt-oss, and the
+            # string literal avoids importing one.
+            token_counter="approximate",
+            strategy="last",
+            # Never open the window on a dangling AI turn — a transcript that
+            # starts mid-exchange reads as though the user said nothing.
+            start_on="human",
+            include_system=False,
+            # Never split a message mid-content.
+            allow_partial=False,
+        )
+    except Exception as e:
+        # Non-fatal: a bad window is not worth failing the turn over.
+        logger.warning("History trim failed (non-fatal): %s", e)
+        return []
+    if not window:
+        METRICS.increment("history_window_overflow")
+        return []
+    if len(window) < len(messages):
+        METRICS.increment("history_window_trimmed")
+    logger.debug(
+        "History window: %d/%d messages, ~%d tokens",
+        len(window), len(messages), count_tokens_approximately(window),
+    )
+    return window
+
+
 def executor(state: EnhancedState, config: RunnableConfig):
     """
     Simple mode (plan=[]): behaves like the original conversation node —
@@ -330,6 +386,26 @@ def executor(state: EnhancedState, config: RunnableConfig):
         if memory_query and user_id:
             past_context = search_memories_internal(config, memory_query)
             if past_context and past_context != "{}":
+                # search_memories_internal pulls up to 30 stored summaries with
+                # no size limit, and each can be a full conversation summary.
+                # Uncapped, this one block can evict the history window — and
+                # the Fritz persona itself — from num_ctx.
+                if len(past_context) > MEMORY_INJECT_MAX_CHARS:
+                    try:
+                        # Chroma returns most-similar-first and the dict
+                        # preserves that order, so truncating the tail drops the
+                        # weakest matches rather than an arbitrary slice.
+                        kept, size = {}, 0
+                        for k, v in json.loads(past_context).items():
+                            size += len(k) + len(str(v))
+                            if size > MEMORY_INJECT_MAX_CHARS:
+                                break
+                            kept[k] = v
+                        past_context = json.dumps(kept)
+                    except Exception:
+                        # Not JSON after all — fall back to a hard character cut.
+                        past_context = past_context[:MEMORY_INJECT_MAX_CHARS]
+                    METRICS.increment("memory_inject_truncated")
                 system_prompt = system_prompt + f"\n\nWhat I know about this user:\n{past_context}"
                 logger.debug("Injected memory context for %s (%d chars)", user_id, len(past_context))
     except Exception as e:
@@ -404,12 +480,24 @@ def executor(state: EnhancedState, config: RunnableConfig):
         if progress_callback:
             progress_callback(f"Step {current_step + 1}/{len(plan)}: {step_instruction}")
         effective_streaming_callback = None
+        # messages[-1] is this very request, already restated verbatim as
+        # "Original request:" inside agent_prompt — excluding it avoids a
+        # duplicate and keeps the window identical across every step of a plan.
+        history = _history_window(messages[:-1])
+        inputs = {"messages": [("system", system_prompt), *history, ("user", agent_prompt)]}
     else:
-        latest_message = messages[-1].content if messages else original_request
-        agent_prompt = latest_message
         effective_streaming_callback = streaming_callback
-
-    inputs = {"messages": [("system", system_prompt), ("user", agent_prompt)]}
+        history = _history_window(messages)
+        if history:
+            # history[-1] IS the current user turn — ask_stuff appended it
+            # before the graph ran — so no separate ("user", ...) entry is
+            # needed, and adding one would send the question twice.
+            inputs = {"messages": [("system", system_prompt), *history]}
+        else:
+            # Budget disabled, empty state, or a single oversized message.
+            # Never send a system-prompt-only input to the model.
+            latest_message = messages[-1].content if messages else original_request
+            inputs = {"messages": [("system", system_prompt), ("user", latest_message)]}
 
     final_state = None
     accumulated_text = ""
