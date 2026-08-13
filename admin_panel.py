@@ -702,9 +702,11 @@ async def chat_stream(request: Request) -> Response:
     """Server-Sent Events endpoint. Runs ask_stuff in a worker thread; the
     streaming_callback puts events on a queue.Queue that the SSE generator
     drains. Emits:
-      - event=token data=<accumulated text so far>   (zero or more)
-      - event=done  data=<final text>                (exactly one)
-      - event=error data=<message>                   (instead of done on failure)
+      - event=reset    data=              (clear the bubble; new answer segment)
+      - event=token    data=<delta text>  (APPEND — not the accumulated text)
+      - event=progress data=<tool notice>
+      - event=done     data=<JSON {text, html, images}>   (exactly one)
+      - event=error    data=<message>     (instead of done on failure)
     """
     user = _chat_user(request)
     if not user:
@@ -720,9 +722,20 @@ async def chat_stream(request: Request) -> Response:
     source = MessageSource.DISCORD_TEXT_AND_IMAGE if pending_images else MessageSource.LOCAL
     event_queue: queue.Queue = queue.Queue()
 
-    def _streaming_callback(partial_text: str) -> None:
+    def _streaming_callback(delta: str, accumulated: str, restart: bool = False) -> None:
         # ask_stuff invokes this from a worker thread; queue.Queue is thread-safe.
-        event_queue.put(("token", partial_text))
+        #
+        # `token` carries ONLY the new text and the client appends, so a long
+        # reply costs O(n) bytes on the wire instead of O(n^2) — previously
+        # every frame re-sent the whole reply so far.
+        #
+        # `reset` means the model started a fresh answer segment: it narrated
+        # before calling a tool and then began again, or the synthesizer took
+        # over. Without it the client would concatenate the preamble onto the
+        # real answer.
+        if restart:
+            event_queue.put(("reset", ""))
+        event_queue.put(("token", delta))
 
     def _progress_callback(progress_text: str) -> None:
         # Tool progress messages: "Searching the web...", etc. Surfaced to the

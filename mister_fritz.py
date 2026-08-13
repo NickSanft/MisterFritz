@@ -8,6 +8,7 @@ from typing import Annotated, Literal, TypedDict
 
 from langchain_core.messages import (
     AIMessage,
+    AIMessageChunk,
     HumanMessage,
     RemoveMessage,
     ToolMessage,
@@ -44,6 +45,7 @@ from fritz_utils import (
     MessageSource,
     OLLAMA_KEEP_ALIVE,
     OLLAMA_TIMEOUT,
+    STREAM_MIN_CHARS,
     SUMMARIZE_THRESHOLD,
     THINKING_OLLAMA_MODEL,
 )
@@ -329,6 +331,95 @@ def _history_window(messages: list) -> list:
     return window
 
 
+# ── Streaming callback plumbing ───────────────────────────────────────────────
+
+def _chunk_text(message) -> str:
+    """Plain text of a streamed message chunk.
+
+    ChatOllama emits `content` as a str today, but langchain-core's v1 output
+    format can make it a list of content blocks; `.text` normalises both.
+    """
+    text = getattr(message, "text", None)
+    # Order matters. On the pinned langchain-core `.text` returns a
+    # TextAccessor, which is BOTH a str subclass and callable — so testing
+    # callable() first would take the compat branch and emit
+    # "Calling .text() as a method is deprecated" on every single token.
+    if isinstance(text, str):
+        return str(text)
+    if callable(text):  # older langchain-core exposed text() as a method
+        try:
+            text = text()
+        except Exception:
+            text = None
+        if isinstance(text, str):
+            return text
+    content = getattr(message, "content", "")
+    return content if isinstance(content, str) else ""
+
+
+_SEGMENT_UNSET = object()
+
+
+class _DeltaEmitter:
+    """Adapts LLM token chunks to the streaming-callback contract:
+
+        streaming_callback(delta: str, accumulated: str, restart: bool) -> None
+
+    delta       — text produced since the previous call.
+    accumulated — full text of the CURRENT answer segment.
+    restart     — True on the first emission of a new segment. A new segment
+                  starts whenever the model begins a fresh turn (it wrote a
+                  preamble, called a tool, then began the real answer) or the
+                  synthesizer takes over from the executor.
+
+    Consumers that replace content wholesale (Discord message edits) read
+    `accumulated` and can ignore `restart`. Consumers that append (the web SSE
+    client) read `delta` and clear their buffer when `restart` is True.
+
+    `restart` is not decoration. Verified against the installed langgraph: a
+    model that narrates before calling a tool emits that preamble under one
+    chunk id and the real answer under another, so an appending consumer would
+    otherwise render "Let me look. I found it sir." as one reply.
+    """
+
+    def __init__(self, callback, min_chars: int = STREAM_MIN_CHARS):
+        self._callback = callback
+        self._min_chars = max(1, min_chars)
+        self._segment = _SEGMENT_UNSET
+        self._accumulated = ""
+        self._buffer = ""
+        self._restart_pending = False
+
+    def feed(self, text: str, segment_id=None) -> None:
+        if not text or self._callback is None:
+            return
+        if segment_id != self._segment:
+            self._segment = segment_id
+            self._accumulated = ""
+            self._buffer = ""
+            self._restart_pending = True
+        self._accumulated += text
+        self._buffer += text
+        if len(self._buffer) >= self._min_chars:
+            self.flush()
+
+    def flush(self) -> None:
+        """Emit whatever is buffered.
+
+        Call once when the stream ends, or a sub-threshold tail is stranded and
+        the last few characters of a reply never reach the UI.
+        """
+        if self._callback is None or not self._buffer:
+            return
+        delta, self._buffer = self._buffer, ""
+        restart, self._restart_pending = self._restart_pending, False
+        try:
+            self._callback(delta, self._accumulated, restart)
+        except Exception as e:
+            # A broken UI consumer must not kill the turn.
+            logger.warning("streaming_callback raised (non-fatal): %s", e)
+
+
 def executor(state: EnhancedState, config: RunnableConfig):
     """
     Simple mode (plan=[]): behaves like the original conversation node —
@@ -479,6 +570,9 @@ def executor(state: EnhancedState, config: RunnableConfig):
         # Announce plan step progress; suppress per-token streaming for intermediate steps
         if progress_callback:
             progress_callback(f"Step {current_step + 1}/{len(plan)}: {step_instruction}")
+        # Intermediate steps stay silent by design — the synthesizer streams the
+        # one answer the user actually sees, with restart=True on its first
+        # token. Called out so this does not look like an oversight.
         effective_streaming_callback = None
         # messages[-1] is this very request, already restated verbatim as
         # "Original request:" inside agent_prompt — excluding it avoids a
@@ -500,26 +594,39 @@ def executor(state: EnhancedState, config: RunnableConfig):
             inputs = {"messages": [("system", system_prompt), ("user", latest_message)]}
 
     final_state = None
-    accumulated_text = ""
+    emitter = _DeltaEmitter(effective_streaming_callback)
+    # A LIST — even of one mode — is what makes LangGraph tuple its output as
+    # (mode, payload); a bare string yields raw payloads instead. Keeping it a
+    # list either way makes the loop below uniform.
+    stream_modes = ["values", "messages"] if effective_streaming_callback else ["values"]
 
-    for s in agent.stream(inputs, config=get_config_values(config), stream_mode="values"):
-        final_state = s
-        if "messages" in s and s["messages"]:
-            latest = s["messages"][-1]
-            if hasattr(latest, 'tool_calls') and latest.tool_calls:
-                logger.debug("Detected tool calls: %s", [tc.get('name', '') for tc in latest.tool_calls])
-                if progress_callback:
-                    for tool_call in latest.tool_calls:
-                        tool_name = tool_call.get('name', '')
-                        if tool_name in tool_messages and tool_name not in notified_tools:
-                            progress_callback(tool_messages[tool_name])
-                            notified_tools.add(tool_name)
-            elif hasattr(latest, 'content') and isinstance(latest.content, str) and effective_streaming_callback:
-                if isinstance(latest, AIMessage):
-                    new_text = latest.content
-                    if new_text and new_text != accumulated_text:
-                        accumulated_text = new_text
-                        effective_streaming_callback(accumulated_text)
+    for mode, payload in agent.stream(
+        inputs, config=get_config_values(config), stream_mode=stream_modes
+    ):
+        if mode == "values":
+            final_state = payload
+            if "messages" in payload and payload["messages"]:
+                latest = payload["messages"][-1]
+                if getattr(latest, "tool_calls", None):
+                    logger.debug("Detected tool calls: %s", [tc.get('name', '') for tc in latest.tool_calls])
+                    if progress_callback:
+                        for tool_call in latest.tool_calls:
+                            tool_name = tool_call.get('name', '')
+                            if tool_name in tool_messages and tool_name not in notified_tools:
+                                progress_callback(tool_messages[tool_name])
+                                notified_tools.add(tool_name)
+            continue
+
+        # mode == "messages" → (chunk, metadata). The messages stream also
+        # carries whole ToolMessages from the tools node, so filter: only
+        # AIMessageChunks are LLM tokens. chunk.id is stable within one model
+        # turn and changes across turns, which makes it a free segment key.
+        chunk, _meta = payload
+        if isinstance(chunk, AIMessageChunk):
+            emitter.feed(_chunk_text(chunk), segment_id=chunk.id)
+
+    # Flush the sub-threshold tail, or the last few characters never arrive.
+    emitter.flush()
 
     resp = final_state["messages"][-1].content if final_state and "messages" in final_state else ""
 
@@ -577,18 +684,26 @@ def synthesizer(state: EnhancedState, config: RunnableConfig):
         ),
     ]
 
+    # One constant segment id: the synthesizer's first emission therefore
+    # carries restart=True, wiping whatever the executor's steps left on screen.
+    emitter = _DeltaEmitter(streaming_callback)
     accumulated_text = ""
     try:
         for chunk in ollama_instance.stream(synthesis_prompt, config=get_config_values(config)):
-            if hasattr(chunk, 'content') and chunk.content:
-                accumulated_text += chunk.content
-                if streaming_callback:
-                    streaming_callback(accumulated_text)
+            text = _chunk_text(chunk)
+            if text:
+                accumulated_text += text
+                emitter.feed(text, segment_id="synthesis")
+        emitter.flush()
     except Exception as e:
         logger.warning("Synthesizer stream failed: %s; falling back to invoke", e)
         accumulated_text = ollama_instance.invoke(
             synthesis_prompt, config=get_config_values(config)
         ).content
+        # Correct the UI rather than leaving whatever partial text the failed
+        # stream had already painted. restart=True replaces it wholesale.
+        if streaming_callback:
+            streaming_callback(accumulated_text, accumulated_text, True)
 
     logger.info("Synthesizer complete: %d chars from %d steps", len(accumulated_text), len(plan))
     # Same reducer coercion as the executor's simple-mode return: a bare str
@@ -633,6 +748,15 @@ def ask_stuff(
     checkpoint. They are the same thing for Discord, Telegram and the
     scheduler, which pass nothing. The web chat passes its own thread so a web
     session cannot read or overwrite the Discord history of the same name.
+
+    streaming_callback(delta, accumulated, restart) is called as tokens arrive:
+      delta       — new text since the last call
+      accumulated — full text of the current answer segment
+      restart     — True when a new segment begins (clear anything shown)
+    Replace-wholesale consumers use `accumulated`; appending consumers use
+    `delta` and clear on `restart`.
+
+    progress_callback(message) is called with human-readable tool notices.
     """
     import re as _re
     user_id_clean = _re.sub(r'[^a-zA-Z0-9]', '', user_id)

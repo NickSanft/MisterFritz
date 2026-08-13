@@ -939,10 +939,17 @@
                         }
                         const data = dataLines.join("\n");
                         if (eventName === "token") {
-                            // Cumulative wire format: pass `data` as the
-                            // accumulated value. Deltas would pass it as the
-                            // first argument instead.
-                            applyToken(null, data, false);
+                            // Delta wire format: `data` is only the NEW text.
+                            // (This used to pass `data` as the accumulated
+                            // value — that swap is the whole reason applyToken
+                            // exists as a seam.)
+                            applyToken(data, null, false);
+                        } else if (eventName === "reset") {
+                            // The model began a fresh answer segment: it
+                            // narrated, called a tool, and started over — or
+                            // the synthesizer took over from a plan run. Drop
+                            // whatever has streamed so far.
+                            applyToken("", "", true);
                         } else if (eventName === "progress") {
                             const line = makeProgressLine(data);
                             list.insertBefore(line, fritzRow);

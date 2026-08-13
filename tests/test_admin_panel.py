@@ -697,10 +697,19 @@ class TestChatStreamingUx(unittest.TestCase):
         self.assertIn("stopPropagation", code)
 
     def test_apply_token_seam_exists(self):
-        # The wire format is cumulative today. This function is the only place
-        # that knows, so flipping to deltas is a two-line change.
+        # The seam that isolated the cumulative→delta wire-format change. Only
+        # this function knows the format, so the migration was a two-line edit.
         code = self._code()
         self.assertIn("function applyToken(delta, cumulative, restart)", code)
+
+    def test_client_appends_deltas_and_clears_on_reset(self):
+        # Frames now carry only the NEW text. Passing `data` as the accumulated
+        # value again would silently restore the O(n^2) behaviour AND render
+        # every reply as just its final token.
+        code = self._code()
+        self.assertIn("applyToken(data, null, false)", code)
+        self.assertIn('eventName === "reset"', code)
+        self.assertIn('applyToken("", "", true)', code)
 
     def test_stop_is_labelled_honestly(self):
         # Aborting the client fetch cannot stop the server: chat_stream runs
@@ -726,6 +735,90 @@ class TestChatStreamingUx(unittest.TestCase):
         code = self._code()
         self.assertIn('fetch("/chat/forget"', code)
         self.assertIn("renderEmptyState", code)
+
+
+class TestChatStreamDeltaWireFormat(unittest.TestCase):
+    """`token` frames carry deltas and `reset` marks a new answer segment.
+
+    The failure this guards is subtle: if the server reverted to sending
+    accumulated text, the client (which appends) would render every reply as a
+    growing pile of duplicated prefixes, and the wire cost would go quadratic.
+    """
+
+    def _stream(self, fake_ask_stuff):
+        client = _build_client()
+        _login(client)
+        fake_module = MagicMock()
+        fake_module.ask_stuff = fake_ask_stuff
+        with patch.dict(sys.modules, {"mister_fritz": fake_module}), \
+             patch.object(admin_panel, "audit_log"):
+            r = client.post("/chat/stream", data={"message": "hi"})
+        return _parse_sse(r.text)
+
+    def test_reset_precedes_each_segment_in_order(self):
+        # Preamble, tool call, fresh answer — verified to be what a real model
+        # produces, since the two halves arrive under different chunk ids.
+        def fake(message, source, user, *, streaming_callback=None, **_):
+            streaming_callback("Let me look.", "Let me look.", True)
+            streaming_callback("I found", "I found", True)
+            streaming_callback(" it.", "I found it.", False)
+            return {"text": "I found it.", "image_paths": [], "timestamp": "now"}
+
+        events = [(ev, d) for ev, d in self._stream(fake) if ev in ("reset", "token")]
+        self.assertEqual(events, [
+            ("reset", ""), ("token", "Let me look."),
+            ("reset", ""), ("token", "I found"), ("token", " it."),
+        ])
+
+    def test_deltas_since_the_last_reset_reassemble_the_reply(self):
+        def fake(message, source, user, *, streaming_callback=None, **_):
+            streaming_callback("scratch", "scratch", True)
+            streaming_callback("Very", "Very", True)
+            streaming_callback(" well", "Very well", False)
+            return {"text": "Very well", "image_paths": [], "timestamp": "now"}
+
+        acc = ""
+        for ev, data in self._stream(fake):
+            if ev == "reset":
+                acc = ""
+            elif ev == "token":
+                acc += data
+        self.assertEqual(acc, "Very well")
+
+    def test_token_delta_preserves_a_leading_space(self):
+        # Guards the `data: ` prefix + single-leading-space-strip round trip.
+        # Losing this silently runsallthewordstogether.
+        def fake(message, source, user, *, streaming_callback=None, **_):
+            streaming_callback(" well", "Very well", False)
+            return {"text": "Very well", "image_paths": [], "timestamp": "now"}
+
+        tokens = [d for ev, d in self._stream(fake) if ev == "token"]
+        self.assertEqual(tokens, [" well"])
+
+    def test_token_delta_with_embedded_newlines_round_trips(self):
+        # Each logical line gets its own `data:` line; the blank-line frame
+        # terminator must not be produced by the payload itself.
+        def fake(message, source, user, *, streaming_callback=None, **_):
+            streaming_callback("a\n\nb", "a\n\nb", True)
+            return {"text": "a\n\nb", "image_paths": [], "timestamp": "now"}
+
+        tokens = [d for ev, d in self._stream(fake) if ev == "token"]
+        self.assertEqual(tokens, ["a\n\nb"])
+
+    def test_wire_cost_is_linear_not_quadratic(self):
+        # 40 words sent cumulatively would cost ~O(n^2) bytes.
+        words = [f"w{i} " for i in range(40)]
+
+        def fake(message, source, user, *, streaming_callback=None, **_):
+            acc = ""
+            for i, w in enumerate(words):
+                acc += w
+                streaming_callback(w, acc, i == 0)
+            return {"text": acc, "image_paths": [], "timestamp": "now"}
+
+        tokens = [d for ev, d in self._stream(fake) if ev == "token"]
+        reply_len = len("".join(words))
+        self.assertEqual(sum(len(t) for t in tokens), reply_len)
 
 
 class TestCodeHighlighting(unittest.TestCase):
@@ -1009,9 +1102,11 @@ class TestChatStreamSuccess(unittest.TestCase):
         def fake_ask_stuff(message, source, user, *,
                           streaming_callback=None, schedule_manager=None, **_):
             assert streaming_callback is not None
-            streaming_callback("Very")
-            streaming_callback("Very well")
-            streaming_callback("Very well, sir.")
+            # (delta, accumulated, restart) — one segment, so only the first
+            # emission restarts.
+            streaming_callback("Very", "Very", True)
+            streaming_callback(" well", "Very well", False)
+            streaming_callback(", sir.", "Very well, sir.", False)
             return {"text": "Very well, sir.", "image_paths": [], "timestamp": "now"}
 
         fake_module = MagicMock()
@@ -1024,7 +1119,13 @@ class TestChatStreamSuccess(unittest.TestCase):
         events = _parse_sse(r.text)
         tokens = [d for ev, d in events if ev == "token"]
         dones = [d for ev, d in events if ev == "done"]
-        self.assertEqual(tokens, ["Very", "Very well", "Very well, sir."])
+        # Deltas, not growing prefixes. THIS assertion is the wire contract:
+        # the old value was ["Very", "Very well", "Very well, sir."], which is
+        # the O(n^2) behaviour this change removes.
+        self.assertEqual(tokens, ["Very", " well", ", sir."])
+        self.assertEqual("".join(tokens), "Very well, sir.")
+        # Exactly one reset, opening the single segment.
+        self.assertEqual(len([1 for ev, _ in events if ev == "reset"]), 1)
         # The 'done' frame is now a JSON payload (Phase web-chat-3); the
         # detailed shape is asserted in TestChatStreamDonePayload.
         self.assertEqual(len(dones), 1)
@@ -1037,7 +1138,7 @@ class TestChatStreamSuccess(unittest.TestCase):
 
         def fake_ask_stuff(message, source, user, *,
                           streaming_callback=None, **_):
-            streaming_callback("ok")
+            streaming_callback("ok", "ok", True)
             return {"text": "ok", "image_paths": [], "timestamp": "now"}
 
         fake_module = MagicMock()
@@ -1171,7 +1272,7 @@ class TestChatStreamDonePayload(unittest.TestCase):
 
         def fake_ask_stuff(message, source, user, *,
                           streaming_callback=None, progress_callback=None, **_):
-            streaming_callback("Very well")
+            streaming_callback("Very well", "Very well", True)
             return {"text": "Very well **sir**.", "image_paths": [], "timestamp": "now"}
 
         fake_module = MagicMock()
@@ -1199,7 +1300,7 @@ class TestChatStreamProgressEvents(unittest.TestCase):
             assert progress_callback is not None
             progress_callback("Searching the web...")
             progress_callback("Reading results...")
-            streaming_callback("Here is what I found.")
+            streaming_callback("Here is what I found.", "Here is what I found.", True)
             return {"text": "Here is what I found.", "image_paths": [], "timestamp": "now"}
 
         fake_module = MagicMock()

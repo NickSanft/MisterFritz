@@ -14,7 +14,12 @@ from unittest.mock import MagicMock, patch
 # ddgs / image_generator / document_engine are stubbed in tests/conftest.py
 # before any test module is collected.
 
-from langchain_core.messages import AIMessage, HumanMessage  # noqa: E402
+from langchain_core.messages import (  # noqa: E402
+    AIMessage,
+    AIMessageChunk,
+    HumanMessage,
+    ToolMessage,
+)
 
 import mister_fritz  # noqa: E402
 from mister_fritz import _history_window, executor, planner  # noqa: E402
@@ -123,15 +128,26 @@ class TestPlannerParsing(unittest.TestCase):
 
 
 class _RecordingAgent:
-    """Stands in for the compiled ReAct agent; captures the inputs dict."""
+    """Stands in for the compiled ReAct agent; captures inputs and stream_mode.
 
-    def __init__(self, reply="Very well, sir."):
+    Yields (mode, payload) tuples, which is what LangGraph produces whenever
+    stream_mode is a LIST — even a one-element one. A bare string yields raw
+    payloads instead, which is why the executor always passes a list.
+    """
+
+    def __init__(self, reply="Very well, sir.", script=None):
         self.seen = None
+        self.stream_mode = None
         self._reply = reply
+        self._script = script
 
     def stream(self, inputs, config=None, stream_mode=None):
         self.seen = inputs
-        yield {"messages": [AIMessage(content=self._reply)]}
+        self.stream_mode = stream_mode
+        if self._script is not None:
+            yield from self._script
+            return
+        yield ("values", {"messages": [AIMessage(content=self._reply)]})
 
 
 def _run_executor(state, agent, **patches):
@@ -319,6 +335,358 @@ class TestMemoryInjectionCap(unittest.TestCase):
         system_prompt = agent.seen["messages"][0][1]
         injected = system_prompt.split("What I know about this user:\n")[1]
         self.assertEqual(len(injected), 100)
+
+
+class TestChunkText(unittest.TestCase):
+    """ChatOllama emits str content today, but langchain-core v1 can make it a
+    list of content blocks. `.text` normalises both."""
+
+    def test_str_content_returned(self):
+        self.assertEqual(mister_fritz._chunk_text(AIMessageChunk(content="hi")), "hi")
+
+    def test_text_property_is_preferred(self):
+        msg = MagicMock()
+        msg.text = "from text"
+        msg.content = "from content"
+        self.assertEqual(mister_fritz._chunk_text(msg), "from text")
+
+    def test_callable_text_is_invoked(self):
+        msg = MagicMock()
+        msg.text = lambda: "called"
+        msg.content = "ignored"
+        self.assertEqual(mister_fritz._chunk_text(msg), "called")
+
+    def test_list_content_returns_empty_string(self):
+        msg = MagicMock()
+        msg.text = None
+        msg.content = [{"type": "text", "text": "block"}]
+        self.assertEqual(mister_fritz._chunk_text(msg), "")
+
+
+class TestDeltaEmitter(unittest.TestCase):
+    """The contract: streaming_callback(delta, accumulated, restart)."""
+
+    def setUp(self):
+        self.calls = []
+
+    def _emitter(self, min_chars=1):
+        return mister_fritz._DeltaEmitter(
+            lambda d, a, r: self.calls.append((d, a, r)), min_chars=min_chars)
+
+    def test_single_segment_emits_delta_and_accumulated(self):
+        em = self._emitter()
+        em.feed("Very", segment_id="s1")
+        em.feed(" well", segment_id="s1")
+        em.feed(", sir.", segment_id="s1")
+        self.assertEqual(self.calls, [
+            ("Very", "Very", True),
+            (" well", "Very well", False),
+            (", sir.", "Very well, sir.", False),
+        ])
+        # The invariant the whole design rests on.
+        self.assertEqual("".join(d for d, _, _ in self.calls), self.calls[-1][1])
+
+    def test_new_segment_resets_accumulator_and_flags_restart(self):
+        # The preamble-then-tool-call-then-answer case, verified to happen for
+        # real: the two halves arrive under different chunk ids.
+        em = self._emitter()
+        em.feed("Let me look. ", segment_id="turn1")
+        em.feed("I found it sir.", segment_id="turn2")
+        self.assertEqual(self.calls, [
+            ("Let me look. ", "Let me look. ", True),
+            ("I found it sir.", "I found it sir.", True),
+        ])
+
+    def test_min_chars_buffers_until_threshold(self):
+        em = self._emitter(min_chars=5)
+        em.feed("a", segment_id="s")
+        em.feed("a", segment_id="s")
+        em.feed("a", segment_id="s")
+        self.assertEqual(self.calls, [])
+        em.feed("bb", segment_id="s")
+        self.assertEqual(self.calls, [("aaabb", "aaabb", True)])
+
+    def test_flush_emits_sub_threshold_tail(self):
+        # Without this the last few characters of every reply are stranded.
+        em = self._emitter(min_chars=100)
+        em.feed("short tail", segment_id="s")
+        self.assertEqual(self.calls, [])
+        em.flush()
+        self.assertEqual(self.calls, [("short tail", "short tail", True)])
+
+    def test_flush_is_a_noop_when_buffer_empty(self):
+        em = self._emitter()
+        em.flush()
+        em.feed("x", segment_id="s")
+        em.flush()
+        self.assertEqual(len(self.calls), 1)
+
+    def test_none_callback_is_a_noop(self):
+        em = mister_fritz._DeltaEmitter(None)
+        em.feed("anything", segment_id="s")
+        em.flush()  # must not raise
+
+    def test_empty_text_is_ignored(self):
+        em = self._emitter()
+        em.feed("", segment_id="s")
+        self.assertEqual(self.calls, [])
+
+    def test_callback_exception_is_swallowed(self):
+        # A broken UI consumer must not kill the turn.
+        def boom(d, a, r):
+            raise RuntimeError("consumer exploded")
+        em = mister_fritz._DeltaEmitter(boom)
+        em.feed("x", segment_id="s")  # must not raise
+
+
+def _chunk(text, cid):
+    return AIMessageChunk(content=text, id=cid)
+
+
+class TestExecutorTokenStreaming(unittest.TestCase):
+    """The executor's stream loop: values drive progress, messages drive tokens."""
+
+    def _state(self, **over):
+        state = {
+            "messages": [HumanMessage(content="hello", id="h1")],
+            "image_paths": [], "user_image_paths": [], "original_request": "",
+            "plan": [], "current_step": 0, "step_results": [],
+        }
+        state.update(over)
+        return state
+
+    def _run(self, script, state=None, with_callback=True):
+        calls, progress = [], []
+        agent = _RecordingAgent(script=script)
+        metadata = {"user_id": "tester"}
+        if with_callback:
+            metadata["streaming_callback"] = lambda d, a, r: calls.append((d, a, r))
+        metadata["progress_callback"] = progress.append
+        with patch.object(mister_fritz, "_get_conversation_agent", return_value=agent), \
+             patch.object(mister_fritz, "search_memories_internal", return_value="{}"), \
+             patch.object(mister_fritz, "get_user_profile", return_value={}):
+            result = executor(state or self._state(), config={"metadata": metadata})
+        return agent, calls, progress, result
+
+    def test_ai_message_chunks_become_deltas(self):
+        script = [
+            ("messages", (_chunk("Very", "t1"), {})),
+            ("messages", (_chunk(" well", "t1"), {})),
+            ("messages", (_chunk(", sir.", "t1"), {})),
+            ("values", {"messages": [AIMessage(content="Very well, sir.")]}),
+        ]
+        _agent, calls, _p, _r = self._run(script)
+        self.assertEqual([d for d, _, _ in calls], ["Very", " well", ", sir."])
+        self.assertEqual([r for _, _, r in calls], [True, False, False])
+        self.assertEqual(calls[-1][1], "Very well, sir.")
+
+    def test_tool_messages_in_the_messages_stream_are_ignored(self):
+        # The messages stream carries whole ToolMessages from the tools node;
+        # only AIMessageChunks are LLM tokens.
+        script = [
+            ("messages", (ToolMessage(content="tool output", tool_call_id="c1"), {})),
+            ("messages", (_chunk("real", "t1"), {})),
+            ("values", {"messages": [AIMessage(content="real")]}),
+        ]
+        _agent, calls, _p, _r = self._run(script)
+        self.assertEqual([d for d, _, _ in calls], ["real"])
+
+    def test_new_chunk_id_restarts_the_segment(self):
+        # Preamble, tool call, then the real answer under a NEW id. Without
+        # restart the client would render "Let me look. I found it sir."
+        script = [
+            ("messages", (_chunk("Let me look. ", "t1"), {})),
+            ("messages", (_chunk("I found it sir.", "t2"), {})),
+            ("values", {"messages": [AIMessage(content="I found it sir.")]}),
+        ]
+        _agent, calls, _p, _r = self._run(script)
+        self.assertEqual([r for _, _, r in calls], [True, True])
+        self.assertEqual(calls[-1][1], "I found it sir.")
+
+    def test_tool_calls_in_values_still_fire_progress_once(self):
+        tool_call = {"name": "search_web", "args": {}, "id": "c1", "type": "tool_call"}
+        ai = AIMessage(content="", tool_calls=[tool_call])
+        script = [
+            ("values", {"messages": [ai]}),
+            ("values", {"messages": [ai]}),          # same tool again
+            ("values", {"messages": [AIMessage(content="done")]}),
+        ]
+        _agent, _calls, progress, _r = self._run(script)
+        self.assertEqual(progress, ["Searching the web..."])
+
+    def test_requests_values_and_messages_when_a_callback_is_present(self):
+        script = [("values", {"messages": [AIMessage(content="x")]})]
+        agent, _c, _p, _r = self._run(script)
+        self.assertEqual(agent.stream_mode, ["values", "messages"])
+
+    def test_requests_values_only_without_a_callback(self):
+        # Still a LIST — a bare string would change the payload shape and the
+        # loop's tuple unpacking would blow up.
+        script = [("values", {"messages": [AIMessage(content="x")]})]
+        agent, _c, _p, _r = self._run(script, with_callback=False)
+        self.assertEqual(agent.stream_mode, ["values"])
+
+    def test_plan_mode_never_streams(self):
+        # Intermediate steps stay silent; the synthesizer owns the visible one.
+        state = self._state(plan=["step a", "step b"], original_request="do it")
+        script = [("values", {"messages": [AIMessage(content="step result")]})]
+        agent, calls, progress, _r = self._run(script, state=state)
+        self.assertEqual(agent.stream_mode, ["values"])
+        self.assertEqual(calls, [])
+        self.assertIn("Step 1/2: step a", progress)
+
+    def test_sub_threshold_tail_is_flushed(self):
+        script = [
+            ("messages", (_chunk("tail", "t1"), {})),
+            ("values", {"messages": [AIMessage(content="tail")]}),
+        ]
+        with patch.object(mister_fritz, "STREAM_MIN_CHARS", 999):
+            _agent, calls, _p, _r = self._run(script)
+        self.assertEqual([d for d, _, _ in calls], ["tail"])
+
+
+class TestSynthesizerStreaming(unittest.TestCase):
+    def _state(self):
+        return {
+            "messages": [], "image_paths": [], "user_image_paths": [],
+            "original_request": "do it", "plan": ["a", "b"],
+            "current_step": 2, "step_results": ["r1", "r2"],
+        }
+
+    def test_streams_deltas_under_one_segment(self):
+        calls = []
+        fake = MagicMock()
+        fake.stream.return_value = iter([
+            AIMessageChunk(content="Very"), AIMessageChunk(content=" well."),
+        ])
+        with patch.object(mister_fritz, "ollama_instance", fake):
+            mister_fritz.synthesizer(self._state(), config={"metadata": {
+                "streaming_callback": lambda d, a, r: calls.append((d, a, r))}})
+        # First emission restarts, wiping whatever the executor steps left.
+        self.assertEqual([r for _, _, r in calls], [True, False])
+        self.assertEqual(calls[-1][1], "Very well.")
+
+    def test_invoke_fallback_corrects_the_ui(self):
+        # A failed stream may already have painted partial text; the fallback
+        # must replace it, not append to it.
+        calls = []
+        fake = MagicMock()
+        fake.stream.side_effect = RuntimeError("stream died")
+        fake.invoke.return_value = MagicMock(content="The real answer.")
+        with patch.object(mister_fritz, "ollama_instance", fake):
+            mister_fritz.synthesizer(self._state(), config={"metadata": {
+                "streaming_callback": lambda d, a, r: calls.append((d, a, r))}})
+        self.assertEqual(calls, [("The real answer.", "The real answer.", True)])
+
+
+class TestLangGraphMessagesContract(unittest.TestCase):
+    """Third-party canary. Pins the exact upstream behaviour the executor
+    depends on, so a langgraph / langchain-core bump fails loudly here instead
+    of silently reverting streaming to nothing.
+
+    Hermetic: a scripted BaseChatModel, no Ollama and no network.
+    """
+
+    @staticmethod
+    def _build_agent():
+        from typing import Iterator, Optional
+
+        from langchain_core.callbacks import CallbackManagerForLLMRun
+        from langchain_core.language_models.chat_models import BaseChatModel
+        from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+        from langchain_core.tools import tool
+        from langchain.agents import create_agent
+
+        @tool(parse_docstring=True)
+        def lookup(query: str) -> str:
+            """Look something up.
+
+            Args:
+                query: what to look up.
+            """
+            return "5"
+
+        class ScriptedModel(BaseChatModel):
+            turn: int = 0
+
+            @property
+            def _llm_type(self) -> str:
+                return "scripted"
+
+            def bind_tools(self, tools, **kw):
+                return self
+
+            def _stream(self, messages, stop=None,
+                        run_manager: Optional[CallbackManagerForLLMRun] = None,
+                        **kwargs) -> Iterator[ChatGenerationChunk]:
+                self.turn += 1
+                if self.turn == 1:
+                    for piece in ["Let ", "me ", "look. "]:
+                        c = ChatGenerationChunk(message=AIMessageChunk(content=piece))
+                        if run_manager:
+                            run_manager.on_llm_new_token(piece, chunk=c)
+                        yield c
+                    yield ChatGenerationChunk(message=AIMessageChunk(
+                        content="",
+                        tool_calls=[{"name": "lookup", "args": {"query": "x"},
+                                     "id": "call_1", "type": "tool_call"}]))
+                else:
+                    for piece in ["I ", "found ", "it."]:
+                        c = ChatGenerationChunk(message=AIMessageChunk(content=piece))
+                        if run_manager:
+                            run_manager.on_llm_new_token(piece, chunk=c)
+                        yield c
+
+            def _generate(self, messages, stop=None, run_manager=None, **kw) -> ChatResult:
+                text = "".join(
+                    c.message.content for c in self._stream(messages, stop, run_manager))
+                return ChatResult(generations=[ChatGeneration(
+                    message=AIMessage(content=text))])
+
+        return create_agent(ScriptedModel(), tools=[lookup])
+
+    def setUp(self):
+        self.agent = self._build_agent()
+        self.inputs = {"messages": [("system", "terse"), ("user", "go")]}
+
+    def test_list_stream_mode_yields_mode_payload_tuples(self):
+        for item in self.agent.stream(self.inputs, stream_mode=["values", "messages"]):
+            self.assertIsInstance(item, tuple)
+            self.assertEqual(len(item), 2)
+
+    def test_one_element_list_still_yields_tuples(self):
+        # Why the executor always passes a list, even for values-only.
+        first = next(iter(self.agent.stream(self.inputs, stream_mode=["values"])))
+        self.assertIsInstance(first, tuple)
+        self.assertEqual(first[0], "values")
+
+    def test_bare_string_yields_raw_payloads(self):
+        # The shape the executor must NOT ask for.
+        first = next(iter(self.agent.stream(self.inputs, stream_mode="values")))
+        self.assertNotIsInstance(first, tuple)
+
+    def test_messages_mode_emits_ai_message_chunks(self):
+        chunks = [p[0] for m, p in
+                  self.agent.stream(self.inputs, stream_mode=["values", "messages"])
+                  if m == "messages" and isinstance(p[0], AIMessageChunk)]
+        self.assertGreaterEqual(len(chunks), 6)
+
+    def test_messages_mode_also_emits_tool_messages(self):
+        # Which is exactly why the executor filters on AIMessageChunk.
+        from langchain_core.messages import ToolMessage as _TM
+        tools = [p[0] for m, p in
+                 self.agent.stream(self.inputs, stream_mode=["values", "messages"])
+                 if m == "messages" and isinstance(p[0], _TM)]
+        self.assertGreaterEqual(len(tools), 1)
+
+    def test_chunk_id_is_stable_within_a_turn_and_changes_across_turns(self):
+        # The free segment key the emitter uses for `restart`.
+        runs = []
+        for m, p in self.agent.stream(self.inputs, stream_mode=["values", "messages"]):
+            if m == "messages" and isinstance(p[0], AIMessageChunk):
+                if not runs or runs[-1] != p[0].id:
+                    runs.append(p[0].id)
+        self.assertEqual(len(runs), 2, "preamble and answer must be separate segments")
 
 
 if __name__ == "__main__":

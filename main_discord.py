@@ -12,6 +12,7 @@ from bot_adapters import split_into_chunks  # noqa: F401 — re-exported for tes
 from bot_commands import FritzCommands
 from fritz_utils import (
     DISCORD_BOT_TOKEN,
+    DISCORD_STREAM_MIN_INTERVAL,
     EMBEDDING_MODEL,
     FAST_OLLAMA_MODEL,
     MessageSource,
@@ -35,7 +36,8 @@ logger = logging.getLogger(__name__)
 class StreamingMessageHandler:
     """Manages incremental Discord message updates with rate limiting."""
 
-    def __init__(self, message: discord.Message, loop: asyncio.AbstractEventLoop, min_update_interval: float = 1.5):
+    def __init__(self, message: discord.Message, loop: asyncio.AbstractEventLoop,
+                 min_update_interval: float = DISCORD_STREAM_MIN_INTERVAL):
         self.message = message
         self.loop = loop
         self.min_update_interval = min_update_interval
@@ -181,9 +183,24 @@ async def on_message(ctx):
         status_msg = await ctx.channel.send("✍️ *Mister Fritz is thinking...*")
 
     streaming_handler = StreamingMessageHandler(status_msg, loop)
+    last_stream_schedule = 0.0
 
-    def streaming_callback(partial_text: str):
-        asyncio.run_coroutine_threadsafe(streaming_handler.update_text(partial_text), loop)
+    def streaming_callback(delta: str, accumulated: str, restart: bool = False):
+        # A Discord edit replaces the entire message body, so send
+        # `accumulated` (which resets by itself when `restart` fires), not the
+        # delta.
+        #
+        # This is now called once per TOKEN from a worker thread. At ~40
+        # tokens/s that would queue 40 coroutines/s onto the gateway loop, so
+        # rate-limit the cross-thread hop itself — the handler's own throttle
+        # only paces the edits, not the scheduling. final_update() always
+        # writes the complete text, so nothing is lost by dropping hops.
+        nonlocal last_stream_schedule
+        now = time.monotonic()
+        if not restart and now - last_stream_schedule < DISCORD_STREAM_MIN_INTERVAL:
+            return
+        last_stream_schedule = now
+        asyncio.run_coroutine_threadsafe(streaming_handler.update_text(accumulated), loop)
 
     def progress_callback(message: str):
         asyncio.run_coroutine_threadsafe(ctx.channel.send(message), loop)

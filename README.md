@@ -333,7 +333,7 @@ The identity cookie is HMAC-signed (so it can't be tampered to impersonate anoth
 
 | Feature | Notes |
 |---|---|
-| **Streaming responses** | Fritz's reply appears token-by-token via Server-Sent Events, with a blinking cursor while he writes. |
+| **Streaming responses** | Fritz's reply appears token-by-token via Server-Sent Events (delta frames), with a blinking cursor while he writes. A `reset` frame clears the bubble when he starts a fresh answer — e.g. after narrating, calling a tool, and beginning again. |
 | **Markdown rendering** | Code blocks, tables, lists, bold/italic all render. Markdown is finalised when the response completes. |
 | **Tool progress** | Ephemeral italic lines ("🔍 Searching the web…", "🧠 Looking through my memories…") show what Fritz is doing, then vanish when the answer lands. |
 | **Conversation history** | The page hydrates with your last 40 messages on load, so a refresh doesn't lose context. |
