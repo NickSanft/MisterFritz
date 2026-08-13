@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 import logging
@@ -8,15 +9,17 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bot_adapters import split_into_chunks
+from bot_adapters import run_blocking, split_into_chunks
 from cards import draw_cards, get_remaining_card_number, reload_deck
 from document_engine import query_documents
 import fritz_utils
 from fritz_utils import (
     FAST_OLLAMA_MODEL,
     FFMPEG_PATH,
+    IMAGE_GEN_MAX_CONCURRENCY,
     MessageSource,
     THINKING_OLLAMA_MODEL,
+    TTS_MAX_CONCURRENCY,
     __version__,
 )
 from image_generator import generate_image
@@ -106,6 +109,16 @@ class FritzCommands(commands.Cog):
         self.bot = bot
         self.sayer = sayer
         self.schedule_manager = schedule_manager
+        # Admission control for the GPU-bound commands. Waiters park on the
+        # event loop, NOT on a pool thread, so a queue of /gen requests can
+        # never starve the shared blocking pool of workers.
+        #
+        # Instance-level, not module-level, on purpose: asyncio primitives bind
+        # to the first loop that awaits them. A module-level semaphore would
+        # attach to whichever test's loop ran first, and in production would
+        # wedge /gen permanently after a gateway reconnect built a new loop.
+        self._image_semaphore = asyncio.Semaphore(IMAGE_GEN_MAX_CONCURRENCY)
+        self._tts_semaphore = asyncio.Semaphore(TTS_MAX_CONCURRENCY)
 
     # ── Scheduled tasks ───────────────────────────────────────────────────────
 
@@ -391,9 +404,23 @@ class FritzCommands(commands.Cog):
     @app_commands.describe(message="The text you want the bot to say")
     async def voice_slash(self, interaction: discord.Interaction, message: str):
         await interaction.response.defer(thinking=True)
-        METRICS.increment("discord_commands.voice")
-        original_response = ask_stuff(message, MessageSource.DISCORD_VOICE, interaction.user.name)["text"]
-        output_file = await self.sayer.generate_speech(original_response)
+        try:
+            with METRICS.time_block("discord_commands.voice"):
+                response_data = await run_blocking(
+                    ask_stuff, message, MessageSource.DISCORD_VOICE, interaction.user.name,
+                )
+                original_response = response_data["text"]
+                async with self._tts_semaphore:
+                    output_file = await run_blocking(
+                        self.sayer.generate_speech, original_response,
+                    )
+        except Exception as e:
+            # Previously absent: a failure in either call raised out of the
+            # handler, leaving the deferred interaction hanging with a spinner
+            # until Discord timed it out.
+            logger.exception("Voice synthesis failed for %s", interaction.user.name)
+            await interaction.followup.send(f"Failed to generate speech: {e}")
+            return
         try:
             if interaction.guild and interaction.guild.voice_client:
                 interaction.guild.voice_client.play(
@@ -413,10 +440,15 @@ class FritzCommands(commands.Cog):
     @app_commands.describe(prompt="The image description")
     async def gen_slash(self, interaction: discord.Interaction, prompt: str):
         await interaction.response.defer(thinking=True)
-        METRICS.increment("discord_commands.gen")
         logger.info("Image generation request: %s", prompt)
         try:
-            output_file = generate_image(prompt)
+            if self._image_semaphore.locked():
+                await interaction.followup.send(
+                    "\U0001f5bc️ Queued — another image is rendering."
+                )
+            with METRICS.time_block("discord_commands.gen"):
+                async with self._image_semaphore:
+                    output_file = await run_blocking(generate_image, prompt)
             await interaction.followup.send(content="Here is your file!", file=discord.File(output_file))
         except Exception as e:
             METRICS.record_error("discord_commands.gen", e)
@@ -426,9 +458,12 @@ class FritzCommands(commands.Cog):
     @app_commands.describe(query="The question about the lore")
     async def lore_slash(self, interaction: discord.Interaction, query: str):
         await interaction.response.defer(thinking=True)
-        METRICS.increment("discord_commands.lore")
         logger.info("Lore request: %s", query)
-        original_response = query_documents(query)
+        # The first call also triggers document_engine.initialize_vectorstore(),
+        # which walks DOC_FOLDER and ingests the whole corpus — unbounded
+        # first-call latency, previously on the event loop.
+        with METRICS.time_block("discord_commands.lore"):
+            original_response = await run_blocking(query_documents, query)
         author = interaction.user.name
         if len(original_response) > 2000:
             header = f"The answer was over 2000 ({len(original_response)}), so you're getting multiple messages {author} \r\n"

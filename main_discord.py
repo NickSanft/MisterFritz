@@ -8,7 +8,7 @@ import discord
 from discord.ext import commands
 
 from admin_panel import start_admin_panel
-from bot_adapters import split_into_chunks  # noqa: F401 — re-exported for tests
+from bot_adapters import run_blocking, split_into_chunks  # noqa: F401 — split_into_chunks re-exported for tests
 from bot_commands import FritzCommands
 from fritz_utils import (
     DISCORD_BOT_TOKEN,
@@ -108,10 +108,12 @@ schedule_manager = None
 @client.event
 async def on_ready():
     global sayer, schedule_manager
-    loop = asyncio.get_running_loop()
+    # No `loop` binding needed here any more — run_blocking gets its own.
+    # on_message still binds one, for run_coroutine_threadsafe in the
+    # streaming/progress callbacks; do not remove that one.
     if sayer is None:
         logger.info("Loading TTS engine...")
-        sayer = await loop.run_in_executor(None, TTSEngine)
+        sayer = await run_blocking(TTSEngine)
         logger.info("TTS engine ready")
     schedule_manager = ScheduleManager(client)
     schedule_manager.start()
@@ -207,16 +209,14 @@ async def on_message(ctx):
 
     try:
         start_time = time.time()
-        response_data = await loop.run_in_executor(
-            None,
-            lambda: ask_stuff(
-                message_clean, source, author,
-                progress_callback, streaming_callback,
-                user_image_paths,
-                workspace_store.get(author),
-                ctx.channel.id,
-                schedule_manager,
-            )
+        response_data = await run_blocking(
+            ask_stuff,
+            message_clean, source, author,
+            progress_callback, streaming_callback,
+            user_image_paths,
+            workspace_store.get(author),
+            ctx.channel.id,
+            schedule_manager,
         )
         METRICS.record_latency("ask_stuff", time.time() - start_time)
     except Exception as e:
@@ -259,8 +259,7 @@ async def on_message(ctx):
 
 async def speech_to_text(file_path: str) -> str | None:
     """Thin async wrapper around the Whisper STT module."""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _whisper_transcribe, file_path)
+    return await run_blocking(_whisper_transcribe, file_path)
 
 
 if __name__ == '__main__':

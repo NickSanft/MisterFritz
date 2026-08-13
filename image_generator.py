@@ -1,4 +1,5 @@
 import os
+import threading
 from datetime import datetime
 
 from diffusers import AutoPipelineForText2Image
@@ -16,42 +17,54 @@ if cuda_available:
     method = "cuda"
 # Global pipeline instance - loaded once and reused
 _pipeline = None
+# Guards both the lazy load and the generation itself.
+#
+# The lazy load is the sharper edge: two threads reaching `if _pipeline is None`
+# together would each pull ~7 GB of SDXL weights. That race is reachable TODAY,
+# before /gen was ever offloaded — generate_image is also an agent tool, and the
+# agent already runs in a worker thread, so two concurrent DMs can hit it.
+#
+# NOT re-entrant: get_pipeline() releases before generate_image re-takes. Do not
+# nest them.
+_PIPELINE_LOCK = threading.Lock()
+
 
 def get_pipeline():
     """Lazy load and return the global pipeline instance."""
     global _pipeline
-    if _pipeline is None:
-        print("Loading SDXL pipeline (first time only)...")
-        _pipeline = AutoPipelineForText2Image.from_pretrained(
-            "stabilityai/stable-diffusion-xl-base-1.0",
-            torch_dtype=dtype,
-            variant="fp16",
-            use_safetensors=True
-        ).to(method)
+    with _PIPELINE_LOCK:
+        if _pipeline is None:
+            print("Loading SDXL pipeline (first time only)...")
+            _pipeline = AutoPipelineForText2Image.from_pretrained(
+                "stabilityai/stable-diffusion-xl-base-1.0",
+                torch_dtype=dtype,
+                variant="fp16",
+                use_safetensors=True
+            ).to(method)
 
-        # Enable VAE slicing for better memory efficiency
-        _pipeline.enable_vae_slicing()
+            # Enable VAE slicing for better memory efficiency
+            _pipeline.enable_vae_slicing()
 
-        # Enable xformers if available for faster attention
-        try:
-            _pipeline.enable_xformers_memory_efficient_attention()
-            print("xformers enabled for faster attention")
-        except Exception:
-            print("xformers not available, using default attention")
+            # Enable xformers if available for faster attention
+            try:
+                _pipeline.enable_xformers_memory_efficient_attention()
+                print("xformers enabled for faster attention")
+            except Exception:
+                print("xformers not available, using default attention")
 
-        # Compile UNet for faster inference (PyTorch 2.0+)
-        # Note: torch.compile requires triton which doesn't work on Windows
-        # Skipping compilation to avoid runtime errors
-        # On Linux/Mac with triton installed, you can uncomment this block for 20-30% speedup
-        # try:
-        #     if hasattr(torch, 'compile') and method == "cuda":
-        #         print("Attempting to compile UNet model (one-time cost)...")
-        #         _pipeline.unet = torch.compile(_pipeline.unet, mode="default")
-        #         print("UNet compiled successfully")
-        # except Exception as e:
-        #     print(f"torch.compile failed: {type(e).__name__}")
+            # Compile UNet for faster inference (PyTorch 2.0+)
+            # Note: torch.compile requires triton which doesn't work on Windows
+            # Skipping compilation to avoid runtime errors
+            # On Linux/Mac with triton installed, you can uncomment this block for 20-30% speedup
+            # try:
+            #     if hasattr(torch, 'compile') and method == "cuda":
+            #         print("Attempting to compile UNet model (one-time cost)...")
+            #         _pipeline.unet = torch.compile(_pipeline.unet, mode="default")
+            #         print("UNet compiled successfully")
+            # except Exception as e:
+            #     print(f"torch.compile failed: {type(e).__name__}")
 
-    return _pipeline
+        return _pipeline
 
 def encode_prompt_xl(pipeline, prompt, negative_prompt=""):
     """Encode prompts for SDXL using both text encoders to bypass 77 token limit."""
@@ -181,23 +194,29 @@ def generate_image(prompt, negative_prompt="", num_inference_steps=25, guidance_
     Returns:
         Path to the saved image file
     """
-    # Get the cached pipeline instance
+    # Get the cached pipeline instance. Takes and RELEASES the lock — the
+    # lock is not re-entrant, so it must not still be held below.
     pipeline = get_pipeline()
 
-    # Encode the prompt to bypass 77 token limit
-    prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = encode_prompt_xl(
-        pipeline, prompt, negative_prompt
-    )
+    # Re-take for the inference itself: two concurrent CUDA graphs on one
+    # device thrash VRAM (or OOM) rather than finishing sooner. The cog's
+    # asyncio semaphore covers /gen; this also covers the agent-tool path,
+    # which has no semaphore.
+    with _PIPELINE_LOCK:
+        # Encode the prompt to bypass 77 token limit
+        prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = encode_prompt_xl(
+            pipeline, prompt, negative_prompt
+        )
 
-    # Generate the image using the prompt embeddings
-    image = pipeline(
-        prompt_embeds=prompt_embeds,
-        negative_prompt_embeds=negative_prompt_embeds,
-        pooled_prompt_embeds=pooled_prompt_embeds,
-        negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-        num_inference_steps=num_inference_steps,
-        guidance_scale=guidance_scale
-    ).images[0]
+        # Generate the image using the prompt embeddings
+        image = pipeline(
+            prompt_embeds=prompt_embeds,
+            negative_prompt_embeds=negative_prompt_embeds,
+            pooled_prompt_embeds=pooled_prompt_embeds,
+            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale
+        ).images[0]
     print("Image generation completed!")
     # Save or display the image
     os.makedirs(output_directory, exist_ok=True)

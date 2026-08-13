@@ -2,6 +2,7 @@ import hashlib
 import sys
 import logging
 import argparse
+import threading
 import torch
 from pathlib import Path
 from typing import Optional, List
@@ -40,6 +41,11 @@ class TTSEngine:
         # Ensure output directory exists
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
+        # Coqui's TTS object is not safe for concurrent inference on one
+        # instance. Callers now reach generate_speech from a worker-thread
+        # pool, so serialise here rather than trusting every caller to.
+        self._synth_lock = threading.Lock()
+
         logger.info(f"Initializing TTS on device: {self.device}")
         try:
             self.tts = TTS(self.model_name).to(self.device)
@@ -61,7 +67,7 @@ class TTSEngine:
             return self.tts.speakers
         return []
 
-    async def generate_speech(self,
+    def generate_speech(self,
                         message: str,
                         speaker: str = "Baldur Sanjin",
                         language: str = "en",
@@ -69,6 +75,12 @@ class TTSEngine:
                         force_regenerate: bool = False) -> str:
         """
         Generate audio from text.
+
+        Synchronous. This was declared `async def` while containing no `await`
+        at all, which meant awaiting it ran XTTS inference inline on the caller's
+        event loop — and left the CLI at the bottom of this file printing a
+        coroutine object instead of synthesising anything. Call it from a worker
+        thread (see bot_adapters.run_blocking).
 
         Args:
             message (str): Text to speak.
@@ -93,24 +105,25 @@ class TTSEngine:
 
         try:
             # XTTS specific logic for voice cloning vs standard speaker
-            if reference_wav:
-                logger.info(f"Cloning voice from: {reference_wav}")
-                self.tts.tts_to_file(
-                    text=message,
-                    file_path=str(output_path),
-                    speaker_wav=reference_wav,
-                    language=language,
-                    split_sentences=True
-                )
-            else:
-                logger.info(f"Using speaker: {speaker}")
-                self.tts.tts_to_file(
-                    text=message,
-                    file_path=str(output_path),
-                    speaker=speaker,
-                    language=language,
-                    split_sentences=True
-                )
+            with self._synth_lock:
+                if reference_wav:
+                    logger.info(f"Cloning voice from: {reference_wav}")
+                    self.tts.tts_to_file(
+                        text=message,
+                        file_path=str(output_path),
+                        speaker_wav=reference_wav,
+                        language=language,
+                        split_sentences=True
+                    )
+                else:
+                    logger.info(f"Using speaker: {speaker}")
+                    self.tts.tts_to_file(
+                        text=message,
+                        file_path=str(output_path),
+                        speaker=speaker,
+                        language=language,
+                        split_sentences=True
+                    )
 
             logger.info(f"Generation successful: {output_path}")
             return str(output_path)

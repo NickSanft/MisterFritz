@@ -8,6 +8,9 @@ Slash commands in discord.py are wrapped in an app_commands.Command descriptor,
 so we exercise the underlying callback (the .callback attribute) directly with
 a fake Interaction object. That sidesteps the need for a live Discord client.
 """
+import asyncio
+import threading
+import time
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
@@ -31,6 +34,17 @@ def _fake_interaction(username: str) -> MagicMock:
     interaction.guild_id = 67890
     interaction.response = MagicMock()
     interaction.response.send_message = AsyncMock()
+    # /voice, /gen and /lore defer first and answer via followup. Without these
+    # AsyncMocks `await interaction.response.defer(...)` raises TypeError against
+    # a bare MagicMock — which is precisely why those three commands had never
+    # been covered by a test.
+    interaction.response.defer = AsyncMock()
+    interaction.followup = MagicMock()
+    interaction.followup.send = AsyncMock()
+    interaction.channel = MagicMock()
+    interaction.channel.send = AsyncMock()
+    # Force the "not connected to a voice channel" branch of voice_slash.
+    interaction.guild = None
     return interaction
 
 
@@ -217,6 +231,143 @@ class TestWorkspaceSetAdminOnly(unittest.IsolatedAsyncioTestCase):
             await cog.workspace_set.callback(cog, interaction, path="/tmp/whatever")
         interaction.response.send_message.assert_called_once()
         set_mock.assert_not_called()
+
+
+class TestBlockingWorkIsOffloaded(unittest.IsolatedAsyncioTestCase):
+    """The three commands that used to run multi-second work directly on the
+    Discord event loop, freezing heartbeats and every other interaction."""
+
+    async def test_gen_runs_image_generation_off_the_loop(self):
+        loop_thread = threading.get_ident()
+        seen = {}
+
+        def fake_generate(prompt):
+            seen["thread"] = threading.get_ident()
+            return "out.png"
+
+        cog = _make_cog()
+        interaction = _fake_interaction("someone")
+        with unittest.mock.patch("bot_commands.generate_image", fake_generate), \
+             unittest.mock.patch("bot_commands.discord.File", MagicMock()):
+            await cog.gen_slash.callback(cog, interaction, prompt="a cat")
+        self.assertNotEqual(seen["thread"], loop_thread)
+
+    async def test_lore_runs_query_documents_off_the_loop(self):
+        loop_thread = threading.get_ident()
+        seen = {}
+
+        def fake_query(q):
+            seen["thread"] = threading.get_ident()
+            return "the answer"
+
+        cog = _make_cog()
+        interaction = _fake_interaction("someone")
+        with unittest.mock.patch("bot_commands.query_documents", fake_query):
+            await cog.lore_slash.callback(cog, interaction, query="what?")
+        self.assertNotEqual(seen["thread"], loop_thread)
+        interaction.followup.send.assert_awaited_once_with("the answer")
+
+    async def test_voice_runs_agent_and_tts_off_the_loop(self):
+        loop_thread = threading.get_ident()
+        seen = {}
+
+        def fake_ask(*a, **k):
+            seen["ask"] = threading.get_ident()
+            return {"text": "spoken words"}
+
+        def fake_speech(text):
+            seen["tts"] = threading.get_ident()
+            return "out.wav"
+
+        cog = _make_cog()
+        cog.sayer.generate_speech = fake_speech
+        interaction = _fake_interaction("someone")
+        with unittest.mock.patch("bot_commands.ask_stuff", fake_ask), \
+             unittest.mock.patch("bot_commands.discord.File", MagicMock()):
+            await cog.voice_slash.callback(cog, interaction, message="say this")
+        self.assertNotEqual(seen["ask"], loop_thread)
+        self.assertNotEqual(seen["tts"], loop_thread)
+
+    async def test_voice_answers_the_deferred_interaction_on_failure(self):
+        # Without the try/except a raised exception left the interaction
+        # spinning until Discord timed it out.
+        cog = _make_cog()
+        interaction = _fake_interaction("someone")
+
+        def boom(*a, **k):
+            raise RuntimeError("ollama down")
+
+        with unittest.mock.patch("bot_commands.ask_stuff", boom):
+            await cog.voice_slash.callback(cog, interaction, message="say this")
+        interaction.followup.send.assert_awaited_once()
+        self.assertIn("Failed to generate speech",
+                      interaction.followup.send.await_args.args[0])
+
+
+class TestGpuSerialisation(unittest.IsolatedAsyncioTestCase):
+    """SDXL and XTTS are serialised so newly-possible concurrency cannot
+    thrash or OOM the GPU."""
+
+    async def test_two_concurrent_gens_never_overlap(self):
+        peak = {"now": 0, "max": 0}
+        lock = threading.Lock()
+
+        def fake_generate(prompt):
+            with lock:
+                peak["now"] += 1
+                peak["max"] = max(peak["max"], peak["now"])
+            time.sleep(0.05)
+            with lock:
+                peak["now"] -= 1
+            return "out.png"
+
+        cog = _make_cog()
+        with unittest.mock.patch("bot_commands.generate_image", fake_generate), \
+             unittest.mock.patch("bot_commands.discord.File", MagicMock()):
+            await asyncio.gather(
+                cog.gen_slash.callback(cog, _fake_interaction("a"), prompt="one"),
+                cog.gen_slash.callback(cog, _fake_interaction("b"), prompt="two"),
+            )
+        self.assertEqual(peak["max"], 1)
+
+    async def test_the_queued_notice_is_sent_when_busy(self):
+        started = asyncio.Event()
+
+        def slow_generate(prompt):
+            time.sleep(0.1)
+            return "out.png"
+
+        cog = _make_cog()
+        first = _fake_interaction("a")
+        second = _fake_interaction("b")
+        with unittest.mock.patch("bot_commands.generate_image", slow_generate), \
+             unittest.mock.patch("bot_commands.discord.File", MagicMock()):
+            task = asyncio.create_task(
+                cog.gen_slash.callback(cog, first, prompt="one"))
+            # Let the first take the semaphore before the second checks it.
+            await asyncio.sleep(0.02)
+            started.set()
+            await cog.gen_slash.callback(cog, second, prompt="two")
+            await task
+        notices = [c.args[0] for c in second.followup.send.await_args_list if c.args]
+        self.assertTrue(any("Queued" in n for n in notices), notices)
+
+    async def test_semaphores_live_on_the_cog_instance(self):
+        # Module-level asyncio primitives bind to whichever loop first awaited
+        # them — which would wedge /gen after a gateway reconnect built a new
+        # loop, and make these tests order-dependent.
+        a, b = _make_cog(), _make_cog()
+        self.assertIsNot(a._image_semaphore, b._image_semaphore)
+        self.assertIsNot(a._tts_semaphore, b._tts_semaphore)
+
+    async def test_semaphores_are_sized_from_config(self):
+        # bot_commands imports the values by name at import time, so assert
+        # against the module's own binding rather than patching fritz_utils.
+        cog = _make_cog()
+        self.assertEqual(cog._image_semaphore._value,
+                         bot_commands.IMAGE_GEN_MAX_CONCURRENCY)
+        self.assertEqual(cog._tts_semaphore._value,
+                         bot_commands.TTS_MAX_CONCURRENCY)
 
 
 if __name__ == "__main__":
