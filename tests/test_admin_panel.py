@@ -1173,7 +1173,12 @@ class TestChatStreamError(unittest.TestCase):
         events = _parse_sse(r.text)
         errors = [d for ev, d in events if ev == "error"]
         self.assertEqual(len(errors), 1)
-        self.assertIn("ollama down", errors[0])
+        # The raw exception must NOT reach the browser — this assertion used to
+        # require the opposite, which is what the leak looked like in tests.
+        # The real message stays in the log and the audit entry.
+        self.assertNotIn("ollama down", errors[0])
+        self.assertIn("did not go to plan", errors[0])
+        self.assertRegex(errors[0], r"ref `[0-9a-f]{8}`")
         # No 'done' event when the agent failed.
         dones = [d for ev, d in events if ev == "done"]
         self.assertEqual(dones, [])

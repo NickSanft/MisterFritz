@@ -45,6 +45,8 @@ try:
 except ImportError:  # pragma: no cover — Pillow ships with the image extra
     _PILImage = None
 
+from bot_adapters import fritz_error
+
 import chat_auth
 import privacy
 import workspace_store
@@ -775,7 +777,11 @@ async def chat_stream(request: Request) -> Response:
             logger.exception("Chat stream failed for %s", user)
             audit_log("chat_message", user_id=user, chars=len(message),
                       result="error", error=str(e), streamed=True)
-            event_queue.put(("error", str(e)))
+            # Butler copy plus a log ref, not the raw exception. The web surface
+            # had the same leak the Discord one did — a WinError or a stack
+            # frame in the chat bubble is both poor and needlessly revealing.
+            # The real exception is already in the log and the audit entry.
+            event_queue.put(("error", fritz_error("chat_stream", e)))
         finally:
             event_queue.put(_CHAT_STREAM_DONE)
 
