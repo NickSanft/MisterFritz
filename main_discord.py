@@ -42,10 +42,36 @@ class StreamingMessageHandler:
         self.loop = loop
         self.min_update_interval = min_update_interval
         self.current_text = ""
+        # What was last actually sent to Discord, i.e. status + body. Tracked
+        # separately from current_text because the status can change while the
+        # body does not, and the dedup guard below must notice that.
+        self.current_rendered = ""
         self.last_update_time = 0
         self.update_task = None
         self.is_updating = False
         self.pending_text = None
+        # Tool/plan progress, rendered inside this same placeholder message
+        # rather than as separate permanent sends.
+        self.status_text: str | None = None
+
+    def _compose(self, body: str) -> str:
+        """Render the status line plus the streamed body, tail-windowed to fit.
+
+        The old `[:2000]` head-truncation froze the visible text the moment a
+        reply passed the cap — the user watched a stationary prefix while
+        tokens kept arriving. A tail window keeps the newest text on screen;
+        the complete reply is delivered by final_update's chunking.
+        """
+        head = f"{self.status_text}\n\n" if self.status_text else ""
+        room = 2000 - len(head)
+        if len(body) > room:
+            body = "…" + body[-(room - 1):]
+        return head + body
+
+    async def set_status(self, status: str | None):
+        """Show or clear the progress line inside the placeholder message."""
+        self.status_text = status
+        await self.update_text(self.pending_text or self.current_text)
 
     async def update_text(self, new_text: str):
         """Update the message with new text, respecting rate limits."""
@@ -57,13 +83,18 @@ class StreamingMessageHandler:
     async def _perform_update(self):
         """Perform the actual message edit with rate limiting."""
         while self.is_updating:
-            if self.pending_text and self.pending_text != self.current_text:
+            # Compare the COMPOSED output, not just the body: a new status line
+            # over unchanged text is still a change the user needs to see, and
+            # comparing bodies alone would silently swallow it.
+            rendered = self._compose(self.pending_text) if self.pending_text else None
+            if self.pending_text and rendered != self.current_rendered:
                 time_since_last = time.time() - self.last_update_time
                 if time_since_last < self.min_update_interval:
                     await asyncio.sleep(self.min_update_interval - time_since_last)
                 try:
-                    await self.message.edit(content=self.pending_text[:2000])
+                    await self.message.edit(content=rendered)
                     self.current_text = self.pending_text
+                    self.current_rendered = rendered
                     self.last_update_time = time.time()
                     self.pending_text = None
                 except discord.errors.HTTPException as e:
@@ -73,11 +104,20 @@ class StreamingMessageHandler:
                 self.is_updating = False
 
     async def final_update(self, final_text: str, files: list = None):
-        """Perform the final update with complete text and optional file attachments."""
+        """Deliver the complete reply: the placeholder gets chunk 1, the rest follow.
+
+        Chunking lives here rather than in on_message, which used to re-chunk
+        the same text a second time with its own copy of the logic.
+        """
         while self.is_updating:
             await asyncio.sleep(0.1)
+        # The progress line disappears along with the reply it described.
+        self.status_text = None
+        chunks = split_into_chunks(final_text) or [final_text]
         try:
-            await self.message.edit(content=final_text[:2000])
+            await self.message.edit(content=chunks[0])
+            for chunk in chunks[1:]:
+                await self.message.channel.send(chunk)
             if files:
                 await self.message.channel.send(files=files)
         except discord.errors.HTTPException as e:
@@ -217,7 +257,11 @@ async def on_message(ctx):
         asyncio.run_coroutine_threadsafe(streaming_handler.update_text(accumulated), loop)
 
     def progress_callback(message: str):
-        asyncio.run_coroutine_threadsafe(ctx.channel.send(message), loop)
+        # Was ctx.channel.send: a permanent, un-deleteable message per tool
+        # notice — and because these are scheduled onto the loop from a worker
+        # thread, they could land BELOW the placeholder they were describing.
+        # Now they render inside it and vanish with the reply.
+        asyncio.run_coroutine_threadsafe(streaming_handler.set_status(message), loop)
 
     try:
         start_time = time.time()
@@ -256,16 +300,8 @@ async def on_message(ctx):
             METRICS.record_error("image_load", e)
             logger.warning("Error loading image file %s: %s", image_path, e)
 
-    if len(original_response) > 2000:
-        chunks = split_into_chunks(original_response)
-        for i, chunk in enumerate(chunks):
-            chunk_files = files if i == 0 else []
-            if i == 0:
-                await streaming_handler.final_update(chunk, chunk_files)
-            else:
-                await ctx.channel.send(chunk, files=chunk_files)
-    else:
-        await streaming_handler.final_update(original_response, files)
+    # final_update owns chunking now; this used to duplicate that logic.
+    await streaming_handler.final_update(original_response, files)
 
     _cleanup_temp_files(user_image_paths + temp_audio_paths, request_id)
 

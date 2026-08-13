@@ -110,5 +110,99 @@ class TestStreamingMessageHandler(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(elapsed, 0.04)
 
 
+class TestStatusLine(unittest.IsolatedAsyncioTestCase):
+    """Progress renders inside the placeholder message. It used to be a
+    separate permanent ctx.channel.send per tool notice, which could land
+    below the very placeholder it was describing."""
+
+    def _make_handler(self):
+        msg = MagicMock()
+        msg.edit = AsyncMock()
+        msg.channel = MagicMock()
+        msg.channel.send = AsyncMock()
+        return StreamingMessageHandler(msg, asyncio.get_event_loop(),
+                                       min_update_interval=0.0), msg
+
+    async def test_status_appears_above_the_body(self):
+        handler, msg = self._make_handler()
+        await handler.update_text("the reply so far")
+        await handler.set_status("🔍 Searching the web…")
+        content = msg.edit.call_args.kwargs["content"]
+        self.assertTrue(content.startswith("🔍 Searching the web…"))
+        self.assertIn("the reply so far", content)
+
+    async def test_clearing_the_status_removes_it(self):
+        handler, msg = self._make_handler()
+        await handler.update_text("body")
+        await handler.set_status("working…")
+        await handler.set_status(None)
+        self.assertEqual(msg.edit.call_args.kwargs["content"], "body")
+
+    async def test_composed_output_never_exceeds_the_cap(self):
+        handler, _msg = self._make_handler()
+        handler.status_text = "a status line of some length"
+        composed = handler._compose("x" * 5000)
+        self.assertLessEqual(len(composed), 2000)
+
+    async def test_long_body_keeps_the_TAIL_not_the_head(self):
+        # The old [:2000] froze the visible text once a reply passed the cap —
+        # the user watched a stationary prefix while tokens kept arriving.
+        handler, _msg = self._make_handler()
+        body = "START" + ("x" * 3000) + "NEWEST"
+        composed = handler._compose(body)
+        self.assertTrue(composed.endswith("NEWEST"))
+        self.assertNotIn("START", composed)
+        self.assertTrue(composed.startswith("…"))
+
+    async def test_final_update_clears_the_status_line(self):
+        handler, msg = self._make_handler()
+        handler.status_text = "still working…"
+        await handler.final_update("the finished reply")
+        self.assertIsNone(handler.status_text)
+        self.assertEqual(msg.edit.call_args.kwargs["content"], "the finished reply")
+
+
+class TestFinalUpdateChunking(unittest.IsolatedAsyncioTestCase):
+    """final_update owns chunking; on_message used to duplicate the logic."""
+
+    def _make_handler(self):
+        msg = MagicMock()
+        msg.edit = AsyncMock()
+        msg.channel = MagicMock()
+        msg.channel.send = AsyncMock()
+        return StreamingMessageHandler(msg, asyncio.get_event_loop(),
+                                       min_update_interval=0.0), msg
+
+    async def test_long_reply_is_chunked_across_messages(self):
+        handler, msg = self._make_handler()
+        await handler.final_update("word " * 900)      # ~4500 chars
+        self.assertGreaterEqual(msg.channel.send.await_count, 1)
+        first = msg.edit.call_args.kwargs["content"]
+        self.assertLessEqual(len(first), 2000)
+
+    async def test_every_chunk_fits_the_cap(self):
+        handler, msg = self._make_handler()
+        await handler.final_update("word " * 1500)
+        sent = [msg.edit.call_args.kwargs["content"]]
+        sent += [c.args[0] for c in msg.channel.send.await_args_list if c.args]
+        for chunk in sent:
+            with self.subTest(n=len(chunk)):
+                self.assertLessEqual(len(chunk), 2000)
+
+    async def test_no_text_is_lost_across_the_chunks(self):
+        handler, msg = self._make_handler()
+        marker = "UNIQUE_TAIL_MARKER"
+        await handler.final_update(("word " * 900) + marker)
+        sent = [msg.edit.call_args.kwargs["content"]]
+        sent += [c.args[0] for c in msg.channel.send.await_args_list if c.args]
+        self.assertIn(marker, "".join(sent))
+
+    async def test_files_still_follow_the_text(self):
+        handler, msg = self._make_handler()
+        await handler.final_update("word " * 900, files=[MagicMock()])
+        self.assertTrue(any(
+            "files" in c.kwargs for c in msg.channel.send.await_args_list))
+
+
 if __name__ == "__main__":
     unittest.main()
