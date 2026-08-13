@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bot_adapters import run_blocking, split_into_chunks
+from bot_adapters import fritz_error, run_blocking, split_into_chunks
 from cards import draw_cards, get_remaining_card_number, reload_deck
 from document_engine import query_documents
 import fritz_utils
@@ -24,12 +24,60 @@ from fritz_utils import (
 )
 from image_generator import generate_image
 from mister_fritz import ask_stuff
-from observability import METRICS, audit_log, format_health_text, get_health_snapshot
+from observability import METRICS, audit_log, get_health_snapshot
 import privacy
 from tts import TTSEngine
 import workspace_store
 
 logger = logging.getLogger(__name__)
+
+# Matches --accent in admin_templates/_theme_admin.html so the Discord and web
+# surfaces share one brand colour.
+FRITZ_COLOUR = discord.Colour(0x5B3F30)
+
+
+async def _reply_error(interaction: discord.Interaction, operation: str,
+                       exc: BaseException | None = None, *,
+                       note: str | None = None) -> None:
+    """Send butler-voiced failure copy ephemerally, whichever response stage
+    the interaction is in.
+
+    A command that has already deferred must answer via followup; one that has
+    not must answer via response. Getting it wrong raises, which is how a
+    failure handler ends up compounding the failure.
+    """
+    text = fritz_error(operation, exc, note=note)
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(text, ephemeral=True)
+        else:
+            await interaction.response.send_message(text, ephemeral=True)
+    except discord.HTTPException:
+        logger.warning("Could not deliver error reply for %s", operation)
+
+
+async def handle_app_command_error(interaction: discord.Interaction,
+                                   error: app_commands.AppCommandError) -> None:
+    """Single entry point for cog_app_command_error and tree.on_error.
+
+    Without this, an out-of-range argument or any uncaught exception left the
+    user staring at a spinner until Discord timed the interaction out.
+    """
+    original = getattr(error, "original", error)
+    name = interaction.command.qualified_name if interaction.command else "unknown"
+    if isinstance(error, app_commands.CheckFailure):
+        await _reply_error(interaction, f"app_command.{name}", None,
+                           note="That command is not available to you. One does have standards.")
+        return
+    if isinstance(error, app_commands.TransformerError):
+        await _reply_error(interaction, f"app_command.{name}", None,
+                           note="That value is outside the permitted range. Do try one I can work with.")
+        return
+    if isinstance(original, discord.HTTPException):
+        await _reply_error(interaction, f"app_command.{name}", original,
+                           note="Discord declined to carry that message. It was, I suspect, too long.")
+        return
+    await _reply_error(interaction, f"app_command.{name}", original)
 
 
 def _format_uptime(seconds: int) -> str:
@@ -120,6 +168,11 @@ class FritzCommands(commands.Cog):
         self._image_semaphore = asyncio.Semaphore(IMAGE_GEN_MAX_CONCURRENCY)
         self._tts_semaphore = asyncio.Semaphore(TTS_MAX_CONCURRENCY)
 
+    async def cog_app_command_error(self, interaction: discord.Interaction,
+                                    error: app_commands.AppCommandError) -> None:
+        """discord.py dispatches every failure from a command in this cog here."""
+        await handle_app_command_error(interaction, error)
+
     # ── Scheduled tasks ───────────────────────────────────────────────────────
 
     schedule = app_commands.Group(name="schedule", description="Manage scheduled Fritz tasks")
@@ -161,8 +214,7 @@ class FritzCommands(commands.Cog):
         except ValueError as e:
             await interaction.response.send_message(f"❌ {e}", ephemeral=True)
         except Exception as e:
-            logger.exception("Failed to add schedule for %s", interaction.user.name)
-            await interaction.response.send_message(f"❌ Failed to create schedule: {e}", ephemeral=True)
+            await _reply_error(interaction, "discord_commands.schedule_add", e)
 
     @schedule.command(name="list", description="List your active scheduled tasks")
     async def schedule_list(self, interaction: discord.Interaction):
@@ -176,11 +228,17 @@ class FritzCommands(commands.Cog):
                 "You have no scheduled tasks. Use `/schedule add` to create one.", ephemeral=True
             )
             return
-        lines = ["**Your scheduled tasks:**"]
-        for s in schedules:
+        embed = discord.Embed(title="Your scheduled tasks", colour=FRITZ_COLOUR)
+        for s in schedules[:25]:          # Discord caps an embed at 25 fields
             label = f" — {s['description']}" if s["description"] else ""
-            lines.append(f"`{s['id']}` every `{s['schedule']}`{label}\n  _{s['prompt']}_")
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+            embed.add_field(
+                name=f"`{s['id']}` · every `{s['schedule']}`{label}",
+                value=s["prompt"][:1024],  # per-field value cap
+                inline=False,
+            )
+        if len(schedules) > 25:
+            embed.set_footer(text=f"Showing 25 of {len(schedules)}.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @schedule.command(name="remove", description="Remove a scheduled task by its ID")
     @app_commands.describe(schedule_id="The schedule ID shown in /schedule list")
@@ -202,8 +260,7 @@ class FritzCommands(commands.Cog):
         except PermissionError as e:
             await interaction.response.send_message(f"❌ {e}", ephemeral=True)
         except Exception as e:
-            logger.exception("Failed to remove schedule %s", schedule_id)
-            await interaction.response.send_message(f"❌ Failed to remove schedule: {e}", ephemeral=True)
+            await _reply_error(interaction, "discord_commands.schedule_remove", e)
 
     @schedule.command(name="list_all", description="(Admin) List scheduled tasks across all users")
     async def schedule_list_all(self, interaction: discord.Interaction):
@@ -314,11 +371,18 @@ class FritzCommands(commands.Cog):
 
     # ── Card game ─────────────────────────────────────────────────────────────
 
-    @app_commands.command(name="draw", description="Draw cards from a deck!")
-    @app_commands.describe(num_cards="How many cards to draw")
-    async def draw_slash(self, interaction: discord.Interaction, num_cards: int):
+    @app_commands.command(name="draw", description="Draw cards from a deck")
+    @app_commands.describe(num_cards="How many cards to draw (1-40)")
+    async def draw_slash(self, interaction: discord.Interaction,
+                         num_cards: app_commands.Range[int, 1, 40]):
+        # Unbounded before: ~48 cards crosses Discord's 2000-char cap and
+        # followup.send raised an uncaught HTTPException, so the user saw only
+        # a spinner. Range rejects it up front; the chunking below is belt and
+        # braces, and keeps the trailing ``` summary block intact when it does
+        # need to split.
         await interaction.response.defer(thinking=True)
-        await interaction.followup.send(content=draw_cards(num_cards, interaction.user.name))
+        for chunk in split_into_chunks(draw_cards(num_cards, interaction.user.name)):
+            await interaction.followup.send(content=chunk)
 
     @app_commands.command(name="cards_remaining", description="Check cards remaining in the deck")
     async def cards_remaining_slash(self, interaction: discord.Interaction):
@@ -340,63 +404,84 @@ class FritzCommands(commands.Cog):
     @app_commands.command(name="health", description="Check the system health metrics")
     async def health_slash(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.health")
-        await interaction.response.send_message(format_health_text(get_health_snapshot()))
+        snap = get_health_snapshot()
+        total_errors = sum(snap["errors"].values()) if snap["errors"] else 0
+        embed = discord.Embed(title="Mister Fritz — status", colour=FRITZ_COLOUR)
+        embed.add_field(name="Uptime",
+                        value=_format_uptime(int(snap["uptime_sec"])), inline=True)
+        embed.add_field(name="Messages",
+                        value=str(snap["counters"].get("discord_messages", 0)), inline=True)
+        embed.add_field(name="Errors", value=str(total_errors), inline=True)
+        if snap["latencies"]:
+            lat = "\n".join(
+                f"{n}: {s['avg_sec']:.2f}s (n={s['count']})"
+                for n, s in snap["latencies"].items()
+            )
+            embed.add_field(name="Latency", value=lat[:1024], inline=False)
+        if snap["last_error"]:
+            # Name only — the message could carry a path or a token.
+            name, _ts, _msg = snap["last_error"]
+            embed.set_footer(text=f"Last error: {name}")
+        # Ephemeral now: this was the one interaction reply in the file that
+        # posted metrics into channel history for everyone to read.
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="help", description="Show what Mister Fritz can do")
     async def help_slash(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.help")
-        body = (
-            "**How to talk to me**\n"
-            "• DM me, or `@mention` me in a channel — I run the full agent.\n"
-            "• Attach an image and I will analyse it.\n"
-            "• Send a voice message and I will transcribe it.\n"
-            "\n"
-            "**Conversation tools I have access to**\n"
+        embed = discord.Embed(
+            title="Mister Fritz — at your service",
+            description="DM me, or `@mention` me in a channel, and I shall run the full agent.",
+            colour=FRITZ_COLOUR,
+        )
+        embed.add_field(name="How to talk to me", value=(
+            "• DM or `@mention` — the full agent\n"
+            "• Attach an image and I shall analyse it\n"
+            "• Send a voice message and I shall transcribe it"
+        ), inline=False)
+        embed.add_field(name="Tools at my disposal", value=(
             "• Web search and page scraping\n"
-            "• Local document RAG (drop files in the `input/` folder)\n"
-            "• Per-user persistent memory of past chats\n"
-            "• Image generation (Stable Diffusion XL)\n"
-            "• Image analysis (LLaVA vision model)\n"
-            "• Dice rolls, current time, scheduled reminders\n"
-            "\n"
-            "**Slash commands**\n"
-            "• `/lore <query>` — search local RAG documents\n"
+            "• Local document RAG (drop files in `input/`)\n"
+            "• Per-user memory of past conversations\n"
+            "• Image generation and analysis\n"
+            "• Dice, the time, and scheduled reminders"
+        ), inline=False)
+        embed.add_field(name="Slash commands", value=(
+            "• `/lore <query>` — search local documents\n"
             "• `/gen <prompt>` — generate an image\n"
             "• `/voice <message>` — synthesise speech\n"
-            "• `/join` / `/leave` — voice channel control\n"
-            "• `/draw <n>`, `/cards_remaining`, `/reload_deck` — card game\n"
-            "• `/schedule add|list|remove` — recurring scheduled prompts\n"
-            "• `/health`, `/about` — system info\n"
-            "• `/workspace <path>` — (admin) set the file-tools workspace\n"
-            "\n"
-            "Run `/about` for version and storage info."
-        )
-        await interaction.response.send_message(body, ephemeral=True)
+            "• `/join` · `/leave` — voice channel\n"
+            "• `/draw <n>` · `/cards_remaining` · `/reload_deck`\n"
+            "• `/schedule add|list|remove`\n"
+            "• `/health` · `/about`\n"
+            "• `/workspace <path>` — admin only"
+        ), inline=False)
+        embed.set_footer(text="Run /about for version and storage details.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="about", description="Show version, models, and data storage info")
     async def about_slash(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.about")
         snap = get_health_snapshot()
-        uptime_s = int(snap.get("uptime_seconds", 0))
-        uptime = _format_uptime(uptime_s)
-        body = (
-            f"**Mister Fritz v{__version__}**\n"
-            f"_An AI butler of impeccable bearing and barely-concealed weariness._\n"
-            "\n"
-            f"**Models**\n"
-            f"• Thinking: `{THINKING_OLLAMA_MODEL}`\n"
-            f"• Fast: `{FAST_OLLAMA_MODEL}`\n"
-            "\n"
-            f"**Uptime:** {uptime}\n"
-            "\n"
-            "**Data storage**\n"
-            "All conversation summaries, memories, and schedules are stored "
-            "locally on this server — nothing leaves the host. Documents you "
-            "drop in the `input/` folder are indexed into a local ChromaDB.\n"
-            "\n"
-            "Source: https://github.com/NickSanft/MisterFritz"
+        # BUG FIX: the key is "uptime_sec" (observability.py), not
+        # "uptime_seconds". The .get default silently swallowed the miss, so
+        # /about reported "0s" on every single invocation.
+        uptime = _format_uptime(int(snap.get("uptime_sec", 0)))
+        embed = discord.Embed(
+            title=f"Mister Fritz v{__version__}",
+            description="_An AI butler of impeccable bearing and barely-concealed weariness._",
+            colour=FRITZ_COLOUR,
+            url="https://github.com/NickSanft/MisterFritz",
         )
-        await interaction.response.send_message(body, ephemeral=True)
+        embed.add_field(name="Thinking model", value=f"`{THINKING_OLLAMA_MODEL}`", inline=True)
+        embed.add_field(name="Fast model", value=f"`{FAST_OLLAMA_MODEL}`", inline=True)
+        embed.add_field(name="Uptime", value=uptime, inline=True)
+        embed.add_field(name="Data storage", value=(
+            "Conversation summaries, memories, and schedules live on this host "
+            "and nowhere else. Documents dropped in `input/` are indexed into a "
+            "local ChromaDB."
+        ), inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ── AI / content ──────────────────────────────────────────────────────────
 
@@ -418,8 +503,7 @@ class FritzCommands(commands.Cog):
             # Previously absent: a failure in either call raised out of the
             # handler, leaving the deferred interaction hanging with a spinner
             # until Discord timed it out.
-            logger.exception("Voice synthesis failed for %s", interaction.user.name)
-            await interaction.followup.send(f"Failed to generate speech: {e}")
+            await _reply_error(interaction, "discord_commands.voice", e)
             return
         try:
             if interaction.guild and interaction.guild.voice_client:
@@ -433,8 +517,7 @@ class FritzCommands(commands.Cog):
                     files=[discord.File(output_file)],
                 )
         except AttributeError as e:
-            METRICS.record_error("discord_commands.voice", e)
-            await interaction.followup.send("Something crazy happened!")
+            await _reply_error(interaction, "discord_commands.voice", e)
 
     @app_commands.command(name="gen", description="Generate an image based on a prompt")
     @app_commands.describe(prompt="The image description")
@@ -451,8 +534,7 @@ class FritzCommands(commands.Cog):
                     output_file = await run_blocking(generate_image, prompt)
             await interaction.followup.send(content="Here is your file!", file=discord.File(output_file))
         except Exception as e:
-            METRICS.record_error("discord_commands.gen", e)
-            await interaction.followup.send(f"Failed to generate image: {e}")
+            await _reply_error(interaction, "discord_commands.gen", e)
 
     @app_commands.command(name="lore", description="Query the document engine for lore")
     @app_commands.describe(query="The question about the lore")
@@ -464,17 +546,12 @@ class FritzCommands(commands.Cog):
         # first-call latency, previously on the event loop.
         with METRICS.time_block("discord_commands.lore"):
             original_response = await run_blocking(query_documents, query)
-        author = interaction.user.name
-        if len(original_response) > 2000:
-            header = f"The answer was over 2000 ({len(original_response)}), so you're getting multiple messages {author} \r\n"
-            chunks = split_into_chunks(header + original_response)
-            for i, chunk in enumerate(chunks):
-                if i == 0:
-                    await interaction.followup.send(chunk)
-                else:
-                    await interaction.channel.send(chunk)
-        else:
-            await interaction.followup.send(original_response)
+        # Continuations go through followup, not channel.send: the latter posts
+        # detached messages that can interleave with other traffic. The old
+        # "The answer was over 2000 …" header announced an implementation
+        # detail nobody asked about.
+        for chunk in split_into_chunks(original_response):
+            await interaction.followup.send(chunk)
 
     # ── Voice channel ─────────────────────────────────────────────────────────
 
@@ -488,12 +565,12 @@ class FritzCommands(commands.Cog):
                 await interaction.response.send_message(f"Joined {channel.name}!")
             else:
                 await interaction.response.send_message(
-                    "You are not connected to a voice channel, buddy!", ephemeral=True
+                    "You are not in a voice channel, sir. I cannot join you "
+                    "somewhere you are not.", ephemeral=True
                 )
         except Exception as e:
-            METRICS.record_error("discord_commands.join", e)
-            if not interaction.response.is_done():
-                await interaction.response.send_message("I couldn't join the channel.")
+            await _reply_error(interaction, "discord_commands.join", e,
+                               note="The channel declined my company. It happens.")
 
     @app_commands.command(name="leave", description="Leave the current voice channel")
     async def leave_slash(self, interaction: discord.Interaction):
@@ -504,11 +581,12 @@ class FritzCommands(commands.Cog):
                 await interaction.response.send_message("Disconnected.")
             else:
                 await interaction.response.send_message(
-                    "I am not connected to a voice channel, buddy!", ephemeral=True
+                    "I am not in a voice channel. One cannot leave a room one "
+                    "was never in.", ephemeral=True
                 )
         except Exception as e:
-            METRICS.record_error("discord_commands.leave", e)
-            await interaction.response.send_message("Error attempting to leave.")
+            await _reply_error(interaction, "discord_commands.leave", e,
+                               note="I appear to be stuck. How undignified.")
 
     # ── File workspace ────────────────────────────────────────────────────────
 
@@ -539,10 +617,7 @@ class FritzCommands(commands.Cog):
         try:
             path = workspace_store.enable_sandboxed(author)
         except Exception as e:
-            logger.exception("Failed to enable workspace for %s", author)
-            await interaction.response.send_message(
-                f"❌ Could not create workspace: {e}", ephemeral=True
-            )
+            await _reply_error(interaction, "discord_commands.workspace_enable", e)
             return
         await interaction.response.send_message(
             f"✅ Workspace ready at `{path}`.\n"

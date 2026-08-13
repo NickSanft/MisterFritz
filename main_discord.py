@@ -8,8 +8,8 @@ import discord
 from discord.ext import commands
 
 from admin_panel import start_admin_panel
-from bot_adapters import run_blocking, split_into_chunks  # noqa: F401 — split_into_chunks re-exported for tests
-from bot_commands import FritzCommands
+from bot_adapters import fritz_error, run_blocking, split_into_chunks  # noqa: F401 — split_into_chunks re-exported for tests
+from bot_commands import FritzCommands, handle_app_command_error
 from fritz_utils import (
     DISCORD_BOT_TOKEN,
     DISCORD_STREAM_MIN_INTERVAL,
@@ -126,6 +126,9 @@ async def on_ready():
         keep_alive=OLLAMA_KEEP_ALIVE,
     )
     await client.add_cog(FritzCommands(client, sayer, schedule_manager))
+    # Backstop for app-command failures raised OUTSIDE the cog (e.g. a stale
+    # sync producing CommandNotFound), which the cog hook never sees.
+    client.tree.on_error = handle_app_command_error
     logger.info("Logged in as %s", client.user)
     try:
         synced = await client.tree.sync()
@@ -154,6 +157,7 @@ async def on_message(ctx):
     loop = asyncio.get_running_loop()
 
     user_image_paths = []
+    temp_audio_paths = []          # tracked so they can be cleaned up
     source = MessageSource.DISCORD_TEXT
     if ctx.attachments:
         logger.info("Processing %d attachment(s) for %s", len(ctx.attachments), request_id)
@@ -170,14 +174,22 @@ async def on_message(ctx):
                     METRICS.record_error("attachment_save", e)
                     logger.warning("Error saving image attachment: %s", e)
             elif attachment.content_type and attachment.content_type.startswith('audio/'):
-                os.makedirs("temp_audio", exist_ok=True)
-                file_path = os.path.join("temp_audio", f"{author}_{attachment.id}_{attachment.filename}")
-                await attachment.save(file_path)
-                logger.info("Saved audio %s for %s", file_path, request_id)
-                voice_text = await speech_to_text(file_path)
-                if not message_clean:
-                    message_clean = voice_text
-                logger.info("Voice text: %s", voice_text)
+                # The image branch above already had this try/except; without
+                # it a save or transcription failure escaped on_message
+                # entirely and the user got no reply at all.
+                try:
+                    os.makedirs("temp_audio", exist_ok=True)
+                    file_path = os.path.join("temp_audio", f"{author}_{attachment.id}_{attachment.filename}")
+                    await attachment.save(file_path)
+                    temp_audio_paths.append(file_path)
+                    logger.info("Saved audio %s for %s", file_path, request_id)
+                    voice_text = await speech_to_text(file_path)
+                    if not message_clean:
+                        message_clean = voice_text
+                    logger.info("Voice text: %s", voice_text)
+                except Exception as e:
+                    METRICS.record_error("attachment_audio", e)
+                    logger.warning("Error handling audio attachment: %s", e)
 
     if user_image_paths:
         status_msg = await ctx.channel.send(f"✍️ *Analyzing {len(user_image_paths)} image(s)...*")
@@ -220,16 +232,17 @@ async def on_message(ctx):
         )
         METRICS.record_latency("ask_stuff", time.time() - start_time)
     except Exception as e:
-        METRICS.record_error("ask_stuff", e)
-        logger.exception("Error during ask_stuff for %s", request_id)
-        await status_msg.edit(content=f"❌ An error occurred: {str(e)}")
-        _cleanup_temp_files(user_image_paths, request_id)
+        await status_msg.edit(content=fritz_error("ask_stuff", e))
+        _cleanup_temp_files(user_image_paths + temp_audio_paths, request_id)
         return
 
     logger.debug("Response data for %s: %s", request_id, response_data)
 
     if not response_data or not response_data.get("text"):
-        original_response = "The bot got sad and doesn't want to talk to you at the moment :("
+        original_response = (
+            "I find I have nothing whatsoever to say on the matter. "
+            "A rare occurrence, and not one I intend to dwell upon. Do try again."
+        )
         image_paths = []
     else:
         original_response = response_data["text"]
@@ -254,7 +267,7 @@ async def on_message(ctx):
     else:
         await streaming_handler.final_update(original_response, files)
 
-    _cleanup_temp_files(user_image_paths, request_id)
+    _cleanup_temp_files(user_image_paths + temp_audio_paths, request_id)
 
 
 async def speech_to_text(file_path: str) -> str | None:

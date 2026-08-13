@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 # bot_commands pulls in mister_fritz → agent_tools → ddgs, plus document_engine
 # / image_generator / tts. All are stubbed in tests/conftest.py.
 
+import discord  # noqa: E402
 import fritz_utils  # noqa: E402
 import bot_commands  # noqa: E402
 from bot_commands import FritzCommands, _require_admin  # noqa: E402
@@ -297,11 +298,14 @@ class TestBlockingWorkIsOffloaded(unittest.IsolatedAsyncioTestCase):
         def boom(*a, **k):
             raise RuntimeError("ollama down")
 
+        interaction.response.is_done = MagicMock(return_value=True)
         with unittest.mock.patch("bot_commands.ask_stuff", boom):
             await cog.voice_slash.callback(cog, interaction, message="say this")
         interaction.followup.send.assert_awaited_once()
-        self.assertIn("Failed to generate speech",
-                      interaction.followup.send.await_args.args[0])
+        sent = interaction.followup.send.await_args.args[0]
+        # Butler copy plus a log ref — the exception itself stays in the log.
+        self.assertNotIn("ollama down", sent)
+        self.assertIn("did not go to plan", sent)
 
 
 class TestGpuSerialisation(unittest.IsolatedAsyncioTestCase):
@@ -368,6 +372,164 @@ class TestGpuSerialisation(unittest.IsolatedAsyncioTestCase):
                          bot_commands.IMAGE_GEN_MAX_CONCURRENCY)
         self.assertEqual(cog._tts_semaphore._value,
                          bot_commands.TTS_MAX_CONCURRENCY)
+
+
+class TestAppCommandErrorHandler(unittest.IsolatedAsyncioTestCase):
+    """Before this existed, an out-of-range argument or any uncaught exception
+    left the user staring at a spinner until Discord timed the interaction out."""
+
+    def _interaction(self, *, done=False):
+        interaction = _fake_interaction("someone")
+        interaction.response.is_done = MagicMock(return_value=done)
+        interaction.command = MagicMock()
+        interaction.command.qualified_name = "gen"
+        return interaction
+
+    async def test_invoke_error_replies_without_leaking_the_exception(self):
+        interaction = self._interaction()
+        err = discord.app_commands.CommandInvokeError(
+            interaction.command, RuntimeError("secret internal detail"))
+        await bot_commands.handle_app_command_error(interaction, err)
+        interaction.response.send_message.assert_awaited_once()
+        sent = interaction.response.send_message.await_args.args[0]
+        self.assertNotIn("secret internal detail", sent)
+        self.assertIn("did not go to plan", sent)
+
+    async def test_reply_is_ephemeral(self):
+        interaction = self._interaction()
+        err = discord.app_commands.CommandInvokeError(
+            interaction.command, RuntimeError("x"))
+        await bot_commands.handle_app_command_error(interaction, err)
+        self.assertTrue(
+            interaction.response.send_message.await_args.kwargs.get("ephemeral"))
+
+    async def test_uses_followup_when_already_deferred(self):
+        # A command that has deferred must answer via followup; using response
+        # would raise and compound the original failure.
+        interaction = self._interaction(done=True)
+        err = discord.app_commands.CommandInvokeError(
+            interaction.command, RuntimeError("x"))
+        await bot_commands.handle_app_command_error(interaction, err)
+        interaction.followup.send.assert_awaited_once()
+        interaction.response.send_message.assert_not_awaited()
+
+    async def test_check_failure_gets_its_own_copy(self):
+        interaction = self._interaction()
+        await bot_commands.handle_app_command_error(
+            interaction, discord.app_commands.CheckFailure("nope"))
+        sent = interaction.response.send_message.await_args.args[0]
+        self.assertIn("not available to you", sent)
+
+    async def test_cog_hook_delegates_to_the_shared_handler(self):
+        cog = _make_cog()
+        interaction = self._interaction()
+        err = discord.app_commands.CommandInvokeError(
+            interaction.command, RuntimeError("x"))
+        await cog.cog_app_command_error(interaction, err)
+        interaction.response.send_message.assert_awaited_once()
+
+
+class TestEmbedsAndBounds(unittest.IsolatedAsyncioTestCase):
+    async def test_health_is_ephemeral_and_an_embed(self):
+        # Was public: metrics went into channel history for everyone to read.
+        cog = _make_cog()
+        interaction = _fake_interaction("someone")
+        await cog.health_slash.callback(cog, interaction)
+        kwargs = interaction.response.send_message.await_args.kwargs
+        self.assertTrue(kwargs.get("ephemeral"))
+        self.assertIsInstance(kwargs.get("embed"), discord.Embed)
+
+    async def test_about_reports_a_real_uptime(self):
+        # The key is "uptime_sec", not "uptime_seconds" — the .get default
+        # swallowed the miss and /about always said "0s".
+        cog = _make_cog()
+        interaction = _fake_interaction("someone")
+        with unittest.mock.patch.object(
+                bot_commands, "get_health_snapshot",
+                return_value={"uptime_sec": 3725, "counters": {}, "errors": {},
+                              "latencies": {}, "last_error": None}):
+            await cog.about_slash.callback(cog, interaction)
+        embed = interaction.response.send_message.await_args.kwargs["embed"]
+        uptime = [f.value for f in embed.fields if f.name == "Uptime"][0]
+        self.assertNotEqual(uptime, "0s")
+        self.assertIn("1h", uptime)
+
+    async def test_help_is_an_embed(self):
+        cog = _make_cog()
+        interaction = _fake_interaction("someone")
+        await cog.help_slash.callback(cog, interaction)
+        self.assertIsInstance(
+            interaction.response.send_message.await_args.kwargs.get("embed"),
+            discord.Embed)
+
+    async def test_schedule_list_is_an_embed(self):
+        manager = MagicMock()
+        manager.list_schedules.return_value = [
+            {"id": "abc", "schedule": "1h", "description": "d", "prompt": "p"},
+        ]
+        cog = _make_cog(schedule_manager=manager)
+        interaction = _fake_interaction("someone")
+        await cog.schedule_list.callback(cog, interaction)
+        embed = interaction.response.send_message.await_args.kwargs["embed"]
+        self.assertIsInstance(embed, discord.Embed)
+        self.assertEqual(len(embed.fields), 1)
+
+    async def test_schedule_list_caps_at_25_fields(self):
+        # Discord rejects an embed with more than 25 fields outright.
+        manager = MagicMock()
+        manager.list_schedules.return_value = [
+            {"id": str(i), "schedule": "1h", "description": "", "prompt": "p"}
+            for i in range(40)
+        ]
+        cog = _make_cog(schedule_manager=manager)
+        interaction = _fake_interaction("someone")
+        await cog.schedule_list.callback(cog, interaction)
+        embed = interaction.response.send_message.await_args.kwargs["embed"]
+        self.assertEqual(len(embed.fields), 25)
+        self.assertIn("Showing 25 of 40", embed.footer.text)
+
+    async def test_draw_is_range_bounded(self):
+        # /draw 500 previously raised an uncaught HTTPException and the user
+        # saw nothing at all. Discord now rejects it before the command runs.
+        import typing
+        hints = typing.get_type_hints(
+            bot_commands.FritzCommands.draw_slash.callback, include_extras=True)
+        transformer = hints["num_cards"]
+        self.assertEqual(type(transformer).__name__, "RangeTransformer")
+        self.assertEqual(transformer.min_value, 1)
+        self.assertEqual(transformer.max_value, 40)
+
+    async def test_draw_chunks_its_output(self):
+        cog = _make_cog()
+        interaction = _fake_interaction("someone")
+        long_output = "card line here\n" * 400          # ~6000 chars
+        with unittest.mock.patch.object(
+                bot_commands, "draw_cards", return_value=long_output):
+            await cog.draw_slash.callback(cog, interaction, num_cards=40)
+        self.assertGreater(interaction.followup.send.await_count, 1)
+        for call in interaction.followup.send.await_args_list:
+            with self.subTest():
+                self.assertLessEqual(len(call.kwargs["content"]), 2000)
+
+    async def test_lore_continuations_use_followup_not_channel_send(self):
+        # channel.send posts detached messages that interleave with other
+        # traffic; followup keeps them attached to the interaction.
+        cog = _make_cog()
+        interaction = _fake_interaction("someone")
+        with unittest.mock.patch(
+                "bot_commands.query_documents", return_value="word " * 900):
+            await cog.lore_slash.callback(cog, interaction, query="q")
+        self.assertGreater(interaction.followup.send.await_count, 1)
+        interaction.channel.send.assert_not_awaited()
+
+    async def test_lore_drops_the_over_2000_header(self):
+        cog = _make_cog()
+        interaction = _fake_interaction("someone")
+        with unittest.mock.patch(
+                "bot_commands.query_documents", return_value="word " * 900):
+            await cog.lore_slash.callback(cog, interaction, query="q")
+        first = interaction.followup.send.await_args_list[0].args[0]
+        self.assertNotIn("The answer was over", first)
 
 
 if __name__ == "__main__":
