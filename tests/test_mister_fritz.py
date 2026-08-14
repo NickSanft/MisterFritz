@@ -1,6 +1,6 @@
 """
-Tests for the LangGraph nodes in mister_fritz.py — the planner's JSON parsing,
-and the conversation window the executor feeds its ReAct sub-agent.
+Tests for the LangGraph nodes in mister_fritz.py — the conversation window the
+executor feeds its ReAct sub-agent, token streaming, and off-path summarisation.
 
 mister_fritz initialises ChatOllama clients, SqliteSaver, and writes a Mermaid
 diagram at import time. We stub heavy modules (image_generator, document_engine)
@@ -8,6 +8,8 @@ before importing, but ChatOllama itself is real — we patch the instance after
 import to control what invoke() returns.
 """
 import json
+import threading
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -22,19 +24,7 @@ from langchain_core.messages import (  # noqa: E402
 )
 
 import mister_fritz  # noqa: E402
-from mister_fritz import _history_window, executor, planner  # noqa: E402
-
-
-def _state_with_message(text: str) -> dict:
-    return {
-        "messages": [HumanMessage(content=text)],
-        "image_paths": [],
-        "user_image_paths": [],
-        "original_request": "",
-        "plan": [],
-        "current_step": 0,
-        "step_results": [],
-    }
+from mister_fritz import _history_window, executor  # noqa: E402
 
 
 def _thread(n_pairs: int, body: str = "x" * 40) -> list:
@@ -44,87 +34,6 @@ def _thread(n_pairs: int, body: str = "x" * 40) -> list:
         msgs.append(HumanMessage(content=f"q{i} {body}", id=f"h{i}"))
         msgs.append(AIMessage(content=f"a{i} {body}", id=f"a{i}"))
     return msgs
-
-
-def _fake_response(content: str) -> MagicMock:
-    r = MagicMock()
-    r.content = content
-    return r
-
-
-class TestPlannerParsing(unittest.TestCase):
-    """Cover the brittle JSON-extraction logic in planner()."""
-
-    def _run(self, llm_content: str, message: str = "do a thing"):
-        state = _state_with_message(message)
-        with patch.object(mister_fritz, "fast_ollama_instance") as m:
-            m.invoke.return_value = _fake_response(llm_content)
-            return planner(state, config={"metadata": {}})
-
-    def test_simple_mode_when_needs_planning_false(self):
-        result = self._run('{"needs_planning": false}')
-        self.assertEqual(result["plan"], [])
-        self.assertEqual(result["current_step"], 0)
-        self.assertEqual(result["step_results"], [])
-
-    def test_multi_step_plan_extracted(self):
-        result = self._run(
-            '{"needs_planning": true, "steps": ["fetch data", "summarise it"]}'
-        )
-        self.assertEqual(result["plan"], ["fetch data", "summarise it"])
-        self.assertEqual(result["current_step"], 0)
-
-    def test_plan_capped_at_five_steps(self):
-        many = ", ".join(f'"step {i}"' for i in range(10))
-        result = self._run(f'{{"needs_planning": true, "steps": [{many}]}}')
-        self.assertEqual(len(result["plan"]), 5)
-
-    def test_handles_markdown_code_fences(self):
-        result = self._run(
-            '```json\n{"needs_planning": true, "steps": ["a", "b"]}\n```'
-        )
-        self.assertEqual(result["plan"], ["a", "b"])
-
-    def test_handles_bare_code_fences(self):
-        result = self._run('```\n{"needs_planning": false}\n```')
-        self.assertEqual(result["plan"], [])
-
-    def test_handles_surrounding_text(self):
-        result = self._run(
-            'Sure! Here is my plan: {"needs_planning": true, "steps": ["x", "y"]} '
-            'Hope that helps.'
-        )
-        self.assertEqual(result["plan"], ["x", "y"])
-
-    def test_malformed_json_falls_back_to_simple_mode(self):
-        result = self._run("not json at all")
-        self.assertEqual(result["plan"], [])
-
-    def test_empty_response_falls_back_to_simple_mode(self):
-        result = self._run("")
-        self.assertEqual(result["plan"], [])
-
-    def test_single_step_plan_collapses_to_simple_mode(self):
-        # The planner explicitly requires >1 step to enter plan mode.
-        result = self._run('{"needs_planning": true, "steps": ["just one"]}')
-        self.assertEqual(result["plan"], [])
-
-    def test_non_string_steps_coerced(self):
-        # If the LLM returns numeric steps, planner stringifies them.
-        result = self._run('{"needs_planning": true, "steps": [1, 2, 3]}')
-        self.assertEqual(result["plan"], ["1", "2", "3"])
-
-    def test_original_request_preserved(self):
-        result = self._run('{"needs_planning": false}', message="my original ask")
-        self.assertEqual(result["original_request"], "my original ask")
-
-    def test_llm_exception_falls_back_to_simple_mode(self):
-        state = _state_with_message("anything")
-        with patch.object(mister_fritz, "fast_ollama_instance") as m:
-            m.invoke.side_effect = RuntimeError("ollama exploded")
-            result = planner(state, config={"metadata": {}})
-        self.assertEqual(result["plan"], [])
-        self.assertEqual(result["current_step"], 0)
 
 
 class _RecordingAgent:
@@ -280,22 +189,6 @@ class TestExecutorInputs(unittest.TestCase):
         self.assertEqual(len(sent), 2)
         self.assertEqual(sent[1][0], "user")
         self.assertEqual(len(sent[1][1]), 100000)
-
-    def test_plan_mode_excludes_the_current_turn(self):
-        # The current request is already restated verbatim as "Original
-        # request:" inside the step prompt.
-        msgs = _thread(2) + [HumanMessage(content="do-the-thing", id="h9")]
-        agent = _RecordingAgent()
-        state = self._state(msgs, plan=["step one", "step two"],
-                            original_request="do-the-thing")
-        _run_executor(state, agent)
-        sent = agent.seen["messages"]
-        window = [m for m in sent[1:-1]]
-        self.assertNotIn("do-the-thing", [getattr(m, "content", "") for m in window])
-        # Final entry is the synthetic step prompt.
-        self.assertEqual(sent[-1][0], "user")
-        self.assertIn("Current task (step 1/2)", sent[-1][1])
-
 
 class TestMemoryInjectionCap(unittest.TestCase):
     """Uncapped, the Chroma blob can evict the window and the persona itself."""
@@ -526,15 +419,6 @@ class TestExecutorTokenStreaming(unittest.TestCase):
         agent, _c, _p, _r = self._run(script, with_callback=False)
         self.assertEqual(agent.stream_mode, ["values"])
 
-    def test_plan_mode_never_streams(self):
-        # Intermediate steps stay silent; the synthesizer owns the visible one.
-        state = self._state(plan=["step a", "step b"], original_request="do it")
-        script = [("values", {"messages": [AIMessage(content="step result")]})]
-        agent, calls, progress, _r = self._run(script, state=state)
-        self.assertEqual(agent.stream_mode, ["values"])
-        self.assertEqual(calls, [])
-        self.assertIn("Step 1/2: step a", progress)
-
     def test_sub_threshold_tail_is_flushed(self):
         script = [
             ("messages", (_chunk("tail", "t1"), {})),
@@ -543,40 +427,6 @@ class TestExecutorTokenStreaming(unittest.TestCase):
         with patch.object(mister_fritz, "STREAM_MIN_CHARS", 999):
             _agent, calls, _p, _r = self._run(script)
         self.assertEqual([d for d, _, _ in calls], ["tail"])
-
-
-class TestSynthesizerStreaming(unittest.TestCase):
-    def _state(self):
-        return {
-            "messages": [], "image_paths": [], "user_image_paths": [],
-            "original_request": "do it", "plan": ["a", "b"],
-            "current_step": 2, "step_results": ["r1", "r2"],
-        }
-
-    def test_streams_deltas_under_one_segment(self):
-        calls = []
-        fake = MagicMock()
-        fake.stream.return_value = iter([
-            AIMessageChunk(content="Very"), AIMessageChunk(content=" well."),
-        ])
-        with patch.object(mister_fritz, "ollama_instance", fake):
-            mister_fritz.synthesizer(self._state(), config={"metadata": {
-                "streaming_callback": lambda d, a, r: calls.append((d, a, r))}})
-        # First emission restarts, wiping whatever the executor steps left.
-        self.assertEqual([r for _, _, r in calls], [True, False])
-        self.assertEqual(calls[-1][1], "Very well.")
-
-    def test_invoke_fallback_corrects_the_ui(self):
-        # A failed stream may already have painted partial text; the fallback
-        # must replace it, not append to it.
-        calls = []
-        fake = MagicMock()
-        fake.stream.side_effect = RuntimeError("stream died")
-        fake.invoke.return_value = MagicMock(content="The real answer.")
-        with patch.object(mister_fritz, "ollama_instance", fake):
-            mister_fritz.synthesizer(self._state(), config={"metadata": {
-                "streaming_callback": lambda d, a, r: calls.append((d, a, r))}})
-        self.assertEqual(calls, [("The real answer.", "The real answer.", True)])
 
 
 class TestLangGraphMessagesContract(unittest.TestCase):
@@ -687,6 +537,228 @@ class TestLangGraphMessagesContract(unittest.TestCase):
                 if not runs or runs[-1] != p[0].id:
                     runs.append(p[0].id)
         self.assertEqual(len(runs), 2, "preamble and answer must be separate segments")
+
+
+class TestGraphShape(unittest.TestCase):
+    """Plan mode is gone: START → executor → (summarize | END)."""
+
+    def test_graph_has_only_executor_and_summarize(self):
+        nodes = set(mister_fritz.app.get_graph().nodes)
+        self.assertEqual(nodes, {"__start__", "__end__", "executor",
+                                 "summarize_conversation"})
+
+    def test_planner_and_synthesizer_are_gone(self):
+        self.assertFalse(hasattr(mister_fritz, "planner"))
+        self.assertFalse(hasattr(mister_fritz, "synthesizer"))
+        self.assertFalse(hasattr(mister_fritz, "route_executor"))
+
+    def test_state_has_no_vestigial_plan_fields(self):
+        keys = set(mister_fritz.EnhancedState.__annotations__)
+        for gone in ("plan", "current_step", "step_results", "original_request"):
+            with self.subTest(field=gone):
+                self.assertNotIn(gone, keys)
+
+    def test_should_continue_routes_on_the_threshold(self):
+        under = {"messages": ["m"] * (mister_fritz.SUMMARIZE_THRESHOLD)}
+        over = {"messages": ["m"] * (mister_fritz.SUMMARIZE_THRESHOLD + 1)}
+        self.assertEqual(mister_fritz.should_continue(under), "__end__")
+        self.assertEqual(mister_fritz.should_continue(over), "summarize_conversation")
+
+
+class TestMemoryKey(unittest.TestCase):
+    """Replaces a full 20B round trip whose only output was a label string."""
+
+    def test_builds_a_memory_of_slug(self):
+        key = mister_fritz._make_memory_key(
+            "Summary made at 2026\r\n The user discussed the pie incident at length")
+        self.assertTrue(key.startswith("memory_of_"))
+        self.assertIn("pie", key)
+
+    def test_skips_the_timestamp_preamble(self):
+        key = mister_fritz._make_memory_key(
+            "Summary made at 2026-08-14T10:00:00\r\n They like tea")
+        self.assertNotIn("2026", key)
+
+    def test_is_bounded(self):
+        key = mister_fritz._make_memory_key("word " * 200)
+        self.assertLessEqual(len(key), 64)
+
+    def test_handles_empty_and_punctuation_only(self):
+        self.assertEqual(mister_fritz._make_memory_key(""), "memory_of_conversation")
+        self.assertEqual(mister_fritz._make_memory_key("!!! ???"), "memory_of_conversation")
+
+    def test_makes_no_network_call(self):
+        # The point of the change: no model is consulted for a label.
+        with patch.object(mister_fritz, "ollama_instance") as m:
+            mister_fritz._make_memory_key("something happened")
+        m.invoke.assert_not_called()
+
+
+class TestOffPathSummarisation(unittest.TestCase):
+    """The reply used to block behind three LLM calls, two on the 20B model."""
+
+    def setUp(self):
+        # The in-flight guard is keyed per user and module-global. A worker
+        # still draining from a previous test would make the next one's
+        # summarisation correctly SKIP, which looks like a failure.
+        with mister_fritz._summarize_lock:
+            mister_fritz._summarize_inflight.clear()
+        # Distinct user per test, so even a straggler cannot collide.
+        self._user = f"user_{self._testMethodName[:24]}"
+
+    tearDown = setUp
+
+    def _await_worker(self, timeout=5):
+        """Block until the background summariser has fully finished.
+
+        Called INSIDE the patch context. A worker that outlives its patches
+        would otherwise wander into the next test's mocks — which is exactly
+        how a passing suite starts reporting phantom calls.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with mister_fritz._summarize_lock:
+                if self._user not in mister_fritz._summarize_inflight:
+                    return True
+            time.sleep(0.01)
+        return False
+
+    def _state(self, n=5):
+        return {"messages": [HumanMessage(content=f"m{i}", id=f"h{i}")
+                             for i in range(n)],
+                "image_paths": [], "user_image_paths": []}
+
+    def _config(self):
+        return {"metadata": {"user_id": self._user, "thread_id": self._user}}
+
+    def test_llm_calls_happen_off_the_graph_thread(self):
+        # Asserting "not yet called" would be racy — the worker can legitimately
+        # win. What matters is WHERE the call runs: not on the thread the graph
+        # (and therefore the user's reply) is waiting on.
+        graph_thread = threading.get_ident()
+        seen = {}
+        done = threading.Event()
+
+        def record(*a, **k):
+            seen["thread"] = threading.get_ident()
+            done.set()
+            return MagicMock(content="a summary")
+
+        with patch.object(mister_fritz, "ollama_instance") as thinking, \
+             patch.object(mister_fritz, "fast_ollama_instance"), \
+             patch.object(mister_fritz, "add_memory"), \
+             patch.object(mister_fritz, "update_user_profile"):
+            thinking.invoke.side_effect = record
+            result = mister_fritz.summarize_conversation(self._state(), self._config())
+            self.assertTrue(done.wait(timeout=5), "summariser never ran")
+            self.assertTrue(self._await_worker(), "worker did not finish")
+
+        self.assertNotEqual(seen["thread"], graph_thread)
+        # The trim is what the node actually returns, and it stays synchronous.
+        self.assertTrue(all(type(m).__name__ == "RemoveMessage"
+                            for m in result["messages"]))
+
+    def test_the_node_returns_before_the_summary_finishes(self):
+        # The latency win: the reply is not gated on the 20B call.
+        release = threading.Event()
+        started = threading.Event()
+
+        def slow(*a, **k):
+            started.set()
+            release.wait(timeout=5)
+            return MagicMock(content="s")
+
+        with patch.object(mister_fritz, "ollama_instance") as thinking, \
+             patch.object(mister_fritz, "fast_ollama_instance"), \
+             patch.object(mister_fritz, "add_memory"), \
+             patch.object(mister_fritz, "update_user_profile"):
+            thinking.invoke.side_effect = slow
+            began = time.monotonic()
+            result = mister_fritz.summarize_conversation(self._state(), self._config())
+            elapsed = time.monotonic() - began
+            self.assertTrue(started.wait(timeout=5))
+            release.set()
+            self.assertTrue(self._await_worker(), "worker did not finish")
+        self.assertLess(elapsed, 1.0, "node blocked on the summariser")
+        self.assertTrue(result["messages"])
+
+    def test_trim_leaves_exactly_one_message(self):
+        state = self._state(n=5)
+        with patch.object(mister_fritz, "_summarize_and_profile"):
+            result = mister_fritz.summarize_conversation(state, self._config())
+        self.assertEqual(len(result["messages"]), 4)
+
+    def test_sync_mode_runs_inline(self):
+        # The rollback lever: SUMMARIZE_ASYNC=false restores the old ordering.
+        with patch.object(mister_fritz, "SUMMARIZE_ASYNC", False), \
+             patch.object(mister_fritz, "_summarize_and_profile") as work:
+            mister_fritz.summarize_conversation(self._state(), self._config())
+        work.assert_called_once()
+
+    def test_concurrent_turns_do_not_stack_summaries(self):
+        # Rapid-fire turns would otherwise run several 20B summaries of nearly
+        # the same transcript at once.
+        release = threading.Event()
+        started = threading.Event()
+
+        def slow(*a, **k):
+            started.set()
+            release.wait(timeout=5)
+
+        with patch.object(mister_fritz, "_summarize_and_profile",
+                          side_effect=slow) as work:
+            mister_fritz.summarize_conversation(self._state(), self._config())
+            self.assertTrue(started.wait(timeout=5))
+            # Second turn while the first is still in flight.
+            mister_fritz.summarize_conversation(self._state(), self._config())
+            release.set()
+            self.assertTrue(self._await_worker(), "worker did not finish")
+        # One summary, not two, despite two threshold crossings.
+        self.assertEqual(work.call_count, 1)
+
+    def test_worker_failure_does_not_break_the_node(self):
+        with patch.object(mister_fritz, "SUMMARIZE_ASYNC", False), \
+             patch.object(mister_fritz, "ollama_instance") as thinking:
+            thinking.invoke.side_effect = RuntimeError("ollama down")
+            result = mister_fritz.summarize_conversation(self._state(), self._config())
+        # The trim still happened; the turn is not lost to a summariser failure.
+        self.assertTrue(result["messages"])
+
+
+class TestProfileSignalsSchema(unittest.TestCase):
+    def test_schema_has_the_expected_fields(self):
+        fields = set(mister_fritz.ProfileSignals.model_fields)
+        self.assertEqual(fields, {"communication_style", "interests",
+                                  "dislikes", "notes"})
+
+    def test_defaults_are_empty_not_none(self):
+        # An absent field must mean "no evidence", not a null the profile
+        # writer then has to defend against.
+        s = mister_fritz.ProfileSignals()
+        self.assertEqual(s.communication_style, "")
+        self.assertEqual(s.interests, [])
+        self.assertEqual(s.dislikes, [])
+
+    def test_extraction_uses_structured_output(self):
+        captured = {}
+
+        def fake_structured(schema):
+            captured["schema"] = schema
+            m = MagicMock()
+            m.invoke.return_value = mister_fritz.ProfileSignals(interests=["tea"])
+            return m
+
+        with patch.object(mister_fritz, "ollama_instance") as thinking, \
+             patch.object(mister_fritz, "fast_ollama_instance") as fast, \
+             patch.object(mister_fritz, "add_memory"), \
+             patch.object(mister_fritz, "update_user_profile") as upd:
+            thinking.invoke.return_value = MagicMock(content="a summary")
+            fast.with_structured_output = fake_structured
+            mister_fritz._summarize_and_profile(
+                [HumanMessage(content="hi", id="h")], "alice", {})
+        self.assertIs(captured["schema"], mister_fritz.ProfileSignals)
+        upd.assert_called_once()
+        self.assertEqual(upd.call_args.args[1]["interests"], ["tea"])
 
 
 if __name__ == "__main__":

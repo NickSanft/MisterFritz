@@ -94,7 +94,15 @@ OLLAMA_KEEP_ALIVE: str = os.environ.get("OLLAMA_KEEP_ALIVE", "5m")
 # ---------------------------------------------------------------------------
 
 # Number of conversation messages before the agent triggers a summarisation pass.
-SUMMARIZE_THRESHOLD: int = int(os.environ.get("SUMMARIZE_THRESHOLD", "15"))
+#
+# Raised from 15 now that summarisation runs off the critical path
+# (SUMMARIZE_ASYNC): 15 was aggressive because each pass blocked the reply
+# behind three LLM calls, so the cost of summarising often had to be paid
+# sooner than the conversation warranted. In the background the trade flips —
+# a higher threshold buys longer in-thread memory, and the window the executor
+# replays is bounded by this value plus one. Each pass does get slower, since
+# it feeds the whole message list to the 20B model, but nobody waits for it.
+SUMMARIZE_THRESHOLD: int = int(os.environ.get("SUMMARIZE_THRESHOLD", "30"))
 
 # Token budget for the slice of conversation history handed to the executor's
 # ReAct sub-agent each turn. The sub-agent is compiled WITHOUT a checkpointer,

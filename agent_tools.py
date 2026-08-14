@@ -95,10 +95,26 @@ _EXTRACTION_PROMPT = (
     "extract any facts about the USER (not the assistant) that are worth remembering "
     "long-term: preferences, personal details, timezone, job, interests, dislikes, "
     "habits, names of people they mention, etc. "
-    "Return ONLY a JSON array of short plain-English fact strings. "
-    "Return [] if there is nothing notable. Do not explain.\n\n"
+    "Return short plain-English fact strings, or nothing if there is nothing "
+    "notable. Do not explain.\n\n"
     "User said: {user_msg}\nAssistant replied: {assistant_msg}"
 )
+
+# JSON schema handed to Ollama for the extraction above. Native structured
+# output replaces a "Return ONLY a JSON array" instruction plus
+# re.search(r'\[.*?\]') — which was NON-GREEDY, so a reply containing a nested
+# array silently truncated at the first ']' and dropped the remaining facts.
+_EXTRACTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "facts": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Short plain-English facts about the user.",
+        },
+    },
+    "required": ["facts"],
+}
 
 
 def _extract_and_store_memories(user_id: str, user_message: str, assistant_response: str) -> None:
@@ -126,12 +142,9 @@ def _extract_and_store_memories(user_id: str, user_message: str, assistant_respo
             model=FAST_OLLAMA_MODEL,
             messages=[{"role": "user", "content": prompt}],
             keep_alive=OLLAMA_KEEP_ALIVE,
+            format=_EXTRACTION_SCHEMA,
         )
-        content = response.message.content.strip()
-        match = re.search(r'\[.*?\]', content, re.DOTALL)
-        if not match:
-            return
-        facts = json.loads(match.group())
+        facts = json.loads(response.message.content).get("facts", [])
         if not isinstance(facts, list):
             return
         for fact in facts[:5]:  # cap at 5 per turn to avoid noise

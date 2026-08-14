@@ -21,6 +21,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_ollama import ChatOllama
 from langchain.agents import create_agent
+from pydantic import BaseModel, Field
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.constants import END, START
 from langgraph.graph import StateGraph, add_messages
@@ -46,15 +47,14 @@ from fritz_utils import (
     OLLAMA_KEEP_ALIVE,
     OLLAMA_TIMEOUT,
     STREAM_MIN_CHARS,
+    SUMMARIZE_ASYNC,
     SUMMARIZE_THRESHOLD,
     THINKING_OLLAMA_MODEL,
 )
 from observability import METRICS, init_logging
 from storage import SQLiteStore
 
-PLANNER_NODE = "planner"
 EXECUTOR_NODE = "executor"
-SYNTHESIZER_NODE = "synthesizer"
 SUMMARIZE_CONVERSATION_NODE = "summarize_conversation"
 
 init_logging()
@@ -65,10 +65,6 @@ class EnhancedState(TypedDict):
     messages: Annotated[list, add_messages]
     image_paths: list[str]       # generated images (output)
     user_image_paths: list[str]  # user-provided images (input)
-    original_request: str        # raw user message, captured by planner
-    plan: list[str]              # ordered steps; empty = simple mode
-    current_step: int            # index into plan
-    step_results: list[str]      # accumulated per-step results
 
 
 # ── Prompt helpers ────────────────────────────────────────────────────────────
@@ -148,139 +144,132 @@ def format_prompt(prompt: str, source: MessageSource, user_id: str, additional_i
 # ── Routing ───────────────────────────────────────────────────────────────────
 
 def should_continue(state: EnhancedState) -> Literal["summarize_conversation", "__end__"]:
-    """Decide whether to summarize or end the conversation."""
+    """After the executor: summarise if the thread has grown long, else stop.
+
+    This used to be duplicated — `route_executor` carried a byte-identical copy
+    of the threshold check for its simple-mode branch. With plan mode gone
+    there is one edge and one place the rule lives.
+    """
     return SUMMARIZE_CONVERSATION_NODE if len(state["messages"]) > SUMMARIZE_THRESHOLD else END
-
-
-def route_executor(state: EnhancedState) -> Literal["executor", "synthesizer", "summarize_conversation", "__end__"]:
-    """
-    After executor runs, decide the next node:
-    - Plan mode, more steps remain  → executor (loop)
-    - Plan mode, all steps done     → synthesizer
-    - Simple mode                   → should_continue logic (inline)
-    """
-    plan = state.get("plan", [])
-    current_step = state.get("current_step", 0)
-
-    if plan:
-        if current_step < len(plan):
-            return EXECUTOR_NODE
-        else:
-            return SYNTHESIZER_NODE
-    else:
-        return SUMMARIZE_CONVERSATION_NODE if len(state["messages"]) > SUMMARIZE_THRESHOLD else END
 
 
 # ── Graph nodes ───────────────────────────────────────────────────────────────
 
-def planner(state: EnhancedState, config: RunnableConfig):
-    """Inspect the latest user message and decide if multi-step planning is needed."""
-    messages = state["messages"]
-    latest_message = messages[-1].content if messages else ""
-    logger.debug("Planner evaluating message: %s", latest_message)
+class ProfileSignals(BaseModel):
+    """Schema handed to the model for profile-signal extraction.
 
-    planner_prompt = [
-        (
-            "system",
-            (
-                "You are a planning assistant. Analyze the user's request and decide "
-                "whether it can be answered in a single step or requires multiple steps.\n"
-                "Respond ONLY with valid JSON, one of two forms:\n"
-                '  {"needs_planning": false}\n'
-                '  {"needs_planning": true, "steps": ["step 1", "step 2", ...]}\n'
-                "Use multi-step only when the request clearly requires sequential actions "
-                "(e.g., research then write a report, fetch data then analyse it). "
-                "Simple questions, chat, or single-tool lookups do NOT need planning. "
-                "Keep plans to 5 steps maximum."
-            ),
-        ),
-        ("user", latest_message),
-    ]
+    Native structured output, not "respond ONLY with JSON" plus a regex rescue:
+    the old code stripped markdown fences with two re.sub calls and then greedily
+    matched r"\\{.*\\}", so a malformed reply silently produced no profile update
+    at all and nothing said so.
+    """
 
+    communication_style: str = Field(default="", description="How the user prefers to be addressed")
+    interests: list[str] = Field(default_factory=list, description="Topics the user is interested in")
+    dislikes: list[str] = Field(default_factory=list, description="Topics or styles the user dislikes")
+    notes: str = Field(default="", description="Anything else worth remembering")
+
+
+_MEMORY_KEY_MAX = 64
+
+
+def _make_memory_key(summary: str) -> str:
+    """Local slug for a stored summary, e.g. "memory_of_the_pie_incident".
+
+    This replaces a full round trip to the 20B THINKING model whose ONLY output
+    was a label string. The key becomes a Chroma metadata key and contributes to
+    the embedded document alongside the summary itself, so a locally derived
+    slug is functionally equivalent — and the module already builds keys this
+    way elsewhere (`fact_…`, `auto_…`).
+    """
+    # Skip the "Summary made at <timestamp>" preamble the caller prepends.
+    body = summary.split("\r\n", 1)[-1] if "\r\n" in summary else summary
+    words = re.findall(r"[a-zA-Z0-9]+", body.lower())
+    slug = "_".join(words[:8]) or "conversation"
+    return f"memory_of_{slug}"[:_MEMORY_KEY_MAX]
+
+
+def _summarize_and_profile(messages: list, user_id: str | None,
+                           config_values: dict) -> None:
+    """The expensive half of summarisation: two LLM calls and a Chroma write.
+
+    Runs off the graph thread when SUMMARIZE_ASYNC is on. Nothing downstream
+    reads its output — the summary lands in Chroma and is re-surfaced later by
+    the memory injection in `executor` — so the user has no reason to wait for
+    it.
+    """
     try:
-        response = fast_ollama_instance.invoke(planner_prompt)
-        raw = response.content.strip()
-        # Strip markdown code fences if present
-        if raw.startswith("```"):
-            raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw)
-            raw = re.sub(r"\n?```$", "", raw)
-        # Extract the JSON object in case there's surrounding text
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if match:
-            raw = match.group()
-        parsed = json.loads(raw)
-        needs_planning = bool(parsed.get("needs_planning", False))
-        steps = parsed.get("steps", []) if needs_planning else []
-        steps = [str(s) for s in steps[:5]]  # cap at 5, ensure strings
+        prompt = messages + [HumanMessage(content="Please summarize the conversation above:")]
+        summary_response = ollama_instance.invoke(prompt)
+        timestamp = get_current_time_internal()
+        summary = f"Summary made at {timestamp} \r\n {summary_response.content}"
+        logger.debug("Summary: %s", summary)
+        add_memory(user_id, _make_memory_key(summary), summary)
     except Exception as e:
-        logger.warning("Planner JSON parse failed (%s); falling back to simple mode", e)
-        needs_planning = False
-        steps = []
+        logger.warning("Conversation summarisation failed (non-fatal): %s", e)
+        return
 
-    if needs_planning and len(steps) > 1:
-        logger.info("Planner created %d-step plan", len(steps))
-        for i, s in enumerate(steps):
-            logger.debug("  Step %d: %s", i + 1, s)
-        return {
-            "original_request": latest_message,
-            "plan": steps,
-            "current_step": 0,
-            "step_results": [],
-        }
+    if not user_id:
+        return
+    try:
+        extractor = fast_ollama_instance.with_structured_output(ProfileSignals)
+        signals = extractor.invoke([
+            ("system",
+             "Extract user preference signals from the conversation summary below. "
+             "Leave a field empty when the conversation gives no evidence for it. "
+             "Be specific and brief; do not invent signals."),
+            ("user", summary),
+        ])
+        update_user_profile(user_id, signals.model_dump())
+        logger.debug("Updated user profile for %s from conversation signals", user_id)
+    except Exception as e:
+        logger.warning("User profile signal extraction failed (non-fatal): %s", e)
 
-    logger.info("Planner chose simple mode")
-    return {
-        "original_request": latest_message,
-        "plan": [],
-        "current_step": 0,
-        "step_results": [],
-    }
+
+# One in-flight summarisation per user. Rapid-fire turns would otherwise stack
+# concurrent 20B summaries of nearly the same transcript.
+_summarize_inflight: set = set()
+_summarize_lock = threading.Lock()
 
 
 def summarize_conversation(state: EnhancedState, config: RunnableConfig):
+    """Trim the message window, and summarise off the critical path.
+
+    The trim is free and must stay synchronous — it is what the graph returns.
+    The three LLM calls that used to block the reply (two of them on the 20B
+    model) now run on a daemon thread, because the summary is never fed back
+    into `state["messages"]`; it only reaches Chroma. The coupling was in the
+    code, not in the data flow.
+    """
     logger.info("Summarizing conversation")
     metadata = config.get("metadata", {})
     user_id = metadata.get("user_id")
-    messages = state["messages"] + [HumanMessage(content="Please summarize the conversation above:")]
-    summary_response = ollama_instance.invoke(messages)
-    timestamp = get_current_time_internal()
-    summary = f"Summary made at {timestamp} \r\n {summary_response.content}"
-    logger.debug("Summary: %s", summary)
-    response_key_inputs = [
-        ("system", "Please provide a short sentence describing this memory starting with the word \"memory\". Example - memory_of_pie"),
-        ("user", summary),
-    ]
-    summary_response_key = ollama_instance.invoke(response_key_inputs, config=get_config_values(config))
-    logger.debug("Summary Key: %s", summary_response_key.content)
-    add_memory(user_id, summary_response_key.content, summary)
+    # Snapshot before the trim — the worker must not race the state update.
+    snapshot = list(state["messages"])
+    config_values = get_config_values(config)
 
-    # Extract user preference signals and update the structured profile
-    if user_id:
-        signal_prompt = [
-            (
-                "system",
-                (
-                    "Extract user preference signals from the conversation summary below. "
-                    "Respond ONLY with valid JSON using exactly this structure:\n"
-                    '{"communication_style": "", "interests": [], "dislikes": [], "notes": ""}\n'
-                    "Use empty string / empty list for fields with no evidence. "
-                    "Be specific and brief. Do not invent signals not supported by the conversation."
-                ),
-            ),
-            ("user", summary),
-        ]
-        try:
-            signal_raw = fast_ollama_instance.invoke(signal_prompt).content.strip()
-            if signal_raw.startswith("```"):
-                signal_raw = re.sub(r"^```[a-zA-Z]*\n?", "", signal_raw)
-                signal_raw = re.sub(r"\n?```$", "", signal_raw)
-            match = re.search(r"\{.*\}", signal_raw, re.DOTALL)
-            if match:
-                signals = json.loads(match.group())
-                update_user_profile(user_id, signals)
-                logger.debug("Updated user profile for %s from conversation signals", user_id)
-        except Exception as e:
-            logger.warning("User profile signal extraction failed (non-fatal): %s", e)
+    if SUMMARIZE_ASYNC:
+        key = user_id or "(anonymous)"
+        with _summarize_lock:
+            already_running = key in _summarize_inflight
+            if not already_running:
+                _summarize_inflight.add(key)
+        if already_running:
+            METRICS.increment("summarize_skipped_inflight")
+            logger.debug("Summarisation already in flight for %s; skipping", key)
+        else:
+            def _worker():
+                try:
+                    _summarize_and_profile(snapshot, user_id, config_values)
+                finally:
+                    with _summarize_lock:
+                        _summarize_inflight.discard(key)
+            threading.Thread(
+                target=_worker, name=f"summarize-{key}", daemon=True,
+            ).start()
+            METRICS.increment("summarize_backgrounded")
+    else:
+        _summarize_and_profile(snapshot, user_id, config_values)
 
     delete_messages = [RemoveMessage(id=m.id) for m in state["messages"][:-1]]
     return {"messages": delete_messages}
@@ -421,19 +410,12 @@ class _DeltaEmitter:
 
 
 def executor(state: EnhancedState, config: RunnableConfig):
-    """
-    Simple mode (plan=[]): behaves like the original conversation node —
-                           streams final response and adds to messages.
-    Plan mode  (plan!=[]):  builds a context-aware prompt for the current step,
-                           runs the ReAct agent, accumulates result into
-                           step_results, increments current_step.
-                           Does NOT update conversation messages.
+    """Run the ReAct agent over the conversation window and stream the reply.
+
+    This is now the only node that talks to the model. The multi-step planner
+    and synthesizer were removed; the ReAct loop decomposes work on its own.
     """
     messages = state["messages"]
-    plan = state.get("plan", [])
-    current_step = state.get("current_step", 0)
-    step_results = state.get("step_results", [])
-    original_request = state.get("original_request", "")
 
     metadata = config.get("metadata", {})
     workspace_root = metadata.get("workspace_root")
@@ -473,7 +455,7 @@ def executor(state: EnhancedState, config: RunnableConfig):
 
     # Auto-inject relevant past memories so they're always active, not dependent on tool calls
     try:
-        memory_query = original_request or (messages[-1].content if messages else "")
+        memory_query = messages[-1].content if messages else ""
         if memory_query and user_id:
             past_context = search_memories_internal(config, memory_query)
             if past_context and past_context != "{}":
@@ -550,55 +532,24 @@ def executor(state: EnhancedState, config: RunnableConfig):
     }
     notified_tools: set = set()
 
-    is_plan_mode = bool(plan)
-
-    # Build execution prompt
-    if is_plan_mode:
-        step_instruction = plan[current_step]
-        context_parts = [f"Original request: {original_request}"]
-        if step_results:
-            context_parts.append("Completed steps:")
-            for i, result in enumerate(step_results):
-                context_parts.append(f"  Step {i + 1} ({plan[i]}): {result[:500]}")
-        context_parts.append(
-            f"\nCurrent task (step {current_step + 1}/{len(plan)}): {step_instruction}"
-        )
-        context_parts.append(
-            "Complete this step. Your result will be combined with other steps into a final response."
-        )
-        agent_prompt = "\n".join(context_parts)
-        # Announce plan step progress; suppress per-token streaming for intermediate steps
-        if progress_callback:
-            progress_callback(f"Step {current_step + 1}/{len(plan)}: {step_instruction}")
-        # Intermediate steps stay silent by design — the synthesizer streams the
-        # one answer the user actually sees, with restart=True on its first
-        # token. Called out so this does not look like an oversight.
-        effective_streaming_callback = None
-        # messages[-1] is this very request, already restated verbatim as
-        # "Original request:" inside agent_prompt — excluding it avoids a
-        # duplicate and keeps the window identical across every step of a plan.
-        history = _history_window(messages[:-1])
-        inputs = {"messages": [("system", system_prompt), *history, ("user", agent_prompt)]}
+    history = _history_window(messages)
+    if history:
+        # history[-1] IS the current user turn — ask_stuff appended it before
+        # the graph ran — so no separate ("user", ...) entry is needed, and
+        # adding one would send the question twice.
+        inputs = {"messages": [("system", system_prompt), *history]}
     else:
-        effective_streaming_callback = streaming_callback
-        history = _history_window(messages)
-        if history:
-            # history[-1] IS the current user turn — ask_stuff appended it
-            # before the graph ran — so no separate ("user", ...) entry is
-            # needed, and adding one would send the question twice.
-            inputs = {"messages": [("system", system_prompt), *history]}
-        else:
-            # Budget disabled, empty state, or a single oversized message.
-            # Never send a system-prompt-only input to the model.
-            latest_message = messages[-1].content if messages else original_request
-            inputs = {"messages": [("system", system_prompt), ("user", latest_message)]}
+        # Budget disabled, empty state, or a single oversized message.
+        # Never send a system-prompt-only input to the model.
+        latest_message = messages[-1].content if messages else ""
+        inputs = {"messages": [("system", system_prompt), ("user", latest_message)]}
 
     final_state = None
-    emitter = _DeltaEmitter(effective_streaming_callback)
+    emitter = _DeltaEmitter(streaming_callback)
     # A LIST — even of one mode — is what makes LangGraph tuple its output as
     # (mode, payload); a bare string yields raw payloads instead. Keeping it a
     # list either way makes the loop below uniform.
-    stream_modes = ["values", "messages"] if effective_streaming_callback else ["values"]
+    stream_modes = ["values", "messages"] if streaming_callback else ["values"]
 
     for mode, payload in agent.stream(
         inputs, config=get_config_values(config), stream_mode=stream_modes
@@ -636,83 +587,12 @@ def executor(state: EnhancedState, config: RunnableConfig):
             if isinstance(msg, ToolMessage) and hasattr(msg, 'name') and msg.name == 'generate_image':
                 image_paths.append(msg.content)
 
-    if is_plan_mode:
-        return {
-            "image_paths": image_paths,
-            "step_results": step_results + [resp],
-            "current_step": current_step + 1,
-        }
-    else:
-        # Bare strings are coerced to HumanMessage by the add_messages reducer,
-        # which makes the checkpointed transcript an unbroken run of user turns
-        # (and mislabels every reply in the /chat history renderer). Tag it.
-        return {
-            "messages": [AIMessage(content=resp)],
-            "image_paths": image_paths,
-        }
-
-
-def synthesizer(state: EnhancedState, config: RunnableConfig):
-    """
-    Called only after all plan steps complete. Streams a Fritz-persona synthesis
-    of the step_results into the conversation, then resets plan state.
-    """
-    original_request = state.get("original_request", "")
-    plan = state.get("plan", [])
-    step_results = state.get("step_results", [])
-
-    metadata = config.get("metadata", {})
-    streaming_callback = metadata.get("streaming_callback")
-
-    step_summary = "\n".join(
-        f"Step {i + 1} ({plan[i]}): {result}"
-        for i, result in enumerate(step_results)
-    )
-
-    synthesis_prompt = [
-        (
-            "system",
-            (
-                f"{FRITZ_CHARACTER}\n"
-                "Synthesize the research findings below into a single, coherent response. "
-                "Maintain your persona throughout. Do not narrate the steps — just deliver the answer."
-            ),
-        ),
-        (
-            "user",
-            f"Original request: {original_request}\n\nResearch findings:\n{step_summary}",
-        ),
-    ]
-
-    # One constant segment id: the synthesizer's first emission therefore
-    # carries restart=True, wiping whatever the executor's steps left on screen.
-    emitter = _DeltaEmitter(streaming_callback)
-    accumulated_text = ""
-    try:
-        for chunk in ollama_instance.stream(synthesis_prompt, config=get_config_values(config)):
-            text = _chunk_text(chunk)
-            if text:
-                accumulated_text += text
-                emitter.feed(text, segment_id="synthesis")
-        emitter.flush()
-    except Exception as e:
-        logger.warning("Synthesizer stream failed: %s; falling back to invoke", e)
-        accumulated_text = ollama_instance.invoke(
-            synthesis_prompt, config=get_config_values(config)
-        ).content
-        # Correct the UI rather than leaving whatever partial text the failed
-        # stream had already painted. restart=True replaces it wholesale.
-        if streaming_callback:
-            streaming_callback(accumulated_text, accumulated_text, True)
-
-    logger.info("Synthesizer complete: %d chars from %d steps", len(accumulated_text), len(plan))
-    # Same reducer coercion as the executor's simple-mode return: a bare str
-    # would be stored as a HumanMessage. Tag the reply explicitly.
+    # Bare strings are coerced to HumanMessage by the add_messages reducer,
+    # which makes the checkpointed transcript an unbroken run of user turns
+    # (and mislabels every reply in the /chat history renderer). Tag it.
     return {
-        "messages": [AIMessage(content=accumulated_text)],
-        "plan": [],
-        "current_step": 0,
-        "step_results": [],
+        "messages": [AIMessage(content=resp)],
+        "image_paths": image_paths,
     }
 
 
@@ -770,9 +650,10 @@ def ask_stuff(
         user_image_paths = []
         full_prompt = format_prompt(base_prompt, source, user_id_clean)
 
-    include_file_tools = workspace_root is not None
-    system_prompt = get_system_description(get_conversation_tools_description(include_file_tools))
-    logger.debug("Role description: %s", system_prompt)
+    # NOTE: this used to rebuild the entire tool registry and system prompt on
+    # every single request purely to feed a logger.debug — whose argument is
+    # evaluated even at INFO level. The executor builds its own prompt; nothing
+    # here consumed it.
     logger.debug("Prompt to ask: %s", full_prompt)
 
     config = {
@@ -792,18 +673,18 @@ def ask_stuff(
         "messages": [("user", full_prompt)],
         "image_paths": [],
         "user_image_paths": user_image_paths,
-        "original_request": "",
-        "plan": [],
-        "current_step": 0,
-        "step_results": [],
     }
 
     final_state = None
+    debug = logger.isEnabledFor(logging.DEBUG)
     for s in app.stream(inputs, config=config, stream_mode="values"):
         final_state = s
-        message = s["messages"][-1] if "messages" in s and s["messages"] else None
-        if message and not isinstance(message, tuple) and hasattr(message, 'pretty_print'):
-            message.pretty_print()
+        # pretty_print writes to stdout. It used to fire on every superstep
+        # regardless of log level.
+        if debug:
+            message = s["messages"][-1] if "messages" in s and s["messages"] else None
+            if message and not isinstance(message, tuple) and hasattr(message, 'pretty_print'):
+                message.pretty_print()
 
     final_text = ""
     if final_state and "messages" in final_state and final_state["messages"]:
@@ -855,21 +736,18 @@ def _get_conversation_agent():
         _conversation_react_agent = create_agent(ollama_instance, tools=conversation_tools)
     return _conversation_react_agent
 
+# START → executor → (summarize | END). Every message used to pay a FAST-model
+# round trip to a planner node first, whose only job was to decide whether to
+# decompose the request — a decision the ReAct loop makes for itself.
 workflow = StateGraph(EnhancedState)
-workflow.add_node(PLANNER_NODE, planner)
 workflow.add_node(EXECUTOR_NODE, executor)
-workflow.add_node(SYNTHESIZER_NODE, synthesizer)
 workflow.add_node(SUMMARIZE_CONVERSATION_NODE, summarize_conversation)
 
-workflow.add_edge(START, PLANNER_NODE)
-workflow.add_edge(PLANNER_NODE, EXECUTOR_NODE)
-workflow.add_conditional_edges(EXECUTOR_NODE, route_executor)
-workflow.add_conditional_edges(SYNTHESIZER_NODE, should_continue)
+workflow.add_edge(START, EXECUTOR_NODE)
+workflow.add_conditional_edges(EXECUTOR_NODE, should_continue)
 workflow.add_edge(SUMMARIZE_CONVERSATION_NODE, END)
 
 app = workflow.compile(checkpointer=checkpointer, store=store)
-
-logger.debug("Conversation tools description: %s", get_conversation_tools_description())
 
 def _write_diagram():
     try:

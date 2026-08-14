@@ -220,16 +220,17 @@ User (Discord)
 main_discord.py   ──  slash commands, on_message, streaming handler
     │
     ▼
-mister_fritz.py   ──  LangGraph state machine
-    ├─ CONVERSATION_NODE   ──  ReAct agent, tool dispatch
+mister_fritz.py   ──  LangGraph state machine: START → executor → (summarize | END)
+    ├─ EXECUTOR   ──  ReAct agent, tool dispatch, token streaming
     │   ├─ get_current_time, roll_dice
     │   ├─ scrape_web, search_web
     │   ├─ search_documents  →  document_engine  →  Chroma RAG
     │   ├─ search_memories   →  chroma_store     →  Chroma KV
     │   ├─ generate_image    →  image_generator  →  SDXL
     │   ├─ analyze_image     →  Ollama LLaVA
-    │   └─ file tools (root only) →  file_tools.py
-    └─ SUMMARIZE_NODE   ──  auto-summarise at 15+ messages, store to Chroma
+    │   └─ file tools (admin only) →  file_tools.py
+    └─ SUMMARIZE  ──  trims at 30+ messages; the summary itself is written to
+                      Chroma on a background thread, off the critical path
 ```
 
 Conversation state is checkpointed per-user in `chat_history.db` (SQLite). Each
@@ -260,7 +261,7 @@ The test suite covers:
 - `agent_tools` — `get_current_time`, `format_prompt`, `scrape_web` (mocked httpx), `search_web` (mocked), `roll_dice`
 - `discord_commands` — `split_into_chunks`, `StreamingMessageHandler` rate limiting
 - `bot_commands` — ROOT_USER gating on `schedule_add` / `schedule_remove`, open access on `schedule_list`
-- `mister_fritz` — planner JSON parsing (code fences, surrounding text, malformed input, exception fallback)
+- `mister_fritz` — history window trimming, executor inputs, token-delta streaming, off-path summarisation, memory-key slugs
 - `document_engine` — `VECTORSTORE_LOCK` held during ingest, `_SHUTDOWN_SENTINEL` exits worker, `shutdown()` idempotency
 
 CI runs on every push via GitHub Actions (see `.github/workflows/ci.yml`).
