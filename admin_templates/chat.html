@@ -393,6 +393,25 @@
     }
     .attach-chip button:hover { color: var(--rose); }
 
+    /* Sent-image card. The caption's dimensions and format come from the
+       upload response, which reads them off the sniffed bytes — never from
+       anything the client claimed about the file. */
+    .img-card {
+        max-width: 340px; margin-bottom: 10px; padding: 8px;
+        background: rgba(var(--void-rgb), 0.6); border: 1px solid var(--edge);
+    }
+    .img-card img { display: block; max-width: 100%; height: auto; }
+    .img-card .cap {
+        display: flex; align-items: baseline; gap: 8px; margin-top: 7px;
+        font-family: var(--font-mono);
+    }
+    .img-card .cap .fname {
+        flex: 1 1 auto; min-width: 0; overflow: hidden;
+        text-overflow: ellipsis; white-space: nowrap;
+        font-size: 11px; color: var(--text-dim);
+    }
+    .img-card .cap .meta { flex: 0 0 auto; font-size: 10px; color: var(--text-meta); }
+
     .hint-row {
         display: flex; justify-content: space-between; gap: 12px; margin-top: 8px;
         font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em;
@@ -440,7 +459,7 @@
                         {# Checkpointed history carries no timestamp. Render the
                            speaker line without one rather than inventing a
                            wrong time — see plan 07 §7.1. #}
-                        {% if m.ts %}<time datetime="{{ m.ts }}">{{ m.ts }}</time>{% endif %}
+                        {% if m.ts %}<time datetime="{{ m.ts }}" data-localize>{{ m.ts }}</time>{% endif %}
                     </div>
                     {% if m.role == "fritz" and m.html %}
                     <div class="fritz-md">{{ m.html | safe }}</div>
@@ -488,7 +507,11 @@
             <button type="button" id="chat-pending-remove" aria-label="Remove attachment">×</button>
         </div>
 
-        <form class="composer-row" id="chat-form" method="post" action="/chat/send">
+        {# No action/method: the composer is JS-only. The synchronous
+           /chat/send fallback was removed per DECISIONS.md #3, so a bare
+           submit must not navigate anywhere — the handler below always
+           preventDefault()s and streams via /chat/stream. #}
+        <form class="composer-row" id="chat-form">
             <span class="facet">
                 <button type="button" class="attach-btn" id="chat-attach-btn"
                         aria-label="Attach an image"><span aria-hidden="true">✧</span></button>
@@ -539,7 +562,9 @@
 {# The nonce is mandatory: script-src is nonce-only, and chat.html is one large
    inline script. Without it the whole chat client is silently dead. #}
 <script nonce="{{ csp_nonce(request) }}">
-// SSE streaming client. The form still POSTs to /chat/send if JS is disabled.
+// SSE streaming client. This is the only send path — the synchronous
+// /chat/send fallback was removed per DECISIONS.md #3, so the composer form
+// carries no action and every submit handler below preventDefault()s.
 (function() {
     // ── Notices ──────────────────────────────────────────────────────────
     // One slot below the header. Replaces every alert(): a modal alert steals
@@ -606,8 +631,6 @@
     if (forgetForm && veil) {
         forgetForm.addEventListener("submit", function(ev) {
             // Always cancel the native POST — the dialog drives it from here.
-            // Without JS the form still submits normally, which is the
-            // pre-existing no-JS behaviour.
             ev.preventDefault();
             openConfirm();
         });
@@ -635,6 +658,8 @@
     const pendingImg = document.getElementById("chat-pending-img");
     const pendingName = document.getElementById("chat-pending-name");
     const pendingRemove = document.getElementById("chat-pending-remove");
+    // {name, width, height, format} for the staged upload, or null.
+    let pendingMeta = null;
 
     // ── Status / busy ────────────────────────────────────────────────────
     // Screen readers get an explicit spoken status; sighted users get the
@@ -737,11 +762,61 @@
         });
     });
 
+    // ── Timestamps ───────────────────────────────────────────────────────
+    // Server-rendered history carries an ISO instant in datetime= (the correct
+    // machine-readable value for <time>) but must not SHOW it — a raw
+    // "2026-08-15T18:38:33+00:00" in the speaker line is unreadable, and the
+    // live path renders "18:38". Rewrite to the viewer's local short time so
+    // the two agree, and so a UTC stamp is shown in the reader's own zone.
+    function localizeTimes(root) {
+        (root || document).querySelectorAll("time[data-localize]").forEach(function(el) {
+            const raw = el.getAttribute("datetime");
+            if (!raw) return;
+            const d = new Date(raw);
+            if (isNaN(d.getTime())) return;      // leave the original text alone
+            el.textContent = d.toTimeString().slice(0, 5);
+            el.removeAttribute("data-localize");
+        });
+    }
+    localizeTimes();
+
     // ── Attachments ──────────────────────────────────────────────────────
+    // Framed card for an image inside a sent message. Built with createElement
+    // and textContent throughout — the filename originates from a user upload,
+    // so it must never reach the DOM as markup.
+    function buildImageCard(src, meta) {
+        const card = document.createElement("div");
+        card.className = "img-card";
+        const img = document.createElement("img");
+        img.src = src;
+        img.alt = (meta && meta.name) ? meta.name : "attached image";
+        card.appendChild(img);
+        if (meta && (meta.name || meta.width)) {
+            const cap = document.createElement("div");
+            cap.className = "cap";
+            const fname = document.createElement("span");
+            fname.className = "fname";
+            fname.textContent = meta.name || "";
+            cap.appendChild(fname);
+            // Omitted rather than guessed when the server did not supply it —
+            // history rehydrated from before this landed has no metadata.
+            if (meta.width && meta.height) {
+                const bits = document.createElement("span");
+                bits.className = "meta";
+                bits.textContent = meta.width + "×" + meta.height +
+                    (meta.format ? " · " + meta.format : "");
+                cap.appendChild(bits);
+            }
+            card.appendChild(cap);
+        }
+        return card;
+    }
+
     function clearPending() {
         pendingRow.classList.remove("active");
         pendingImg.src = "";
         pendingName.textContent = "";
+        pendingMeta = null;
     }
 
     function uploadImage(file) {
@@ -762,6 +837,12 @@
               }
               pendingImg.src = body.url;
               pendingName.textContent = body.name || "attachment";
+              // Kept for the sent-message card. Dimensions and format are the
+              // server's reading of the actual bytes, not the file's claims.
+              pendingMeta = {
+                  name: body.name || "attachment",
+                  width: body.width, height: body.height, format: body.format,
+              };
               pendingRow.classList.add("active");
           })
           .catch(err => setStatus("Upload failed: " + err.message, false));
@@ -852,13 +933,7 @@
 
         const userRow = makeRow("user");
         if (pendingRow.classList.contains("active") && pendingImg.src) {
-            const img = document.createElement("img");
-            img.src = pendingImg.src;
-            img.alt = "attached image";
-            img.style.maxWidth = "240px";
-            img.style.display = "block";
-            img.style.marginBottom = "8px";
-            userRow._body.appendChild(img);
+            userRow._body.appendChild(buildImageCard(pendingImg.src, pendingMeta));
         }
         const textSpan = document.createElement("span");
         textSpan.textContent = message;

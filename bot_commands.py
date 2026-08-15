@@ -124,6 +124,18 @@ def _format_uptime(seconds: int) -> str:
     return f"{days}d {hours}h {minutes}m"
 
 
+def _render_image(prompt: str) -> str:
+    """Import image_generator and render, both inside the worker thread.
+
+    Exists so the import cannot be run on the event loop by accident. It has to
+    stay a function-level import: tests/test_packaging.py asserts the core
+    install is torch-free, and a module-level `from image_generator import ...`
+    here would make the [image] extra mandatory just to start the bot.
+    """
+    from image_generator import generate_image
+    return generate_image(prompt)
+
+
 class _ForgetConfirmView(discord.ui.View):
     """30-second confirmation view for /forget all.
 
@@ -588,9 +600,15 @@ class FritzCommands(commands.Cog):
                 )
             with METRICS.time_block("discord_commands.gen"):
                 async with self._image_semaphore:
-                    # Deferred import — see the note at the top of this module.
-                    from image_generator import generate_image
-                    output_file = await run_blocking(generate_image, prompt)
+                    # The import goes INSIDE the offloaded callable, not beside
+                    # it. Deferring it off module scope keeps [image] optional,
+                    # but executing it here would still run image_generator's
+                    # module body — diffusers, torch, xformers and a
+                    # torch.cuda.is_available() probe, ~10s measured — on the
+                    # event loop, which is the freeze this offload exists to
+                    # remove. Only the first /gen per process pays it; after
+                    # that it is a sys.modules hit inside the worker thread.
+                    output_file = await run_blocking(_render_image, prompt)
             await interaction.followup.send(content="Here is your file!", file=discord.File(output_file))
         except Exception as e:
             await _reply_error(interaction, "discord_commands.gen", e)

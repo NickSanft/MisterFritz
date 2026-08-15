@@ -556,10 +556,16 @@ def _doc_to_message(checkpoint_msg) -> dict | None:
     content = content.strip()
     if not content:
         return None
+    # Stamped by mister_fritz at message creation (checkpoints carry no time of
+    # their own). Absent for anything written before that landed — the template
+    # omits the <time> element rather than inventing one, because a wrong time
+    # reads worse than no time.
+    ts = (getattr(checkpoint_msg, "additional_kwargs", None) or {}).get("ts")
     if msg_type == "human":
-        return {"role": "user", "content": content, "html": None}
+        return {"role": "user", "content": content, "html": None, "ts": ts}
     if msg_type == "ai":
-        return {"role": "fritz", "content": content, "html": _render_markdown(content)}
+        return {"role": "fritz", "content": content,
+                "html": _render_markdown(content), "ts": ts}
     return None
 
 
@@ -684,68 +690,13 @@ async def chat_logout(request: Request) -> Response:
     return response
 
 
-async def chat_send(request: Request) -> Response:
-    """Synchronous fallback endpoint — submits a message and renders the full
-    chat page with the reply. Used by graceful-degradation clients (no JS).
-    HTMX clients go to /chat/stream instead for live streaming."""
-    identity, user = _chat_identity(request)
-    if not identity:
-        return RedirectResponse(url="/chat", status_code=303)
-
-    form = await request.form()
-    message = (form.get("message") or "").strip()
-    if not message:
-        return RedirectResponse(url="/chat", status_code=303)
-
-    # Run the synchronous agent in a worker thread so the event loop is free.
-    loop = asyncio.get_running_loop()
-    schedule_manager = _schedule_manager_from_request(request)
-    pending_images = _drain_pending_images(identity)
-    source = MessageSource.DISCORD_TEXT_AND_IMAGE if pending_images else MessageSource.LOCAL
-
-    def _invoke_agent() -> dict:
-        # Lazy import — keeps admin_panel importable without pulling the LLM
-        # stack until the first chat send.
-        from mister_fritz import ask_stuff
-        return ask_stuff(
-            message,
-            source,
-            identity,
-            user_image_paths=pending_images or None,
-            schedule_manager=schedule_manager,
-            thread_id=_chat_thread_id(identity),
-            display_name=user,
-        )
-
-    try:
-        response_data = await loop.run_in_executor(None, _invoke_agent)
-    except Exception as e:
-        logger.exception("Chat send failed for %s", identity)
-        audit_log("chat_message", user_id=identity, chars=len(message),
-                  attached_images=len(pending_images), result="error", error=str(e))
-        return templates.TemplateResponse(request, "chat.html", {
-            "username": user,
-            "messages": [
-                # `html` must be present on both dicts: chat.html branches on
-                # `m.role == "fritz" and m.html`, and an absent key silently
-                # takes the plain-text path.
-                {"role": "user", "content": message, "html": None},
-                {"role": "fritz", "content": f"❌ An error occurred: {e}", "html": None},
-            ],
-        })
-
-    reply = response_data.get("text") if isinstance(response_data, dict) else str(response_data)
-    audit_log("chat_message", user_id=identity, chars=len(message), result="ok",
-              reply_chars=len(reply or ""))
-
-    return templates.TemplateResponse(request, "chat.html", {
-        "username": user,
-        "messages": [
-            {"role": "user", "content": message, "html": None},
-            {"role": "fritz", "content": reply or "(no response)",
-             "html": _render_markdown(reply or "(no response)")},
-        ],
-    })
+# The synchronous no-JS fallback (POST /chat/send) was deleted per DECISIONS.md
+# #3. It was a second, diverging copy of the ask_stuff + _render_markdown wiring
+# that every chat change — sanitisation, identity, thread ids — had to be made
+# in twice and kept in sync, and it had already drifted: it rendered raw
+# exception text back to the user and omitted `is_admin`, so the page lost
+# controls after any error. Nothing proved a real no-JS browser worked through
+# it. /chat/stream is the only send path now.
 
 
 # Sentinel pushed onto the streaming queue when the agent finishes.
@@ -1026,20 +977,34 @@ def _sniff_image_format(raw: bytes) -> str | None:
     decoding pixels, so a decompression bomb is not materialised here; the size
     cap applied before this call is the other half of that guarantee.
     """
+    sniffed = _sniff_image(raw)
+    return sniffed[0] if sniffed else None
+
+
+def _sniff_image(raw: bytes) -> tuple[str, int, int] | None:
+    """As _sniff_image_format, but also returns (width, height).
+
+    The dimensions come free — Pillow has already parsed the header to
+    determine the format — and the chat's image card captions uploads with
+    "<w>×<h> · <FORMAT>". Reading them here is what makes that caption possible
+    without opening the file a second time.
+    """
     if not raw or _PILImage is None:
         return None
     try:
         with _PILImage.open(io.BytesIO(raw)) as img:
-            fmt = img.format
+            fmt, size = img.format, img.size
             img.verify()
     except Exception:
         return None
-    return fmt if fmt in CHAT_ALLOWED_IMAGE_FORMATS else None
+    if fmt not in CHAT_ALLOWED_IMAGE_FORMATS:
+        return None
+    return fmt, int(size[0]), int(size[1])
 
 
 async def chat_upload_image(request: Request) -> Response:
     """Accept a multipart-form image, save it to ./temp_images/, and stash
-    the path in the per-user pending list. The next /chat/send or
+    the path in the per-user pending list. The next /chat/stream or
     /chat/stream picks it up and passes as user_image_paths to ask_stuff."""
     user, _display = _chat_identity(request)
     if not user:
@@ -1070,14 +1035,15 @@ async def chat_upload_image(request: Request) -> Response:
             status_code=413,
         )
 
-    fmt = _sniff_image_format(raw)
-    if fmt is None:
+    sniffed = _sniff_image(raw)
+    if sniffed is None:
         audit_log("chat_upload_image", user_id=user, result="rejected_content",
                   declared_type=content_type, bytes=len(raw))
         return JSONResponse(
             {"error": "file content is not a supported image"},
             status_code=415,
         )
+    fmt, width, height = sniffed
     canonical_ext, _canonical_mime = CHAT_ALLOWED_IMAGE_FORMATS[fmt]
 
     ts = int(time.time())
@@ -1100,10 +1066,15 @@ async def chat_upload_image(request: Request) -> Response:
     _stash_pending_image(user, target)
     audit_log("chat_upload_image", user_id=user, result="ok",
               path=target, bytes=len(raw))
+    # width/height/format feed the chat's image card caption ("1440×900 · PNG").
+    # They come from the sniffed bytes, not from anything the client asserted.
     return JSONResponse({
         "ok": True,
         "url": _chat_asset_url(target),
         "name": safe_name,
+        "width": width,
+        "height": height,
+        "format": fmt,
     })
 
 
@@ -1196,7 +1167,6 @@ def create_app(password: str, schedule_manager=None, chat_password: str | None =
         Route("/chat", chat_page, name="chat"),
         Route("/chat/login", chat_login, methods=["POST"], name="chat_login"),
         Route("/chat/logout", chat_logout, methods=["POST"], name="chat_logout"),
-        Route("/chat/send", chat_send, methods=["POST"], name="chat_send"),
         Route("/chat/stream", chat_stream, methods=["POST"], name="chat_stream"),
         Route("/chat/forget", chat_forget, methods=["POST"], name="chat_forget"),
         Route("/chat/history", chat_history, name="chat_history"),

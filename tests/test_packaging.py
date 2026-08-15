@@ -223,5 +223,45 @@ class TestDependencyDeclaration(unittest.TestCase):
         )
 
 
+class TestHeavyImportsRunOffTheEventLoop(unittest.TestCase):
+    """A deferred import is only half the fix.
+
+    Moving `import image_generator` / `import tts` off module scope keeps the
+    extras optional, but executing the statement inside an `async def` still
+    runs the module body — torch, diffusers, TTS.api — on the event loop.
+    Measured: ~10s for image_generator, ~17s for tts, the latter past
+    discord.py's "heartbeat blocked for more than 10 seconds" threshold. Both
+    imports therefore have to sit inside the callable handed to the worker
+    pool, not beside it.
+
+    This is a source check because the failure is a latency regression with no
+    functional symptom — nothing raises, the bot just freezes for everyone.
+    """
+
+    def _source(self, name):
+        return (REPO / name).read_text(encoding="utf-8")
+
+    def test_gen_command_imports_inside_the_offloaded_callable(self):
+        src = self._source("bot_commands.py")
+        # The helper exists and carries the import...
+        self.assertIn("def _render_image(", src)
+        helper = src.split("def _render_image(", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn("from image_generator import generate_image", helper)
+        # ...and gen_slash offloads it rather than importing inline.
+        gen = src.split("async def gen_slash(", 1)[1].split("\n    @", 1)[0]
+        self.assertIn("run_blocking(_render_image", gen)
+        self.assertNotIn("from image_generator import", gen)
+
+    def test_tts_load_imports_inside_the_offloaded_callable(self):
+        src = self._source("main_discord.py")
+        loader = src.split("def _load_tts(", 1)[1].split("\n        logger", 1)[0]
+        self.assertIn("from tts import TTSEngine", loader)
+        # The on_ready body must not import tts directly.
+        on_ready = src.split("async def on_ready(", 1)[1].split("\n@", 1)[0]
+        stripped = on_ready.replace(loader, "")
+        self.assertNotIn("from tts import", stripped)
+        self.assertIn("run_blocking(_load_tts)", on_ready)
+
+
 if __name__ == "__main__":
     unittest.main()

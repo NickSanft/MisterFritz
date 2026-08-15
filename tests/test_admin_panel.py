@@ -5,6 +5,7 @@ We use Starlette's TestClient against the app built by create_app() so we
 exercise routing, templating, and auth without spinning up uvicorn.
 """
 import base64
+import datetime
 import importlib
 import os
 import re
@@ -1050,68 +1051,10 @@ class TestChatCorrectnessAndA11y(unittest.TestCase):
         self.assertIn("prefers-reduced-motion", self._chat_page())
 
 
-class TestChatSend(unittest.TestCase):
-    def test_unauthed_send_redirects_to_chat(self):
-        client = _build_client()
-        r = client.post("/chat/send", data={"message": "hi"},
-                        follow_redirects=False)
-        self.assertEqual(r.status_code, 303)
-        self.assertEqual(r.headers["location"], "/chat")
-
-    def test_authed_send_invokes_ask_stuff_with_username(self):
-        client = _build_client()
-        _login(client)
-
-        fake_module = MagicMock()
-        fake_module.ask_stuff.return_value = {
-            "text": "Very well.",
-            "image_paths": [],
-            "timestamp": "now",
-        }
-        with patch.dict(sys.modules, {"mister_fritz": fake_module}), \
-             patch.object(admin_panel, "audit_log"):
-            r = client.post("/chat/send", data={"message": "hello fritz"})
-
-        self.assertEqual(r.status_code, 200)
-        self.assertIn("Very well.", r.text)
-        # ask_stuff received the cookie's name as a NAMESPACED identity, not
-        # as the bare string — that namespace is what stops a self-asserted
-        # cookie from reaching a Discord user's memories.
-        args, kwargs = fake_module.ask_stuff.call_args
-        # ask_stuff(message, source, user_id, ...)
-        self.assertEqual(args[0], "hello fritz")
-        self.assertEqual(args[2], "web-alice")
-        # The human-readable name still travels, separately, for the prompt.
-        self.assertEqual(kwargs.get("display_name"), "alice")
-
-    def test_send_audit_log_records_message_chars(self):
-        client = _build_client()
-        _login(client)
-
-        fake_module = MagicMock()
-        fake_module.ask_stuff.return_value = {"text": "okay", "image_paths": [], "timestamp": "now"}
-        with patch.dict(sys.modules, {"mister_fritz": fake_module}), \
-             patch.object(admin_panel, "audit_log") as audit:
-            client.post("/chat/send", data={"message": "this is a test message"})
-
-        # First call should be chat_message with ok result.
-        calls = [c for c in audit.call_args_list if c.args and c.args[0] == "chat_message"]
-        self.assertEqual(len(calls), 1)
-        kwargs = calls[0].kwargs
-        self.assertEqual(kwargs["user_id"], "web-alice")
-        self.assertEqual(kwargs["chars"], len("this is a test message"))
-        self.assertEqual(kwargs["result"], "ok")
-
-    def test_empty_message_redirects_without_invoking_agent(self):
-        client = _build_client()
-        _login(client)
-
-        fake_module = MagicMock()
-        with patch.dict(sys.modules, {"mister_fritz": fake_module}):
-            r = client.post("/chat/send", data={"message": "   "},
-                            follow_redirects=False)
-        self.assertEqual(r.status_code, 303)
-        fake_module.ask_stuff.assert_not_called()
+# The four TestChatSend cases were removed with the POST /chat/send handler
+# they covered (DECISIONS.md #3). /chat/stream is the only send path, and
+# TestChatStream* below covers it — including the identity-namespacing
+# assertion these tests used to carry.
 
 
 # ── /chat/stream (Phase web-chat-2: SSE streaming) ──────────────────────────
@@ -1706,6 +1649,74 @@ class TestChatUploadImage(unittest.TestCase):
         self.assertEqual(r.status_code, 400)
 
 
+class TestMessageTimestamps(unittest.TestCase):
+    """DECISIONS.md #16: messages carry a creation timestamp.
+
+    LangGraph checkpoints have no time of their own, so mister_fritz stamps
+    additional_kwargs["ts"] when the message is built. Without it the chat
+    could only show times for messages it watched arrive live, and every page
+    reload would look like the timestamps had been lost.
+    """
+
+    def test_ts_is_surfaced_from_additional_kwargs(self):
+        from langchain_core.messages import AIMessage, HumanMessage
+        human = HumanMessage(content="hello", additional_kwargs={"ts": "2026-08-03T12:00:00+00:00"})
+        ai = AIMessage(content="Good day.", additional_kwargs={"ts": "2026-08-03T12:00:05+00:00"})
+        self.assertEqual(admin_panel._doc_to_message(human)["ts"], "2026-08-03T12:00:00+00:00")
+        self.assertEqual(admin_panel._doc_to_message(ai)["ts"], "2026-08-03T12:00:05+00:00")
+
+    def test_message_without_ts_yields_none_not_a_guess(self):
+        """History written before stamping landed must render without a time
+        rather than with an invented one."""
+        from langchain_core.messages import AIMessage
+        msg = AIMessage(content="from before the change")
+        converted = admin_panel._doc_to_message(msg)
+        self.assertIn("ts", converted)
+        self.assertIsNone(converted["ts"])
+
+    def test_mister_fritz_stamps_an_iso_timestamp(self):
+        import mister_fritz
+        ts = mister_fritz._now_iso()
+        # Parses as an aware ISO-8601 instant.
+        parsed = datetime.datetime.fromisoformat(ts)
+        self.assertIsNotNone(parsed.tzinfo)
+
+
+class TestUploadImageMetadata(unittest.TestCase):
+    """DECISIONS.md #16: the upload response carries the dimensions and format
+    the chat's image card captions with. They come from the sniffed bytes, so
+    they cannot be spoofed by the filename or the declared Content-Type."""
+
+    def setUp(self):
+        _drain_for_user(ALICE_ID)
+
+    def tearDown(self):
+        _drain_for_user(ALICE_ID)
+
+    def test_response_carries_sniffed_dimensions_and_format(self):
+        client = _build_client()
+        _login(client)
+        r = client.post("/chat/upload/image",
+                        files={"file": ("shot.png", _TINY_PNG, "image/png")})
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        # _TINY_PNG is a 1x1 PNG; whatever it is, the server must report the
+        # real numbers rather than omitting them.
+        self.assertEqual(body["format"], "PNG")
+        self.assertIsInstance(body["width"], int)
+        self.assertIsInstance(body["height"], int)
+        self.assertGreater(body["width"], 0)
+        self.assertGreater(body["height"], 0)
+
+    def test_sniff_image_returns_format_and_size(self):
+        self.assertIsNone(admin_panel._sniff_image(_HTML_PAYLOAD))
+        self.assertIsNone(admin_panel._sniff_image(b""))
+        fmt, w, h = admin_panel._sniff_image(_TINY_PNG)
+        self.assertEqual(fmt, "PNG")
+        self.assertGreater(w, 0)
+        self.assertGreater(h, 0)
+
+
 class TestChatUploadImageSniffing(unittest.TestCase):
     """The declared Content-Type is not evidence — the bytes are."""
 
@@ -1881,7 +1892,7 @@ class TestPendingImagePlumbing(unittest.TestCase):
         captured = {}
 
         def fake_ask_stuff(message, source, user, *,
-                          user_image_paths=None, **_):
+                          user_image_paths=None, streaming_callback=None, **_):
             captured["source"] = source
             captured["images"] = user_image_paths
             return {"text": "ok", "image_paths": [], "timestamp": "now"}
@@ -1890,7 +1901,7 @@ class TestPendingImagePlumbing(unittest.TestCase):
         fake_module.ask_stuff = fake_ask_stuff
         with patch.dict(sys.modules, {"mister_fritz": fake_module}), \
              patch.object(admin_panel, "audit_log"):
-            client.post("/chat/send", data={"message": "look at this"})
+            client.post("/chat/stream", data={"message": "look at this"})
 
         # ask_stuff received the stashed image path.
         self.assertEqual(captured["images"], ["/tmp/fake-img.png"])
@@ -1909,7 +1920,7 @@ class TestPendingImagePlumbing(unittest.TestCase):
         captured = {}
 
         def fake_ask_stuff(message, source, user, *,
-                          user_image_paths=None, **_):
+                          user_image_paths=None, streaming_callback=None, **_):
             captured["source"] = source
             captured["images"] = user_image_paths
             return {"text": "ok", "image_paths": [], "timestamp": "now"}
@@ -1918,7 +1929,7 @@ class TestPendingImagePlumbing(unittest.TestCase):
         fake_module.ask_stuff = fake_ask_stuff
         with patch.dict(sys.modules, {"mister_fritz": fake_module}), \
              patch.object(admin_panel, "audit_log"):
-            client.post("/chat/send", data={"message": "just text"})
+            client.post("/chat/stream", data={"message": "just text"})
 
         self.assertIsNone(captured["images"])
         self.assertEqual(captured["source"].name, "LOCAL")

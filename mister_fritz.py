@@ -1,3 +1,4 @@
+import datetime
 import json
 import logging
 import os
@@ -284,6 +285,16 @@ def summarize_conversation(state: EnhancedState, config: RunnableConfig):
 
     delete_messages = [RemoveMessage(id=m.id) for m in state["messages"][:-1]]
     return {"messages": delete_messages}
+
+
+def _now_iso() -> str:
+    """UTC timestamp for a message's additional_kwargs["ts"].
+
+    Stamped at creation because LangGraph checkpoints carry no time of their
+    own. Stored on the message so it survives a reload — the web chat renders
+    it from history, not just from messages it watched arrive live.
+    """
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
 def _history_window(messages: list) -> list:
@@ -613,7 +624,7 @@ def executor(state: EnhancedState, config: RunnableConfig):
     # which makes the checkpointed transcript an unbroken run of user turns
     # (and mislabels every reply in the /chat history renderer). Tag it.
     return {
-        "messages": [AIMessage(content=resp)],
+        "messages": [AIMessage(content=resp, additional_kwargs={"ts": _now_iso()})],
         "image_paths": image_paths,
     }
 
@@ -707,7 +718,13 @@ def ask_stuff(
         }
     }
     inputs = {
-        "messages": [("user", full_prompt)],
+        # HumanMessage rather than a bare ("user", str) tuple so the turn can
+        # carry a creation timestamp. LangGraph checkpoints preserve no time of
+        # their own, so without stamping it here the web chat can only show
+        # times for messages it watched arrive live — and every page reload
+        # would look like the timestamps had been lost.
+        "messages": [HumanMessage(content=full_prompt,
+                                  additional_kwargs={"ts": _now_iso()})],
         "image_paths": [],
         "user_image_paths": user_image_paths,
     }

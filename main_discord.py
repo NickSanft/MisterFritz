@@ -156,20 +156,27 @@ async def on_ready():
     # on_message still binds one, for run_coroutine_threadsafe in the
     # streaming/progress callbacks; do not remove that one.
     if sayer is None:
-        # Deferred import: tts imports torch and TTS.api at module level, so a
-        # module-level import here would make the [voice] extra mandatory just
-        # to start the bot. Absent, /voice reports itself unavailable and
-        # everything else works.
-        try:
+        # Both the import AND the construction go into the worker thread.
+        #
+        # Deferring the import off module scope keeps the [voice] extra
+        # optional, but running it here would still execute tts's module body —
+        # torch plus TTS.api, ~17s measured — on the event loop. That is long
+        # enough to trip discord.py's "heartbeat blocked for more than 10
+        # seconds" warning on every boot with [voice] installed. Absent the
+        # extra, /voice reports itself unavailable and everything else works.
+        def _load_tts():
             from tts import TTSEngine
+            return TTSEngine()
+
+        logger.info("Loading TTS engine...")
+        try:
+            sayer = await run_blocking(_load_tts)
         except ImportError as e:
             logger.warning(
                 "TTS unavailable (%s). /voice is disabled; install the [voice] "
                 "extra to enable it.", e,
             )
         else:
-            logger.info("Loading TTS engine...")
-            sayer = await run_blocking(TTSEngine)
             logger.info("TTS engine ready")
     schedule_manager = ScheduleManager(client)
     schedule_manager.start()
