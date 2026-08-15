@@ -295,7 +295,7 @@ class TestBlockingWorkIsOffloaded(unittest.IsolatedAsyncioTestCase):
 
         cog = _make_cog()
         interaction = _fake_interaction("someone")
-        with unittest.mock.patch("bot_commands.generate_image", fake_generate), \
+        with unittest.mock.patch("image_generator.generate_image", fake_generate), \
              unittest.mock.patch("bot_commands.discord.File", MagicMock()):
             await cog.gen_slash.callback(cog, interaction, prompt="a cat")
         self.assertNotEqual(seen["thread"], loop_thread)
@@ -373,7 +373,7 @@ class TestGpuSerialisation(unittest.IsolatedAsyncioTestCase):
             return "out.png"
 
         cog = _make_cog()
-        with unittest.mock.patch("bot_commands.generate_image", fake_generate), \
+        with unittest.mock.patch("image_generator.generate_image", fake_generate), \
              unittest.mock.patch("bot_commands.discord.File", MagicMock()):
             await asyncio.gather(
                 cog.gen_slash.callback(cog, _fake_interaction("a"), prompt="one"),
@@ -391,7 +391,7 @@ class TestGpuSerialisation(unittest.IsolatedAsyncioTestCase):
         cog = _make_cog()
         first = _fake_interaction("a")
         second = _fake_interaction("b")
-        with unittest.mock.patch("bot_commands.generate_image", slow_generate), \
+        with unittest.mock.patch("image_generator.generate_image", slow_generate), \
              unittest.mock.patch("bot_commands.discord.File", MagicMock()):
             task = asyncio.create_task(
                 cog.gen_slash.callback(cog, first, prompt="one"))

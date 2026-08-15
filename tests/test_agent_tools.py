@@ -98,6 +98,23 @@ class TestScrapeWebTool(unittest.TestCase):
             result = scrape_web.invoke({"url": "http://bad-host.invalid"})
         self.assertIn("Error", result)
 
+    def test_output_is_capped(self):
+        # Uncapped, one long article lands whole in the executor's input and can
+        # evict the conversation window from num_ctx. browser_tools.py had this
+        # cap and the live scraper did not; the module is gone, the cap is not.
+        html = "<html><body><p>" + ("word " * 20000) + "</p></body></html>"
+        with patch.object(agent_tools._HTTP_CLIENT, "get",
+                          return_value=self._mock_response(html)):
+            result = scrape_web.invoke({"url": "http://example.com"})
+        self.assertLessEqual(len(result), agent_tools.SCRAPE_MAX_CHARS)
+
+    def test_short_pages_are_not_truncated(self):
+        html = "<html><body><p>Short and sweet</p></body></html>"
+        with patch.object(agent_tools._HTTP_CLIENT, "get",
+                          return_value=self._mock_response(html)):
+            result = scrape_web.invoke({"url": "http://example.com"})
+        self.assertEqual(result, "Short and sweet")
+
     def test_http_client_has_timeout_configured(self):
         # Timeout is configured on the shared client, not per-call. Sanity-check
         # the client was built with a non-default timeout.

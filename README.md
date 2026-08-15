@@ -105,12 +105,16 @@ ollama pull mxbai-embed-large
 - **macOS/Linux**: `brew install ffmpeg` or `apt-get install -y ffmpeg`
 
 ### 4. PyTorch with CUDA (optional — for GPU-accelerated image generation and TTS)
+
+Only needed if you install the `image` or `voice` extras. Install torch *first*,
+from the index matching your hardware, so pip does not pull generic CUDA wheels:
+
 ```bash
 # CUDA (Windows/Linux)
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
 # CPU-only / macOS
-pip install torch torchvision torchaudio
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 ```
 
 ---
@@ -131,6 +135,33 @@ source .venv/bin/activate
 
 pip install -r requirements.txt
 ```
+
+That installs the pinned production set. **The core is deliberately torch-free** —
+Discord, the agent, memory, document RAG and the admin/chat panel, with none of
+the multi-GB GPU stack. Optional features live in extras:
+
+| Extra | Enables | Pulls torch |
+|---|---|---|
+| `voice` | `/voice` text-to-speech and Whisper transcription | yes |
+| `image` | `/gen` image generation (SDXL) | yes |
+| `ocr` | OCR fallback for scanned PDFs | yes |
+| `telegram` | `main_telegram.py` | no |
+| `dev` | pytest, coverage, ruff | no |
+
+```bash
+pip install ".[voice]"          # one extra
+pip install ".[voice,image]"    # several
+pip install ".[all]"            # everything
+```
+
+Without an extra its feature reports itself unavailable rather than crashing:
+`/voice` replies that it has no voice, and scanned-PDF OCR is skipped.
+
+> Dependencies are declared in `pyproject.toml`'s `[project]` table;
+> `requirements.txt` is the pinned lock of that set. Add new dependencies to
+> `pyproject.toml` first. Do **not** regenerate the lock with
+> `pip freeze > requirements.txt` — that is how a 2016-era neuroimaging stack
+> got in, and `tests/test_packaging.py` will fail if it comes back.
 
 **Configure the bot.** The fastest path is the interactive setup wizard, which
 pings Ollama, creates/pulls the four required models, validates your Discord
@@ -153,7 +184,8 @@ cp .env.example .env
 ```dotenv
 # .env
 DISCORD_BOT_TOKEN=your_token_here
-ROOT_USER=your_discord_username
+# Your numeric Discord ID, not your username — see the Identity section.
+ROOT_USER=discord-123456789012345678
 OLLAMA_HOST=http://127.0.0.1:11434
 ```
 
@@ -297,7 +329,7 @@ only the latest message.
 ## Testing
 
 ```bash
-pip install pytest pytest-cov pytest-asyncio
+pip install -e ".[dev]"
 pytest tests/ -v --cov=. --cov-report=term-missing
 ```
 
@@ -496,7 +528,18 @@ Set `FFMPEG_PATH` and `FFPROBE_PATH` in `.env` to the absolute paths of your ins
 The first run downloads Stable Diffusion XL (~7 GB). GPU (CUDA) is strongly recommended. Check: `python -c "import torch; print(torch.cuda.is_available())"`.
 
 **OCR not working for scanned PDFs**
-Install optional deps: `pip install easyocr PyMuPDF pillow`.
+Install the OCR extra: `pip install ".[ocr]"`.
+
+If `import fitz` fails or `fitz.open` is missing, a distribution named `fitz`
+has been installed alongside PyMuPDF — it is unrelated neuroimaging software
+that claims the same `fitz/` directory. Fix it with:
+
+```bash
+pip uninstall -y fitz && pip install --force-reinstall PyMuPDF
+```
+
+The force-reinstall is not optional: `fitz`'s file manifest lists
+`fitz/__init__.py`, so uninstalling it deletes PyMuPDF's shim on the way out.
 
 **`/schedule add` says I have too many schedules**
 There's a per-user cap (default 10) set by `MAX_SCHEDULES_PER_USER`. Use `/schedule list` to see yours, `/schedule remove <id>` to free a slot, or raise the cap in `.env`. Admins can view everyone's schedules with `/schedule list_all`.

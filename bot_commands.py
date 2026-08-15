@@ -24,11 +24,16 @@ from fritz_utils import (
     canonical_user_id,
 )
 import identity_store
-from image_generator import generate_image
+# NOTE: `image_generator` and `tts` are deliberately NOT imported here. Both
+# pull torch/diffusers/xformers at module level, and bot_commands sits on the
+# import path of main_discord — so importing them here makes the entire
+# multi-GB GPU stack a hard requirement just to START the bot, even for someone
+# who never runs /gen or /voice. They are deferred to the point of use; see
+# gen_slash below and main_discord's TTS bootstrap. This mirrors what
+# agent_tools.generate_image already does.
 from mister_fritz import ask_stuff
 from observability import METRICS, audit_log, get_health_snapshot
 import privacy
-from tts import TTSEngine
 import workspace_store
 
 logger = logging.getLogger(__name__)
@@ -184,7 +189,9 @@ async def _require_admin(interaction: discord.Interaction) -> bool:
 class FritzCommands(commands.Cog):
     """All MisterFritz slash commands."""
 
-    def __init__(self, bot: commands.Bot, sayer: TTSEngine, schedule_manager=None):
+    # `sayer` is a tts.TTSEngine, left untyped so the annotation does not drag
+    # torch back into the import graph. None when the [voice] extra is absent.
+    def __init__(self, bot: commands.Bot, sayer, schedule_manager=None):
         self.bot = bot
         self.sayer = sayer
         self.schedule_manager = schedule_manager
@@ -526,6 +533,17 @@ class FritzCommands(commands.Cog):
     @app_commands.describe(message="The text you want the bot to say")
     async def voice_slash(self, interaction: discord.Interaction, message: str):
         await interaction.response.defer(thinking=True)
+        if self.sayer is None:
+            # Core-only install: the [voice] extra is not present, so there is
+            # no TTS engine. Say so plainly rather than raising AttributeError
+            # into the generic error handler.
+            await interaction.followup.send(
+                "I regret that I have no voice on this instance. "
+                "Install the optional speech dependencies with "
+                "`pip install \".[voice]\"` and restart me.",
+                ephemeral=True,
+            )
+            return
         try:
             with METRICS.time_block("discord_commands.voice"):
                 response_data = await run_blocking(
@@ -570,6 +588,8 @@ class FritzCommands(commands.Cog):
                 )
             with METRICS.time_block("discord_commands.gen"):
                 async with self._image_semaphore:
+                    # Deferred import — see the note at the top of this module.
+                    from image_generator import generate_image
                     output_file = await run_blocking(generate_image, prompt)
             await interaction.followup.send(content="Here is your file!", file=discord.File(output_file))
         except Exception as e:

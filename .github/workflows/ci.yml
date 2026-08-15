@@ -6,9 +6,15 @@ on:
       - main
       - master
   pull_request:
+  # full-deps is expensive (torch, CUDA-free wheels, easyocr models) so it is
+  # not on the push path — run it nightly and on demand.
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
 
 jobs:
   test:
+    name: core + dev
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,18 +22,27 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          # Was absent, so every run re-downloaded the whole closure.
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Install test/lint tools
-        run: pip install pytest pytest-cov pytest-asyncio ruff
+      # Core is deliberately torch-free — the GPU stack lives in the [image]
+      # and [voice] extras, which this job does not install. See the
+      # deferred imports in bot_commands / main_discord / agent_tools.
+      - name: Install core + dev
+        run: pip install -e ".[dev]"
 
       - name: Compile all sources
         run: python -m compileall -q .
 
       - name: Lint with ruff
         run: ruff check .
+
+      # Catches a dependency dropped from core that is still needed at import
+      # time. pytest alone cannot: conftest.py stubs the heavy optional
+      # modules, so a module can pass tests and still fail on a real boot.
+      - name: Import smoke check
+        run: python scripts/check_imports.py
 
       - name: Run tests with coverage
         run: |
@@ -41,7 +56,58 @@ jobs:
           # Provide minimal config so validate_config() passes in any test
           # that triggers module-level initialisation
           DISCORD_BOT_TOKEN: "ci-placeholder-token"
-          ROOT_USER: "ci-root"
+          ROOT_USER: "discord-000000000000000000"
+          OLLAMA_HOST: "http://127.0.0.1:11434"
+          WHISPER_MODEL: "small"
+          WHISPER_DEVICE: "cpu"
+          WHISPER_COMPUTE_TYPE: "int8"
+
+  full-deps:
+    name: all extras (CPU wheels)
+    # Scheduled and manual only. Installing every extra pulls torch and
+    # friends; on the push path that dominated the run and gave no signal the
+    # core job does not already give.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # CPU wheels only. Without the extra index this pulls multi-GB CUDA
+      # wheels that a GitHub runner has no GPU to use.
+      - name: Install all extras
+        run: |
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+            -e ".[all]"
+
+      # PyMuPDF provides `import fitz`. If a distribution named `fitz` ever
+      # gets installed alongside it, whichever wheel lands last wins the
+      # fitz/ directory — and if the wrong one wins, document_engine's
+      # ImportError guard does not fire and fitz.open() raises AttributeError
+      # inside PDF ingestion. Assert the good state explicitly.
+      - name: Verify fitz resolves to PyMuPDF
+        run: |
+          python -c "import fitz; assert fitz.open, 'fitz.open missing'"
+          python - <<'PY'
+          import importlib.metadata as md
+          try:
+              v = md.version("fitz")
+          except md.PackageNotFoundError:
+              print("ok: no `fitz` distribution installed")
+          else:
+              raise SystemExit(f"FAIL: distribution `fitz` {v} is installed")
+          PY
+
+      - name: Run tests
+        run: pytest tests/ --tb=short -q
+        env:
+          DISCORD_BOT_TOKEN: "ci-placeholder-token"
+          ROOT_USER: "discord-000000000000000000"
           OLLAMA_HOST: "http://127.0.0.1:11434"
           WHISPER_MODEL: "small"
           WHISPER_DEVICE: "cpu"

@@ -15,8 +15,9 @@ python -m venv .venv
 # macOS / Linux
 source .venv/bin/activate
 
-pip install -r requirements.txt
-pip install pytest pytest-cov pytest-asyncio ruff
+# Core + dev tooling. Deliberately torch-free — the GPU stack lives in
+# the [voice] and [image] extras and the test suite does not need it.
+pip install -e ".[dev]"
 ```
 
 You will also need [Ollama](https://ollama.com) running locally. See

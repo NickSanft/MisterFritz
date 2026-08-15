@@ -24,6 +24,7 @@ from fritz_utils import (
     MEMORY_EXTRACT_MIN_REPLY_CHARS,
     MEMORY_EXTRACT_MIN_USER_CHARS,
     OLLAMA_KEEP_ALIVE,
+    SCRAPE_MAX_CHARS,
     VISION_MODEL,
 )
 from observability import METRICS, time_tool
@@ -246,7 +247,7 @@ def scrape_web(url: str):
     url: The URL to pull from the internet.
 
     Returns:
-    string: The readable text from the website.
+    string: The readable text from the website (up to 8000 characters).
     """
     try:
         with time_tool("scrape_web"):
@@ -257,7 +258,11 @@ def scrape_web(url: str):
                 element.extract()
             text = soup.get_text(' ')
             clean_text = re.sub(r'\s+', ' ', text).strip()
-            return clean_text
+            # Uncapped, a single long article was fed whole into the executor's
+            # input and could evict the conversation window — and the Fritz
+            # persona itself — from num_ctx. The now-deleted browser_tools.py
+            # had this cap; the live scraper never did.
+            return clean_text[:SCRAPE_MAX_CHARS]
     except Exception as e:
         # time_tool already recorded the error; this branch produces the
         # user-facing message and squashes the exception so the agent sees a string.

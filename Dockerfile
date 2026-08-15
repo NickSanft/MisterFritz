@@ -25,11 +25,13 @@ WORKDIR /app
 # Runtime system deps:
 #   ffmpeg      — audio processing (replaces bundled ffmpeg.exe)
 #   libsndfile1 — required by soundfile / Coqui TTS
-#   tesseract   — OCR fallback for scanned PDFs
+#
+# tesseract-ocr was here for "OCR fallback for scanned PDFs" — but the OCR
+# engine is easyocr (document_engine.get_ocr_reader), and pytesseract is never
+# imported anywhere in the repo. It was a dead apt layer.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libsndfile1 \
-    tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy installed Python packages from the builder stage

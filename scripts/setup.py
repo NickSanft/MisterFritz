@@ -346,8 +346,10 @@ def cuda_hint() -> None:
     try:
         import torch  # type: ignore
     except ImportError:
-        warn("PyTorch is not installed yet (run `pip install -r requirements.txt`).")
-        info("Image generation and TTS will be very slow without a CUDA GPU.")
+        # Expected on a core install: torch lives in the [image] and [voice]
+        # extras, not the core set. Not a problem unless you want those.
+        info("PyTorch is not installed — the core set is deliberately torch-free.")
+        info('Only needed for /gen and /voice: pip install ".[image,voice]"')
         return
     if torch.cuda.is_available():
         success(f"CUDA available — device: {torch.cuda.get_device_name(0)}")
@@ -385,6 +387,7 @@ def main() -> None:
     print()
     print("  Next steps:")
     print("    1. pip install -r requirements.txt   (if you haven't already)")
+    print('       optional features:  pip install ".[voice]" / ".[image]" / ".[ocr]"')
     print("    2. python main_discord.py")
     print()
     print("  Run /help in Discord once the bot is online to see what it can do.")

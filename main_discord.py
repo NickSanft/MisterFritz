@@ -28,8 +28,9 @@ from mister_fritz import ask_stuff
 from observability import METRICS, init_logging, start_metrics_server
 from prewarm import prewarm_models
 from scheduler import ScheduleManager
+# stt is safe at module level: it imports pydub (core) and defers the Whisper
+# model itself. tts is NOT — see the deferred import in on_ready.
 from stt import transcribe as _whisper_transcribe
-from tts import TTSEngine
 import workspace_store
 
 init_logging()
@@ -155,9 +156,21 @@ async def on_ready():
     # on_message still binds one, for run_coroutine_threadsafe in the
     # streaming/progress callbacks; do not remove that one.
     if sayer is None:
-        logger.info("Loading TTS engine...")
-        sayer = await run_blocking(TTSEngine)
-        logger.info("TTS engine ready")
+        # Deferred import: tts imports torch and TTS.api at module level, so a
+        # module-level import here would make the [voice] extra mandatory just
+        # to start the bot. Absent, /voice reports itself unavailable and
+        # everything else works.
+        try:
+            from tts import TTSEngine
+        except ImportError as e:
+            logger.warning(
+                "TTS unavailable (%s). /voice is disabled; install the [voice] "
+                "extra to enable it.", e,
+            )
+        else:
+            logger.info("Loading TTS engine...")
+            sayer = await run_blocking(TTSEngine)
+            logger.info("TTS engine ready")
     schedule_manager = ScheduleManager(client)
     schedule_manager.start()
     # Start the read-only admin panel (no-op if ADMIN_PANEL_PASSWORD is unset).

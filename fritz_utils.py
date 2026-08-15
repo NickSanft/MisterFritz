@@ -121,6 +121,12 @@ HISTORY_TOKEN_BUDGET: int = int(os.environ.get("HISTORY_TOKEN_BUDGET", "4096"))
 # the system prompt itself — from the model's context.
 MEMORY_INJECT_MAX_CHARS: int = int(os.environ.get("MEMORY_INJECT_MAX_CHARS", "4000"))
 
+# Hard cap (characters) on what scrape_web returns to the agent. Same reasoning
+# as the memory blob above: one long article, returned whole, lands in the
+# executor's input and can push the conversation window out of num_ctx. The
+# deleted browser_tools.py had this cap; the live scraper never did.
+SCRAPE_MAX_CHARS: int = int(os.environ.get("SCRAPE_MAX_CHARS", "8000"))
+
 # Characters buffered before the streaming pipeline fires streaming_callback.
 # 1 emits every token; raising it coalesces deltas (fewer SSE frames / Discord
 # hops) at the cost of choppier streaming.
