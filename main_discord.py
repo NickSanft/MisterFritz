@@ -19,8 +19,11 @@ from fritz_utils import (
     OLLAMA_KEEP_ALIVE,
     THINKING_OLLAMA_MODEL,
     VISION_MODEL,
+    canonical_user_id,
+    safe_user_token,
     validate_config,
 )
+import identity_store
 from mister_fritz import ask_stuff
 from observability import METRICS, init_logging, start_metrics_server
 from prewarm import prewarm_models
@@ -179,7 +182,13 @@ async def on_ready():
 
 @client.event
 async def on_message(ctx):
-    author = ctx.author.name
+    # THE IDENTITY BOUNDARY. Everything downstream keys off `user_id`, which is
+    # the immutable snowflake — not the display name, which Discord lets people
+    # change at will and which collides across platforms. `author` survives only
+    # for the prompt and for filenames.
+    user_id = canonical_user_id("discord", ctx.author.id)
+    author = ctx.author.display_name or ctx.author.name
+    identity_store.record(user_id, author, "discord")
     channel = ctx.channel
     message_clean = ctx.clean_content
     if ctx.author == client.user:
@@ -206,7 +215,7 @@ async def on_message(ctx):
                 source = MessageSource.DISCORD_TEXT_AND_IMAGE
                 try:
                     os.makedirs("temp_images", exist_ok=True)
-                    file_path = os.path.join("temp_images", f"{author}_{attachment.id}_{attachment.filename}")
+                    file_path = os.path.join("temp_images", f"{safe_user_token(user_id)}_{attachment.id}_{attachment.filename}")
                     await attachment.save(file_path)
                     user_image_paths.append(file_path)
                     logger.info("Saved image %s for %s", file_path, request_id)
@@ -219,7 +228,7 @@ async def on_message(ctx):
                 # entirely and the user got no reply at all.
                 try:
                     os.makedirs("temp_audio", exist_ok=True)
-                    file_path = os.path.join("temp_audio", f"{author}_{attachment.id}_{attachment.filename}")
+                    file_path = os.path.join("temp_audio", f"{safe_user_token(user_id)}_{attachment.id}_{attachment.filename}")
                     await attachment.save(file_path)
                     temp_audio_paths.append(file_path)
                     logger.info("Saved audio %s for %s", file_path, request_id)
@@ -267,12 +276,14 @@ async def on_message(ctx):
         start_time = time.time()
         response_data = await run_blocking(
             ask_stuff,
-            message_clean, source, author,
+            message_clean, source, user_id,
             progress_callback, streaming_callback,
             user_image_paths,
-            workspace_store.get(author),
+            workspace_store.get(user_id),
             ctx.channel.id,
             schedule_manager,
+            display_name=author,
+            channel_key=str(ctx.channel.id),
         )
         METRICS.record_latency("ask_stuff", time.time() - start_time)
     except Exception as e:

@@ -10,12 +10,11 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
 
-from fritz_utils import SCHEDULE_DB, WORKSPACES_ROOT
+from fritz_utils import SCHEDULE_DB, WORKSPACES_ROOT, safe_user_token
 
 logger = logging.getLogger(__name__)
 
@@ -44,10 +43,14 @@ def _init_db() -> None:
 
 
 def _safe_user_dir(user_id: str) -> str:
-    """Sanitise a user_id for filesystem use. Discord usernames can include
-    dots and other characters that we don't want bleeding into directory names.
+    """Sanitise a user_id for filesystem use.
+
+    Was a fourth private copy of the same regex. It now delegates to the one in
+    fritz_utils so the directory name and every other identity-derived token
+    cannot drift apart. Canonical ids pass through untouched — `-` is allowed,
+    which is exactly why the separator is a dash.
     """
-    return re.sub(r"[^a-zA-Z0-9_-]", "_", user_id) or "anonymous"
+    return safe_user_token(user_id)
 
 
 def get(user_id: str) -> str | None:

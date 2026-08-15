@@ -1,6 +1,8 @@
 import functools
 import json
+import logging
 import os
+import re
 import shutil
 from enum import Enum
 
@@ -194,15 +196,12 @@ CHAT_ALLOWED_USERS: frozenset[str] = frozenset(
 # over plain http through an SSH tunnel, where Secure would silently break login.
 CHAT_COOKIE_SECURE: bool = os.environ.get("CHAT_COOKIE_SECURE", "").lower() in ("1", "true", "yes")
 
-# The web chat gets its own LangGraph thread, so a chat identity cannot read or
-# overwrite the Discord conversation belonging to the same name. Set true to
-# restore the old shared thread (rollback lever, and the single-user case where
-# continuing one conversation across both surfaces is the point).
-CHAT_SHARE_DISCORD_THREAD: bool = os.environ.get("CHAT_SHARE_DISCORD_THREAD", "").lower() in ("1", "true", "yes")
-# Prefix for the web chat's thread ids: "web-alice". The separator is a dash,
-# not a colon — a colon is illegal in Windows filenames and creates a silent
-# NTFS alternate data stream on write.
-CHAT_THREAD_PREFIX: str = os.environ.get("CHAT_THREAD_PREFIX", "web")
+# CHAT_SHARE_DISCORD_THREAD and CHAT_THREAD_PREFIX are RETIRED. The `web-`
+# namespace now lives inside the identity itself (canonical_user_id), so the
+# prefix has nothing left to do, and IDENTITY_LINKS replaces the sharing flag —
+# it links the whole identity rather than only the thread, so memories,
+# schedules and workspace follow the conversation instead of being left behind.
+# See the [Unreleased] CHANGELOG entry for the upgrade note.
 
 
 # Secret used to HMAC-sign the chat identity cookie. If unset, we auto-generate
@@ -359,17 +358,143 @@ ADMIN_USERS: frozenset[str] = frozenset(
 )
 
 
-def is_admin(user_id: str | None) -> bool:
-    """Return True if user_id is the project owner (ROOT_USER) or in ADMIN_USERS.
+# ---------------------------------------------------------------------------
+# Identity
+# ---------------------------------------------------------------------------
+# ONE transformation, in one place. Everything downstream — Chroma namespace,
+# LangGraph thread_id, schedules.user_id, workspaces.user_id, the admin gate —
+# consumes the output of canonical_user_id() verbatim.
+#
+# Before this, the same display string was transformed four different ways at
+# four layers, so write paths and delete paths disagreed. That IS the /forget
+# bug for punctuated usernames.
+
+# A DASH, not a colon (DECISIONS #5). A colon is illegal in Windows filenames
+# and silently creates an NTFS alternate data stream on write — and identities
+# reach filenames in several places. The dash costs a closed platform allowlist
+# in split_user_id (below) so that "web-alice-bob" still parses correctly.
+IDENTITY_SEPARATOR = "-"
+KNOWN_PLATFORMS: frozenset[str] = frozenset({"discord", "telegram", "web", "local"})
+# Same charset admin_panel.chat_login already used for usernames — dashes
+# included. Keeping them is safe because split_user_id partitions on the FIRST
+# dash and no platform name contains one, so "web-alice-bob" resolves to
+# platform "web", id "alice-bob" exactly as DECISIONS #5 requires.
+_IDENT_STRIP_RE = re.compile(r"[^a-zA-Z0-9_-]")
+_TOKEN_SAFE_RE = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def canonical_user_id(platform: str, raw_id) -> str:
+    """Return the stable, namespaced identity for a user: '<platform>-<id>'.
+
+    platform: 'discord' | 'telegram' | 'web' | 'local'
+    raw_id:   the platform's IMMUTABLE id where one exists (a Discord or
+              Telegram numeric snowflake), otherwise the self-asserted name
+              (web). Using the snowflake is the point: a Discord rename no
+              longer orphans memories, workspace, schedules and admin rights.
+    """
+    plat = (platform or "local").strip().lower()
+    ident = _IDENT_STRIP_RE.sub("", str(raw_id or "").strip())[:64]
+    if not ident:
+        raise ValueError(
+            f"cannot build a canonical id from platform={platform!r} raw_id={raw_id!r}")
+    return f"{plat}{IDENTITY_SEPARATOR}{ident}"
+
+
+def split_user_id(user_id: str | None) -> tuple[str | None, str]:
+    """('discord', '123') for canonical ids; (None, <as-is>) for legacy ones.
+
+    The platform allowlist is what makes a dash separator safe: a legacy
+    display name containing a dash ("jean-luc") has no known platform prefix,
+    so it is correctly reported as legacy rather than split at the first dash.
+    """
+    if not user_id or IDENTITY_SEPARATOR not in user_id:
+        return None, (user_id or "")
+    plat, _, ident = user_id.partition(IDENTITY_SEPARATOR)
+    plat = plat.lower()
+    return (plat, ident) if plat in KNOWN_PLATFORMS and ident else (None, user_id)
+
+
+def is_canonical_user_id(user_id: str | None) -> bool:
+    return split_user_id(user_id)[0] is not None
+
+
+def safe_user_token(user_id: str | None) -> str:
+    """Filesystem- and URL-safe rendering of an identity.
+
+    Canonical ids are already safe by construction (dash separator, alnum and
+    underscore elsewhere). This exists for legacy ids that may still carry
+    punctuation, and as a guard for anything building a path from an identity.
+    """
+    return _TOKEN_SAFE_RE.sub("_", user_id or "") or "anonymous"
+
+
+# Per-channel conversation threads. Turning this on BRANCHES every existing
+# conversation: the identity-only thread stays in the DB untouched, but new
+# messages start a fresh per-channel thread. Off by default so an upgrade
+# preserves continuity.
+THREADS_PER_CHANNEL: bool = os.environ.get("THREADS_PER_CHANNEL", "false").lower() in ("1", "true", "yes")
+
+# Transitional: match ROOT_USER / ADMIN_USERS against the human display name as
+# well as the canonical id.
+#
+# Defaults to FALSE (DECISIONS #6) — secure from day one, with no impersonation
+# window. The cost is that you must put your numeric Discord ID in ADMIN_USERS
+# BEFORE deploying, or you lose admin commands. While this is true, anyone who
+# takes the owner's freed-up username inherits admin.
+ADMIN_LEGACY_NAME_MATCH: bool = os.environ.get("ADMIN_LEGACY_NAME_MATCH", "false").lower() in ("1", "true", "yes")
+
+
+def _parse_identity_links() -> dict[str, str]:
+    """IDENTITY_LINKS=web-alice=discord-123456789,web-bob=discord-987654321"""
+    out: dict[str, str] = {}
+    for pair in os.environ.get("IDENTITY_LINKS", "").split(","):
+        alias, sep, primary = pair.strip().partition("=")
+        if sep and alias.strip() and primary.strip():
+            out[alias.strip()] = primary.strip()
+    return out
+
+
+IDENTITY_LINKS: dict[str, str] = _parse_identity_links()
+
+
+def resolve_identity(user_id: str) -> str:
+    """Follow IDENTITY_LINKS one hop. Deliberately not transitive — a chain
+    would make the effective identity depend on config ordering."""
+    return IDENTITY_LINKS.get(user_id, user_id)
+
+
+def thread_id_for(user_id: str, channel_key: str | None = None) -> str:
+    """LangGraph thread id for an identity, optionally per channel.
+
+    With THREADS_PER_CHANNEL off (default) this is the identity alone, which
+    preserves today's one-thread-per-user behaviour across an upgrade.
+    """
+    if not THREADS_PER_CHANNEL or not channel_key:
+        return user_id
+    return f"{user_id}#{safe_user_token(str(channel_key))}"
+
+
+def is_admin(user_id: str | None, display_name: str | None = None) -> bool:
+    """Return True if the caller is the project owner (ROOT_USER) or in ADMIN_USERS.
+
+    `user_id` should be a canonical id. `display_name` is consulted ONLY when
+    ADMIN_LEGACY_NAME_MATCH is on, so a pre-migration config keeps working for
+    one release — at the cost of matching admin rights on a mutable username.
 
     Reads from the module's own scope at call time so tests can patch
     ROOT_USER / ADMIN_USERS without re-importing callers.
     """
-    if not user_id:
-        return False
-    if ROOT_USER and user_id == ROOT_USER:
-        return True
-    return user_id in ADMIN_USERS
+    candidates = [user_id]
+    if ADMIN_LEGACY_NAME_MATCH and display_name:
+        candidates.append(display_name)
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if ROOT_USER and candidate == ROOT_USER:
+            return True
+        if candidate in ADMIN_USERS:
+            return True
+    return False
 
 # ---------------------------------------------------------------------------
 # FFmpeg — prefer system install; fall back to bundled Windows executables
@@ -424,6 +549,20 @@ def validate_config() -> None:
             + "\n".join(f"  - {m}" for m in missing)
             + "\nSet these in a .env file or as environment variables."
             + " See .env.example for reference."
+        )
+
+    legacy = [u for u in ([ROOT_USER] if ROOT_USER else []) + sorted(ADMIN_USERS)
+              if not is_canonical_user_id(u)]
+    if legacy:
+        logging.getLogger(__name__).warning(
+            "ROOT_USER/ADMIN_USERS still use display names (%s). Admin rights are "
+            "matched on a mutable username, and ADMIN_LEGACY_NAME_MATCH is %s. "
+            "Run `python migrate_identity.py --dry-run` to get the canonical ids, "
+            "then set e.g. ROOT_USER=discord-123456789.",
+            ", ".join(legacy),
+            "ON — anyone taking that username inherits admin"
+            if ADMIN_LEGACY_NAME_MATCH else
+            "OFF — admin commands will NOT work until you set a canonical id",
         )
 
 

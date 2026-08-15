@@ -24,13 +24,22 @@ from bot_commands import FritzCommands, _require_admin  # noqa: E402
 
 
 ROOT_NAME = "root_test_user"
+# Every fake interaction shares one snowflake unless a test says otherwise, so
+# the canonical id a command stores is predictable.
+FAKE_USER_ID = 424242
+FAKE_IDENTITY = "discord-424242"
 
 
-def _fake_interaction(username: str) -> MagicMock:
+def _fake_interaction(username: str, user_id: int = FAKE_USER_ID) -> MagicMock:
     """Build an Interaction-like object that records the response message."""
     interaction = MagicMock()
     interaction.user = MagicMock()
     interaction.user.name = username
+    # Without an explicit int, `interaction.user.id` is an auto-created
+    # MagicMock and canonical_user_id would stringify it into garbage — the
+    # single most likely way for these tests to pass while asserting nonsense.
+    interaction.user.id = user_id
+    interaction.user.display_name = username
     interaction.channel_id = 12345
     interaction.guild_id = 67890
     interaction.response = MagicMock()
@@ -57,29 +66,66 @@ def _make_cog(schedule_manager=None) -> FritzCommands:
     )
 
 
-def _patch_admins(root: str | None = ROOT_NAME, extras: tuple[str, ...] = ()):
-    """Patch ROOT_USER and ADMIN_USERS in fritz_utils for the test scope."""
+def _patch_admins(root: str | None = ROOT_NAME, extras: tuple[str, ...] = (),
+                  legacy_names: bool = False):
+    """Patch ROOT_USER, ADMIN_USERS and the legacy-name shim in fritz_utils.
+
+    `legacy_names` has to be explicit: these tests are written against
+    display names, so without pinning the flag they would pass through the
+    compatibility path and silently stop testing the real gate.
+    """
     return unittest.mock.patch.multiple(
         fritz_utils,
         ROOT_USER=root,
         ADMIN_USERS=frozenset(extras),
+        ADMIN_LEGACY_NAME_MATCH=legacy_names,
     )
 
 
 class TestRequireAdmin(unittest.IsolatedAsyncioTestCase):
-    async def test_root_user_allowed(self):
-        with _patch_admins():
-            interaction = _fake_interaction(ROOT_NAME)
+    """The gate keys on the canonical id. The display-name path is reachable
+    only via ADMIN_LEGACY_NAME_MATCH, which ships false (DECISIONS #6)."""
+
+    async def test_root_user_by_canonical_id_allowed(self):
+        with _patch_admins(root=FAKE_IDENTITY):
+            interaction = _fake_interaction("anything-at-all")
             allowed = await _require_admin(interaction)
         self.assertTrue(allowed)
         interaction.response.send_message.assert_not_called()
 
-    async def test_admin_user_from_list_allowed(self):
-        with _patch_admins(extras=("alice",)):
+    async def test_admin_user_from_list_by_canonical_id_allowed(self):
+        with _patch_admins(root=None, extras=(FAKE_IDENTITY,)):
             interaction = _fake_interaction("alice")
             allowed = await _require_admin(interaction)
         self.assertTrue(allowed)
         interaction.response.send_message.assert_not_called()
+
+    async def test_rename_does_not_revoke_admin(self):
+        """The whole point: admin follows the snowflake, not the name."""
+        with _patch_admins(root=FAKE_IDENTITY):
+            renamed = _fake_interaction("brand_new_name")
+            self.assertTrue(await _require_admin(renamed))
+
+    async def test_legacy_name_rejected_when_flag_is_false(self):
+        with _patch_admins(root=ROOT_NAME, legacy_names=False):
+            interaction = _fake_interaction(ROOT_NAME)
+            allowed = await _require_admin(interaction)
+        self.assertFalse(allowed)
+
+    async def test_legacy_name_allowed_when_flag_is_true(self):
+        with _patch_admins(root=ROOT_NAME, legacy_names=True):
+            interaction = _fake_interaction(ROOT_NAME)
+            allowed = await _require_admin(interaction)
+        self.assertTrue(allowed)
+
+    async def test_canonical_root_is_not_matchable_by_name(self):
+        """Once ROOT_USER is canonical, the legacy shim grants nothing — there
+        is no display name that equals `discord-424242`. This is what makes
+        migrating the config the thing that actually closes the rename hole,
+        rather than flipping the flag."""
+        with _patch_admins(root=FAKE_IDENTITY, legacy_names=True):
+            impostor = _fake_interaction(ROOT_NAME, user_id=999)
+            self.assertFalse(await _require_admin(impostor))
 
     async def test_non_admin_user_rejected_with_ephemeral(self):
         with _patch_admins():
@@ -104,9 +150,10 @@ class TestScheduleAddOpenToAll(unittest.IsolatedAsyncioTestCase):
                 cog, interaction, every="1h", prompt="hello", description=None
             )
         manager.add_schedule.assert_called_once()
-        # Ownership is keyed by the caller's name, not by ROOT.
+        # Ownership is keyed by the caller's canonical identity, not by
+        # their display name and not by ROOT.
         _, kwargs = manager.add_schedule.call_args
-        self.assertEqual(kwargs.get("user_id"), "regular_user")
+        self.assertEqual(kwargs.get("user_id"), FAKE_IDENTITY)
 
     async def test_value_error_surfaces_as_user_message(self):
         # Schedule cap exceeded, bad cron, etc. all raise ValueError.
@@ -134,7 +181,7 @@ class TestScheduleRemoveOpenToAll(unittest.IsolatedAsyncioTestCase):
         with _patch_admins():
             interaction = _fake_interaction("regular_user")
             await cog.schedule_remove.callback(cog, interaction, schedule_id="abc12345")
-        manager.remove_schedule.assert_called_once_with("abc12345", "regular_user")
+        manager.remove_schedule.assert_called_once_with("abc12345", FAKE_IDENTITY)
 
     async def test_permission_error_surfaces_to_caller(self):
         # Attempting to remove another user's schedule.
@@ -156,7 +203,7 @@ class TestScheduleListOpenToAll(unittest.IsolatedAsyncioTestCase):
             interaction = _fake_interaction("regular_user")
             await cog.schedule_list.callback(cog, interaction)
         # list_schedules is read-only and per-user, so it's open by design.
-        manager.list_schedules.assert_called_once_with("regular_user")
+        manager.list_schedules.assert_called_once_with(FAKE_IDENTITY)
 
 
 class TestScheduleListAllAdminOnly(unittest.IsolatedAsyncioTestCase):
@@ -180,7 +227,7 @@ class TestScheduleListAllAdminOnly(unittest.IsolatedAsyncioTestCase):
              "description": "weather", "created": "now"},
         ]
         cog = _make_cog(schedule_manager=manager)
-        with _patch_admins():
+        with _patch_admins(root=FAKE_IDENTITY):
             interaction = _fake_interaction(ROOT_NAME)
             await cog.schedule_list_all.callback(cog, interaction)
         manager.list_all_schedules.assert_called_once()
@@ -197,7 +244,7 @@ class TestWorkspaceEnableOpenToAll(unittest.IsolatedAsyncioTestCase):
                                  return_value="/tmp/workspaces/regular_user") as enable_mock:
             interaction = _fake_interaction("regular_user")
             await cog.workspace_enable.callback(cog, interaction)
-        enable_mock.assert_called_once_with("regular_user")
+        enable_mock.assert_called_once_with(FAKE_IDENTITY)
         interaction.response.send_message.assert_called_once()
         # Confirm the response is ephemeral (workspace path is sensitive).
         _, kwargs = interaction.response.send_message.call_args
@@ -530,6 +577,53 @@ class TestEmbedsAndBounds(unittest.IsolatedAsyncioTestCase):
             await cog.lore_slash.callback(cog, interaction, query="q")
         first = interaction.followup.send.await_args_list[0].args[0]
         self.assertNotIn("The answer was over", first)
+
+
+class TestIdentityFromSnowflake(unittest.IsolatedAsyncioTestCase):
+    """The cog's single conversion point. Every slash command used to key off
+    `interaction.user.name`, so a Discord rename orphaned that person's
+    memories, schedules and workspace — and a Telegram user with the same
+    handle shared them."""
+
+    def test_identity_is_derived_from_the_snowflake(self):
+        interaction = _fake_interaction("Nick")
+        self.assertEqual(bot_commands._identity(interaction), FAKE_IDENTITY)
+
+    def test_renaming_does_not_change_the_identity(self):
+        before = bot_commands._identity(_fake_interaction("Nick"))
+        after = bot_commands._identity(_fake_interaction("Someone Else Entirely"))
+        self.assertEqual(before, after)
+
+    def test_two_users_get_two_identities(self):
+        a = bot_commands._identity(_fake_interaction("same_name", user_id=1))
+        b = bot_commands._identity(_fake_interaction("same_name", user_id=2))
+        self.assertNotEqual(a, b)
+
+    def test_display_name_is_kept_separately(self):
+        interaction = _fake_interaction("Nick")
+        self.assertEqual(bot_commands._display(interaction), "Nick")
+
+    def test_identity_records_the_alias(self):
+        # Nothing else knows the human's name once the id is a snowflake.
+        with unittest.mock.patch.object(bot_commands.identity_store, "record") as rec:
+            bot_commands._identity(_fake_interaction("Nick"))
+        rec.assert_called_once_with(FAKE_IDENTITY, "Nick", "discord")
+
+    async def test_forget_confirm_view_is_keyed_on_the_id(self):
+        # A rename between opening the dialog and pressing Confirm used to
+        # lock the requester out of their own confirmation.
+        view = bot_commands._ForgetConfirmView(FAKE_IDENTITY, MagicMock())
+        renamed = _fake_interaction("a_completely_new_name")
+        self.assertTrue(await view.interaction_check(renamed))
+
+    async def test_forget_confirm_view_rejects_a_different_user(self):
+        view = bot_commands._ForgetConfirmView(FAKE_IDENTITY, MagicMock())
+        other = _fake_interaction("someone", user_id=999)
+        self.assertFalse(await view.interaction_check(other))
+
+    def test_no_colon_reaches_a_filename(self):
+        # DECISIONS #5: identities land in Windows paths in several places.
+        self.assertNotIn(":", bot_commands._identity(_fake_interaction("Nick")))
 
 
 if __name__ == "__main__":

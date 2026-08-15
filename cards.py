@@ -23,24 +23,33 @@ CRITICAL_FAILURE_MESSAGES = [
     "This is funny in a cosmic sort of way."
 ]
 
-# Dictionary to store decks for each user
+# Dictionary to store decks for each user. Keyed by canonical identity, so a
+# rename mid-session does not silently hand someone a fresh deck.
 USER_DECKS = {}
 
+
+def _who(user_id: str, display_name: str | None) -> str:
+    """Name to address the player by. The key is an opaque identity now, so the
+    prose needs the display name passed alongside it."""
+    return display_name or user_id
+
+
 # Function to get a user's number of cards left
-def get_remaining_card_number(user_id: str) -> str:
+def get_remaining_card_number(user_id: str, display_name: str | None = None) -> str:
+    who = _who(user_id, display_name)
     if user_id not in USER_DECKS:
-        return f"You don't have a deck, {user_id}. Stop trying to trick me."
+        return f"You don't have a deck, {who}. Stop trying to trick me."
     num_cards = len(USER_DECKS[user_id].cards)
-    return f"You have {num_cards} cards remaining, {user_id}."
+    return f"You have {num_cards} cards remaining, {who}."
 
 # Function to reload a user's deck
-def reload_deck(user_id: str) -> str:
+def reload_deck(user_id: str, display_name: str | None = None) -> str:
     """Reloads a new deck for the user, or creates one if not exists."""
     USER_DECKS[user_id] = Deck()
-    return f"A new deck of cards has been started for {user_id}."
+    return f"A new deck of cards has been started for {_who(user_id, display_name)}."
 
 # Function to draw cards for a user and summarize the results
-def draw_cards(num_cards: int, user_id: str) -> str:
+def draw_cards(num_cards: int, user_id: str, display_name: str | None = None) -> str:
     """Draws a specified number of cards for the user and returns a summary."""
     if user_id not in USER_DECKS:
         USER_DECKS[user_id] = Deck()
@@ -49,7 +58,7 @@ def draw_cards(num_cards: int, user_id: str) -> str:
     num_successes = 0
     num_failures = 0
     queen_of_hearts_drawn = False
-    response = [f"Drawing {num_cards} card(s) for {user_id}..."]
+    response = [f"Drawing {num_cards} card(s) for {_who(user_id, display_name)}..."]
 
     # Draw the requested number of cards
     for _ in range(num_cards):

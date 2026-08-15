@@ -62,12 +62,16 @@ from fritz_utils import (
     CHAT_DOC_UPLOAD_MAX_BYTES,
     CHAT_IMAGE_UPLOAD_MAX_BYTES,
     CHAT_PASSWORD,
-    CHAT_SHARE_DISCORD_THREAD,
-    CHAT_THREAD_PREFIX,
     DOC_FOLDER,
     MessageSource,
     __version__,
+    canonical_user_id,
+    resolve_identity,
+    safe_user_token,
+    split_user_id,
+    thread_id_for,
 )
+import identity_store
 from observability import audit_log, get_health_snapshot
 
 logger = logging.getLogger(__name__)
@@ -183,10 +187,13 @@ def _unauthorized() -> Response:
 # ── Page handlers ───────────────────────────────────────────────────────────
 
 def _collect_users(schedule_manager) -> list[str]:
-    """Union of every user_id we have data on (schedules + workspaces).
+    """Union of every user_id we have data on (schedules + workspaces + aliases).
 
     Chroma namespaces aren't easily enumerated; users with memories but no
-    schedule or workspace won't appear in the listing. Acceptable for v1.
+    schedule, workspace or recorded alias won't appear in the listing.
+    Acceptable for v1. user_aliases is the widest of the three — it gets a row
+    on the first message — so most people now show up here even before they
+    create anything.
     """
     seen: set[str] = set()
     if schedule_manager is not None:
@@ -200,6 +207,11 @@ def _collect_users(schedule_manager) -> list[str]:
             seen.add(w["user_id"])
     except Exception as e:
         logger.debug("collecting users from workspaces failed: %s", e)
+    try:
+        for a in identity_store.list_all():
+            seen.add(a["user_id"])
+    except Exception as e:
+        logger.debug("collecting users from aliases failed: %s", e)
     return sorted(seen)
 
 
@@ -227,8 +239,12 @@ async def users_list(request: Request) -> HTMLResponse:
     for uid in user_ids:
         memories = privacy.export_memories(uid)
         schedules = privacy.export_schedules(uid, schedule_manager)
+        platform, _bare = split_user_id(uid)
         rows.append({
             "user_id": uid,
+            # The id is opaque now, so the list needs a name to be usable.
+            "display_name": identity_store.display_name(uid, default=""),
+            "platform": platform or "legacy",
             "memory_count": len(memories),
             "schedule_count": len(schedules),
             "workspace": privacy.get_workspace_for_export(uid),
@@ -243,6 +259,7 @@ async def user_detail(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "user_detail.html", {
         "data": data,
         "user_id": user_id,
+        "display_name": identity_store.display_name(user_id, default=""),
     })
 
 
@@ -381,29 +398,58 @@ async def reindex_document_action(request: Request) -> Response:
 # per-user namespacing of memories/schedules/threads, that's enough.
 
 def _chat_user(request: Request) -> str | None:
-    """Return the verified chat username from the cookie, or None."""
+    """Return the verified chat *display name* from the cookie, or None.
+
+    Kept as-is because the cookie stores what the human typed. Anything that
+    reaches a store must go through _chat_identity instead.
+    """
     token = request.cookies.get(chat_auth.COOKIE_NAME)
     return chat_auth.verify_cookie(token, CHAT_COOKIE_SECRET)
 
 
+def _chat_identity(request: Request) -> tuple[str | None, str | None]:
+    """(canonical id, display name) from the signed cookie, or (None, None).
+
+    The web namespace is what stops a self-asserted cookie name from reaching
+    a Discord user's data: `web-alice` and `discord-1234` are different keys no
+    matter what someone types at the login form. IDENTITY_LINKS is the explicit
+    opt-in that used to be implicit — see resolve_identity.
+    """
+    name = _chat_user(request)
+    if not name:
+        return None, None
+    return resolve_identity(canonical_user_id("web", name)), name
+
+
+def _sanitise_chat_username(username: str) -> str:
+    """The stored form of a self-asserted chat username, or "" if unusable.
+
+    Derived by round-tripping through canonical_user_id so the cookie's name
+    and the identity minted from it CANNOT disagree. It used to be an inline
+    copy of the same charset, which is the drift this whole change exists to
+    remove: if the two ever diverged, the cookie would say `alice.` while every
+    store said `web-alice`.
+    """
+    try:
+        _platform, safe = split_user_id(canonical_user_id("web", username))
+    except ValueError:
+        return ""
+    return safe
+
+
 def _chat_thread_id(user_id: str) -> str:
-    """LangGraph thread id for a web-chat user.
+    """LangGraph thread id for a web-chat identity.
 
-    Namespaced away from the Discord thread by default: the chat cookie's
-    username is self-asserted, so without this a chat session could read and
-    overwrite the Discord conversation of whoever owns that name. Keeping `_`
-    and `-` means "web-alice" cannot collide with a Discord user literally
-    called "webalice", whose own thread is stripped to alphanumerics.
-
-    This is the single place the thread id is derived for the chat surface —
-    the same regex used to be inlined in _load_chat_history, which is how the
-    read path and the write path drift apart.
+    Now a thin pass-through to `thread_id_for`. The `web-` namespace lives in
+    the identity itself, so the CHAT_THREAD_PREFIX doubling is gone along with
+    the third of four divergent regexes, and CHAT_SHARE_DISCORD_THREAD is
+    retired in favour of IDENTITY_LINKS — which links the whole identity
+    (memories, schedules, workspace) rather than only the thread, and so can
+    actually deliver the "one conversation across surfaces" the flag promised.
     """
     if not user_id:
         return ""
-    if CHAT_SHARE_DISCORD_THREAD:
-        return re.sub(r"[^a-zA-Z0-9]", "", user_id)
-    return re.sub(r"[^a-zA-Z0-9_-]", "", f"{CHAT_THREAD_PREFIX}-{user_id}")
+    return thread_id_for(user_id)
 
 
 # Markdown extensions enabled for Fritz's replies. fenced_code handles ```py
@@ -554,21 +600,21 @@ def _set_chat_cookie(response: Response, username: str) -> None:
 
 
 async def chat_page(request: Request) -> HTMLResponse:
-    user = _chat_user(request)
-    if not user:
+    identity, display = _chat_identity(request)
+    if not identity:
         return templates.TemplateResponse(request, "chat_login.html", {})
     # Refresh the cookie on every page view so active users don't get logged
     # out on day 31.
     # Phase 3: hydrate the page with the last 40 messages from the LangGraph
     # checkpoint so a refresh doesn't lose context.
     history = await asyncio.get_running_loop().run_in_executor(
-        None, _load_chat_history, user, 40,
+        None, _load_chat_history, identity, 40,
     )
     response = templates.TemplateResponse(request, "chat.html", {
-        "username": user,
+        "username": display,
         "messages": history,
     })
-    _set_chat_cookie(response, user)
+    _set_chat_cookie(response, display)
     return response
 
 
@@ -600,14 +646,13 @@ async def chat_login(request: Request) -> Response:
 
     if not secrets.compare_digest(password, chat_password):
         audit_log("chat_login", result="bad_password",
-                  attempted_user=re.sub(r"[^a-zA-Z0-9_-]", "", username)[:64],
+                  attempted_user=_sanitise_chat_username(username) or "(unusable)",
                   client=request.client.host if request.client else None)
         return templates.TemplateResponse(request, "chat_login.html", {
             "error": "Wrong password.",
         }, status_code=401)
 
-    # Same sanitisation as mister_fritz uses for thread_id.
-    safe = re.sub(r"[^a-zA-Z0-9_-]", "", username)[:64]
+    safe = _sanitise_chat_username(username)
     if not safe:
         # Re-render with an error.
         return templates.TemplateResponse(request, "chat_login.html", {
@@ -621,16 +666,21 @@ async def chat_login(request: Request) -> Response:
 
     response = RedirectResponse(url="/chat", status_code=303)
     _set_chat_cookie(response, safe)
-    audit_log("chat_login", user_id=safe, result="ok")
+    # The cookie still carries the human-readable name; the canonical id is
+    # derived from it on every request. Recording the alias here means the
+    # admin panel can show a name for a web user who has never sent a message.
+    identity = canonical_user_id("web", safe)
+    identity_store.record(identity, safe, "web")
+    audit_log("chat_login", user_id=identity, result="ok")
     return response
 
 
 async def chat_logout(request: Request) -> Response:
-    user = _chat_user(request)
+    identity, _display = _chat_identity(request)
     response = RedirectResponse(url="/chat", status_code=303)
     response.delete_cookie(chat_auth.COOKIE_NAME)
-    if user:
-        audit_log("chat_logout", user_id=user)
+    if identity:
+        audit_log("chat_logout", user_id=identity)
     return response
 
 
@@ -638,8 +688,8 @@ async def chat_send(request: Request) -> Response:
     """Synchronous fallback endpoint — submits a message and renders the full
     chat page with the reply. Used by graceful-degradation clients (no JS).
     HTMX clients go to /chat/stream instead for live streaming."""
-    user = _chat_user(request)
-    if not user:
+    identity, user = _chat_identity(request)
+    if not identity:
         return RedirectResponse(url="/chat", status_code=303)
 
     form = await request.form()
@@ -650,7 +700,7 @@ async def chat_send(request: Request) -> Response:
     # Run the synchronous agent in a worker thread so the event loop is free.
     loop = asyncio.get_running_loop()
     schedule_manager = _schedule_manager_from_request(request)
-    pending_images = _drain_pending_images(user)
+    pending_images = _drain_pending_images(identity)
     source = MessageSource.DISCORD_TEXT_AND_IMAGE if pending_images else MessageSource.LOCAL
 
     def _invoke_agent() -> dict:
@@ -660,17 +710,18 @@ async def chat_send(request: Request) -> Response:
         return ask_stuff(
             message,
             source,
-            user,
+            identity,
             user_image_paths=pending_images or None,
             schedule_manager=schedule_manager,
-            thread_id=_chat_thread_id(user),
+            thread_id=_chat_thread_id(identity),
+            display_name=user,
         )
 
     try:
         response_data = await loop.run_in_executor(None, _invoke_agent)
     except Exception as e:
-        logger.exception("Chat send failed for %s", user)
-        audit_log("chat_message", user_id=user, chars=len(message),
+        logger.exception("Chat send failed for %s", identity)
+        audit_log("chat_message", user_id=identity, chars=len(message),
                   attached_images=len(pending_images), result="error", error=str(e))
         return templates.TemplateResponse(request, "chat.html", {
             "username": user,
@@ -684,7 +735,8 @@ async def chat_send(request: Request) -> Response:
         })
 
     reply = response_data.get("text") if isinstance(response_data, dict) else str(response_data)
-    audit_log("chat_message", user_id=user, chars=len(message), result="ok", reply_chars=len(reply or ""))
+    audit_log("chat_message", user_id=identity, chars=len(message), result="ok",
+              reply_chars=len(reply or ""))
 
     return templates.TemplateResponse(request, "chat.html", {
         "username": user,
@@ -710,8 +762,8 @@ async def chat_stream(request: Request) -> Response:
       - event=done     data=<JSON {text, html, images}>   (exactly one)
       - event=error    data=<message>     (instead of done on failure)
     """
-    user = _chat_user(request)
-    if not user:
+    identity, user = _chat_identity(request)
+    if not identity:
         return Response(status_code=401, content="Not signed in.")
 
     form = await request.form()
@@ -720,7 +772,7 @@ async def chat_stream(request: Request) -> Response:
         return Response(status_code=400, content="Empty message.")
 
     schedule_manager = _schedule_manager_from_request(request)
-    pending_images = _drain_pending_images(user)
+    pending_images = _drain_pending_images(identity)
     source = MessageSource.DISCORD_TEXT_AND_IMAGE if pending_images else MessageSource.LOCAL
     event_queue: queue.Queue = queue.Queue()
 
@@ -751,16 +803,17 @@ async def chat_stream(request: Request) -> Response:
             response_data = ask_stuff(
                 message,
                 source,
-                user,
+                identity,
                 progress_callback=_progress_callback,
                 streaming_callback=_streaming_callback,
                 user_image_paths=pending_images or None,
                 schedule_manager=schedule_manager,
-                thread_id=_chat_thread_id(user),
+                thread_id=_chat_thread_id(identity),
+                display_name=user,
             )
             reply = response_data.get("text") if isinstance(response_data, dict) else str(response_data)
             image_paths = response_data.get("image_paths", []) if isinstance(response_data, dict) else []
-            audit_log("chat_message", user_id=user, chars=len(message),
+            audit_log("chat_message", user_id=identity, chars=len(message),
                       attached_images=len(pending_images),
                       result="ok", reply_chars=len(reply or ""), streamed=True)
             # The 'done' frame carries both the raw text and the rendered HTML
@@ -774,8 +827,8 @@ async def chat_stream(request: Request) -> Response:
             }
             event_queue.put(("done", json.dumps(done_payload)))
         except Exception as e:
-            logger.exception("Chat stream failed for %s", user)
-            audit_log("chat_message", user_id=user, chars=len(message),
+            logger.exception("Chat stream failed for %s", identity)
+            audit_log("chat_message", user_id=identity, chars=len(message),
                       result="error", error=str(e), streamed=True)
             # Butler copy plus a log ref, not the raw exception. The web surface
             # had the same leak the Discord one did — a WinError or a stack
@@ -859,8 +912,8 @@ _CHAT_ASSET_HEADERS = {
 async def chat_asset(request: Request) -> Response:
     """Serve a file from one of the chat-asset roots (./output, ./temp_images).
     Requires an authed chat user; rejects paths that escape the roots."""
-    user = _chat_user(request)
-    if not user:
+    identity, _display = _chat_identity(request)
+    if not identity:
         return Response(status_code=401, content="Not signed in.")
     rel = request.path_params["path"]
     if not rel:
@@ -868,7 +921,9 @@ async def chat_asset(request: Request) -> Response:
     media_type = _CHAT_ASSET_CONTENT_TYPES.get(os.path.splitext(rel)[1].lower())
     if media_type is None:
         return Response(status_code=404)
-    safe_user = re.sub(r"[^a-zA-Z0-9_-]", "_", user)
+    # Must match the prefix chat_upload_image writes, which is derived from the
+    # identity — not the display name — so a rename cannot orphan an upload.
+    safe_user = safe_user_token(identity)
     for root in _chat_asset_roots():
         root_parent = os.path.dirname(root)
         full = os.path.abspath(os.path.join(root_parent, rel))
@@ -882,7 +937,7 @@ async def chat_asset(request: Request) -> Response:
             # stay readable by any signed-in chat user until there is a registry.
             if os.path.basename(root) == "temp_images" and \
                     not os.path.basename(full).startswith(f"{safe_user}_"):
-                audit_log("chat_asset_denied", user_id=user, path=rel)
+                audit_log("chat_asset_denied", user_id=identity, path=rel)
                 return Response(status_code=404)
             return FileResponse(full, media_type=media_type,
                                 headers=dict(_CHAT_ASSET_HEADERS))
@@ -892,11 +947,11 @@ async def chat_asset(request: Request) -> Response:
 async def chat_history(request: Request) -> JSONResponse:
     """Return the recent message history for the cookie's user as JSON.
     Used by clients that want to refresh without a full page reload."""
-    user = _chat_user(request)
-    if not user:
+    identity, user = _chat_identity(request)
+    if not identity:
         return JSONResponse({"error": "not signed in"}, status_code=401)
     history = await asyncio.get_running_loop().run_in_executor(
-        None, _load_chat_history, user, 40,
+        None, _load_chat_history, identity, 40,
     )
     return JSONResponse({"username": user, "messages": history})
 
@@ -904,21 +959,21 @@ async def chat_history(request: Request) -> JSONResponse:
 async def chat_forget(request: Request) -> Response:
     """Clear the LangGraph checkpoint for the current user — the next message
     starts a fresh conversation. Doesn't touch memories or schedules."""
-    user = _chat_user(request)
-    if not user:
+    identity, _display = _chat_identity(request)
+    if not identity:
         return RedirectResponse(url="/chat", status_code=303)
     removed = await asyncio.get_running_loop().run_in_executor(
-        None, functools.partial(privacy.forget_conversation, user,
-                                thread_id=_chat_thread_id(user)),
+        None, functools.partial(privacy.forget_conversation, identity,
+                                thread_id=_chat_thread_id(identity)),
     )
-    audit_log("chat_forget_conversation", user_id=user, removed=removed)
+    audit_log("chat_forget_conversation", user_id=identity, removed=removed)
     return RedirectResponse(url="/chat", status_code=303)
 
 
 # ── Phase web-chat-4: file uploads ───────────────────────────────────────────
-# Pending-image registry: maps username → list of absolute paths attached to
-# the user's next chat message. Single-process, in-memory — fine for the local
-# admin/chat panel deployment model.
+# Pending-image registry: maps canonical identity → list of absolute paths
+# attached to the user's next chat message. Single-process, in-memory — fine for
+# the local admin/chat panel deployment model.
 _pending_images: dict[str, list[str]] = {}
 _pending_images_lock = threading.Lock()
 
@@ -983,7 +1038,7 @@ async def chat_upload_image(request: Request) -> Response:
     """Accept a multipart-form image, save it to ./temp_images/, and stash
     the path in the per-user pending list. The next /chat/send or
     /chat/stream picks it up and passes as user_image_paths to ask_stuff."""
-    user = _chat_user(request)
+    user, _display = _chat_identity(request)
     if not user:
         return JSONResponse({"error": "not signed in"}, status_code=401)
 
@@ -1026,7 +1081,9 @@ async def chat_upload_image(request: Request) -> Response:
     ts = int(time.time())
     # Extension comes from what the bytes actually are, never from the client.
     safe_name = f"{_safe_stem(getattr(upload, 'filename', 'upload'))}.{canonical_ext}"
-    safe_user = re.sub(r"[^a-zA-Z0-9_-]", "_", user)
+    # Identity-derived, so chat_asset's ownership check matches even after a
+    # rename — and never contains a character Windows rejects in a path.
+    safe_user = safe_user_token(user)
     target = os.path.abspath(os.path.join("temp_images", f"{safe_user}_{ts}_{safe_name}"))
     with open(target, "wb") as f:
         f.write(raw)

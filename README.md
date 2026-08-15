@@ -193,8 +193,11 @@ All settings can be set as environment variables or in a `.env` file. See `.env.
 | Variable | Default | Description |
 |---|---|---|
 | `DISCORD_BOT_TOKEN` | — | **Required.** Your Discord bot token |
-| `ROOT_USER` | — | **Required.** Discord username with admin privileges (`/workspace set`, `/schedule add/remove`) |
-| `ADMIN_USERS` | — | Comma-separated additional admin usernames. Anyone listed gets the same powers as `ROOT_USER`. |
+| `ROOT_USER` | — | **Required.** Canonical identity with admin privileges (`/workspace set`, `/schedule add/remove`). Use `discord-<your numeric id>`, not your username — see [Identity](#identity). |
+| `ADMIN_USERS` | — | Comma-separated additional admin identities, same canonical form. Anyone listed gets the same powers as `ROOT_USER`. |
+| `THREADS_PER_CHANNEL` | `false` | One conversation thread per channel instead of one per person. Turning it on branches every existing conversation — see [Identity](#identity). |
+| `ADMIN_LEGACY_NAME_MATCH` | `false` | Also match `ROOT_USER`/`ADMIN_USERS` against display names. Compatibility shim only; with it on, taking your username takes your admin rights. |
+| `IDENTITY_LINKS` | — | `web-alice=discord-123,…` — treat one identity as another, so memories and conversation follow you across surfaces. |
 | `WORKSPACES_ROOT` | `./workspaces` | Parent directory for per-user sandboxed workspaces created via `/workspace enable`. |
 | `AUDIT_LOG_PATH` | `audit.log` | Path to the append-only NDJSON audit log. Captures `/forget`, `/export`, admin-panel mutations, and every file-tool write / edit / shell-exec. |
 | `ADMIN_PANEL_PASSWORD` | — | Set to enable the read-only web admin panel. Leave unset to disable. |
@@ -208,6 +211,52 @@ All settings can be set as environment variables or in a `.env` file. See `.env.
 | `DOC_FOLDER` | `./input` | Directory watched for RAG documents |
 | `CHROMA_DB_PATH` | `./chroma_store` | ChromaDB persistence path |
 | `FFMPEG_PATH` | auto-detected | Override FFmpeg binary path |
+
+---
+
+## Identity
+
+Every store — memories, conversation threads, schedules, workspaces, the admin gate — is keyed off a **canonical identity**:
+
+```
+<platform>-<immutable id>      discord-123456789   telegram-987654321   web-alice
+```
+
+A dash, never a colon: a colon is illegal in a Windows filename and silently creates an NTFS alternate data stream on write, and identities reach filenames in several places.
+
+The id half is the platform's *immutable* id wherever one exists — a Discord or Telegram snowflake, not a display name. That is the whole point:
+
+- Renaming your Discord account no longer orphans your memories, workspace, schedules and admin rights.
+- A Telegram user and a Discord user who happen to share a handle no longer share a keyspace.
+- `/forget memories` actually deletes. It used to delete the namespace for the raw name while the write path used a stripped one, so for any username containing punctuation it reported success and removed nothing.
+
+Fritz still addresses you by name — a `user_aliases` table carries the display name alongside the id, and it's what the scheduler uses when a cron job fires hours later with no live user object.
+
+### Migrating an existing install
+
+Keys change in five stores, so run the migration **with the bot stopped**, before the first start on this version. Ollama does not need to be running.
+
+```bash
+python migrate_identity.py --dry-run
+```
+
+Dry run is the default — it reports every distinct key it finds in each store and flags any without a mapping. Note the canonical id for each, then:
+
+```bash
+python migrate_identity.py --map divora=discord-123456789 --apply
+```
+
+`--apply` writes `identity_migration_<timestamp>.json` *before* touching anything; pass it back via `--reverse` to undo the run exactly. A second `--apply` is a no-op. It refuses to run if any discovered key is unmapped, rather than leaving the stores half-migrated.
+
+Then set `ROOT_USER` to the canonical form in `.env` — **before restarting, or you lose admin commands**. Get your numeric Discord id by enabling Developer Mode and right-clicking your name → Copy User ID.
+
+### Per-channel threads
+
+`THREADS_PER_CHANNEL=true` gives each identity one thread per channel (`discord-123#456`) instead of one thread everywhere, so a conversation in #general stops bleeding into your DMs.
+
+Off by default, because **turning it on branches every existing conversation**: the identity-only thread stays in the database untouched, but new messages start a fresh per-channel thread and the old context is no longer read. Flip it once, deliberately.
+
+`/forget conversation` sweeps the identity thread and every channel thread under it, and cannot catch a sibling that shares a prefix — `discord-1` does not touch `discord-10`.
 
 ---
 
@@ -320,13 +369,23 @@ If `ADMIN_PANEL_PASSWORD` is unset the panel doesn't start at all.
 
 ## Chat UI
 
-Talk to Fritz from a browser at **`http://127.0.0.1:8001/chat`** — no Discord required. It runs on the same server as the admin panel, but with its own identity model: cookie-based, no password.
+Talk to Fritz from a browser at **`http://127.0.0.1:8001/chat`** — no Discord required. It runs on the same server as the admin panel, but with its own identity model: a shared password plus a cookie-carried username.
 
 ### Getting in
 
-Open `/chat`, pick a username, start chatting. Use the **same Discord username** you normally use and you'll continue the same conversation thread — the web UI and Discord share the LangGraph conversation state, so a topic you start in Discord can be continued in the browser and vice versa.
+Open `/chat`, enter `CHAT_PASSWORD` and pick a username, start chatting.
 
-> **Trust model.** The chat surface deliberately has no password — anyone who can reach the port can claim any username. It's meant for "you and your friends on a port-forwarded local network," not the public internet. The username only namespaces memories, schedules, and conversation history; it is not authentication. If you need real auth, keep the port bound to localhost (the default) and tunnel over SSH.
+Your web identity is **separate from your Discord one**: signing in as `alice` gives you `web-alice`, which is a different key from `discord-123456789` no matter what name that account happens to use. Earlier versions shared one thread across both surfaces by matching on the username — that is exactly how a chat session could read and overwrite the Discord conversation of whoever owned that name.
+
+To deliberately join them, link the identities:
+
+```
+IDENTITY_LINKS=web-alice=discord-123456789
+```
+
+That folds the *whole* identity — memories, schedules, workspace and conversation — not just the thread, so a topic you start in Discord can genuinely be continued in the browser.
+
+> **Trust model.** `CHAT_PASSWORD` is the perimeter ("may you be here at all"); the username is only namespacing ("whose memories and conversation"). Anyone holding the password can still claim any name and read that person's chat history — set `CHAT_ALLOWED_USERS` to narrow it. It's meant for "you and your friends on a port-forwarded local network," not the public internet. If you need real per-user auth, keep the port bound to localhost (the default) and tunnel over SSH.
 
 The identity cookie is HMAC-signed (so it can't be tampered to impersonate another user mid-session), `httponly`, `SameSite=Lax`, and rolls forward a 30-day expiry on every visit. The signing secret comes from `CHAT_COOKIE_SECRET`; if unset, one is generated and saved to `.chat_cookie_secret` (gitignored) on first boot.
 

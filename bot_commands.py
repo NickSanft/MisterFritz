@@ -21,7 +21,9 @@ from fritz_utils import (
     THINKING_OLLAMA_MODEL,
     TTS_MAX_CONCURRENCY,
     __version__,
+    canonical_user_id,
 )
+import identity_store
 from image_generator import generate_image
 from mister_fritz import ask_stuff
 from observability import METRICS, audit_log, get_health_snapshot
@@ -34,6 +36,29 @@ logger = logging.getLogger(__name__)
 # Matches --accent in admin_templates/_theme_admin.html so the Discord and web
 # surfaces share one brand colour.
 FRITZ_COLOUR = discord.Colour(0x5B3F30)
+
+
+def _identity(interaction: discord.Interaction) -> str:
+    """Canonical id for the invoking user, recording their display name on the
+    way past.
+
+    Every slash command used `interaction.user.name` as the storage key, which
+    meant a Discord rename orphaned that person's memories, schedules and
+    workspace — and a Telegram user with the same handle shared them. This is
+    the single conversion point for the whole cog.
+    """
+    user_id = canonical_user_id("discord", interaction.user.id)
+    identity_store.record(
+        user_id,
+        getattr(interaction.user, "display_name", None) or interaction.user.name,
+        "discord",
+    )
+    return user_id
+
+
+def _display(interaction: discord.Interaction) -> str:
+    """Human-readable name, for prose and card decks — never a storage key."""
+    return getattr(interaction.user, "display_name", None) or interaction.user.name
 
 
 async def _reply_error(interaction: discord.Interaction, operation: str,
@@ -108,7 +133,10 @@ class _ForgetConfirmView(discord.ui.View):
         self.schedule_manager = schedule_manager
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.name != self.requester:
+        # Compare canonical ids, not names: a rename between opening the
+        # confirmation and pressing Confirm used to lock the requester out of
+        # their own dialog.
+        if canonical_user_id("discord", interaction.user.id) != self.requester:
             await interaction.response.send_message(
                 "This confirmation isn't for you.", ephemeral=True,
             )
@@ -142,7 +170,10 @@ async def _require_admin(interaction: discord.Interaction) -> bool:
     caller is authorised, False otherwise. The caller should short-circuit on
     False.
     """
-    if fritz_utils.is_admin(interaction.user.name):
+    if fritz_utils.is_admin(
+        canonical_user_id("discord", interaction.user.id),
+        display_name=interaction.user.name,
+    ):
         return True
     await interaction.response.send_message(
         "You do not have permission to use this command.", ephemeral=True
@@ -198,7 +229,7 @@ class FritzCommands(commands.Cog):
             return
         try:
             schedule_id = self.schedule_manager.add_schedule(
-                user_id=interaction.user.name,
+                user_id=_identity(interaction),
                 channel_id=interaction.channel_id,
                 guild_id=interaction.guild_id,
                 prompt=prompt,
@@ -222,7 +253,7 @@ class FritzCommands(commands.Cog):
         if self.schedule_manager is None:
             await interaction.response.send_message("Scheduler is not available.", ephemeral=True)
             return
-        schedules = self.schedule_manager.list_schedules(interaction.user.name)
+        schedules = self.schedule_manager.list_schedules(_identity(interaction))
         if not schedules:
             await interaction.response.send_message(
                 "You have no scheduled tasks. Use `/schedule add` to create one.", ephemeral=True
@@ -248,7 +279,7 @@ class FritzCommands(commands.Cog):
             await interaction.response.send_message("Scheduler is not available.", ephemeral=True)
             return
         try:
-            removed = self.schedule_manager.remove_schedule(schedule_id, interaction.user.name)
+            removed = self.schedule_manager.remove_schedule(schedule_id, _identity(interaction))
             if removed:
                 await interaction.response.send_message(
                     f"✅ Schedule `{schedule_id}` removed.", ephemeral=True
@@ -294,7 +325,7 @@ class FritzCommands(commands.Cog):
     @forget.command(name="memories", description="Delete every memory and profile entry Fritz has saved about you")
     async def forget_memories_slash(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.forget.memories")
-        user_id = interaction.user.name
+        user_id = _identity(interaction)
         count = privacy.forget_memories(user_id)
         audit_log("forget", user_id=user_id, scope="memories", removed=count)
         await interaction.response.send_message(
@@ -304,7 +335,7 @@ class FritzCommands(commands.Cog):
     @forget.command(name="conversation", description="Reset your conversation thread — next message starts fresh")
     async def forget_conversation_slash(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.forget.conversation")
-        user_id = interaction.user.name
+        user_id = _identity(interaction)
         count = privacy.forget_conversation(user_id)
         audit_log("forget", user_id=user_id, scope="conversation", removed=count)
         await interaction.response.send_message(
@@ -315,7 +346,7 @@ class FritzCommands(commands.Cog):
     @forget.command(name="schedules", description="Cancel every scheduled task you have")
     async def forget_schedules_slash(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.forget.schedules")
-        user_id = interaction.user.name
+        user_id = _identity(interaction)
         count = privacy.forget_schedules(user_id, self.schedule_manager)
         audit_log("forget", user_id=user_id, scope="schedules", removed=count)
         await interaction.response.send_message(
@@ -328,7 +359,7 @@ class FritzCommands(commands.Cog):
     )
     async def forget_all_slash(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.forget.all")
-        user_id = interaction.user.name
+        user_id = _identity(interaction)
         # Two-step confirmation: present a confirm/cancel view to the user.
         view = _ForgetConfirmView(user_id, self.schedule_manager)
         await interaction.response.send_message(
@@ -347,7 +378,7 @@ class FritzCommands(commands.Cog):
     )
     async def export_slash(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.export")
-        user_id = interaction.user.name
+        user_id = _identity(interaction)
         await interaction.response.defer(ephemeral=True, thinking=True)
         data = privacy.export_user_data(user_id, self.schedule_manager)
         payload = json.dumps(data, indent=2, default=str).encode("utf-8")
@@ -381,25 +412,31 @@ class FritzCommands(commands.Cog):
         # braces, and keeps the trailing ``` summary block intact when it does
         # need to split.
         await interaction.response.defer(thinking=True)
-        for chunk in split_into_chunks(draw_cards(num_cards, interaction.user.name)):
+        for chunk in split_into_chunks(
+            draw_cards(num_cards, _identity(interaction), _display(interaction))
+        ):
             await interaction.followup.send(content=chunk)
 
     @app_commands.command(name="cards_remaining", description="Check cards remaining in the deck")
     async def cards_remaining_slash(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
-        await interaction.followup.send(content=get_remaining_card_number(interaction.user.name))
+        await interaction.followup.send(
+            content=get_remaining_card_number(_identity(interaction), _display(interaction))
+        )
 
     @app_commands.command(name="reload_deck", description="Reloads the deck (use if you goof up)")
     async def reload_deck_slash(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
-        await interaction.followup.send(content=reload_deck(interaction.user.name))
+        await interaction.followup.send(
+            content=reload_deck(_identity(interaction), _display(interaction))
+        )
 
     # ── General ───────────────────────────────────────────────────────────────
 
     @app_commands.command(name="hello", description="Say hello to the bot")
     async def hello_slash(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.hello")
-        await interaction.response.send_message(f"Hello, {interaction.user.name}!")
+        await interaction.response.send_message(f"Hello, {_display(interaction)}!")
 
     @app_commands.command(name="health", description="Check the system health metrics")
     async def health_slash(self, interaction: discord.Interaction):
@@ -492,7 +529,9 @@ class FritzCommands(commands.Cog):
         try:
             with METRICS.time_block("discord_commands.voice"):
                 response_data = await run_blocking(
-                    ask_stuff, message, MessageSource.DISCORD_VOICE, interaction.user.name,
+                    ask_stuff, message, MessageSource.DISCORD_VOICE, _identity(interaction),
+                    display_name=_display(interaction),
+                    channel_key=str(interaction.channel_id) if interaction.channel_id else None,
                 )
                 original_response = response_data["text"]
                 async with self._tts_semaphore:
@@ -595,7 +634,7 @@ class FritzCommands(commands.Cog):
     @workspace.command(name="status", description="Show your current workspace, if any")
     async def workspace_status(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.workspace.status")
-        author = interaction.user.name
+        author = _identity(interaction)
         current = workspace_store.get(author)
         if current:
             await interaction.response.send_message(
@@ -613,7 +652,7 @@ class FritzCommands(commands.Cog):
     )
     async def workspace_enable(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.workspace.enable")
-        author = interaction.user.name
+        author = _identity(interaction)
         try:
             path = workspace_store.enable_sandboxed(author)
         except Exception as e:
@@ -629,7 +668,7 @@ class FritzCommands(commands.Cog):
     @workspace.command(name="disable", description="Forget your workspace (files on disk are kept)")
     async def workspace_disable(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.workspace.disable")
-        author = interaction.user.name
+        author = _identity(interaction)
         removed = workspace_store.remove(author)
         if removed:
             await interaction.response.send_message(
@@ -650,7 +689,7 @@ class FritzCommands(commands.Cog):
         METRICS.increment("discord_commands.workspace.set")
         if not await _require_admin(interaction):
             return
-        author = interaction.user.name
+        author = _identity(interaction)
         expanded = os.path.abspath(os.path.expanduser(path))
         if not os.path.isdir(expanded):
             await interaction.response.send_message(

@@ -268,12 +268,22 @@ def gather_discord_token(existing: str | None) -> str:
 
 def gather_root_user(existing: str | None) -> str:
     section("Bot owner (ROOT_USER)")
-    print("  This is your Discord username (not display name).")
+    print("  This is your numeric Discord user ID, not your username.")
+    print("  Enable Developer Mode in Discord, then right-click your name")
+    print("  and choose 'Copy User ID'.")
     print("  Used for admin-only commands like /workspace and /schedule add.")
+    print()
+    print("  A username works too, but only while ADMIN_LEGACY_NAME_MATCH=true —")
+    print("  and then anyone who takes your username takes your admin rights.")
     if existing:
         if confirm(f"Keep existing ROOT_USER='{existing}'?", default=True):
             return existing
-    return prompt("Your Discord username")
+    raw = prompt("Your Discord user ID")
+    # Offer the canonical form rather than silently rewriting what they typed:
+    # a username may be exactly what they meant on a pre-migration install.
+    if raw.isdigit():
+        return f"discord-{raw}"
+    return raw
 
 
 # ── Step 6: write .env ───────────────────────────────────────────────────────

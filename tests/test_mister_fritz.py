@@ -761,5 +761,65 @@ class TestProfileSignalsSchema(unittest.TestCase):
         self.assertEqual(upd.call_args.args[1]["interests"], ["tea"])
 
 
+class TestAskStuffIdentity(unittest.TestCase):
+    """ask_stuff is where the identity used to be mangled.
+
+    It did `re.sub(r'[^a-zA-Z0-9]', '', user_id)` and put the result in both
+    `configurable` and `metadata`. The executor read it back out of metadata to
+    key the memory namespace — so every memory was written under the STRIPPED
+    id while privacy.forget_memories deleted the RAW one. Nothing here may
+    transform the id.
+    """
+
+    def _invoke(self, user_id, **kwargs):
+        captured = {}
+
+        def _fake_stream(payload, config, **_kw):
+            captured["config"] = config
+            return iter(())
+
+        with patch.object(mister_fritz.app, "stream", side_effect=_fake_stream), \
+             patch.object(mister_fritz.app, "get_state") as get_state:
+            get_state.return_value = MagicMock(values={"messages": []})
+            mister_fritz.ask_stuff(
+                "hello", mister_fritz.MessageSource.LOCAL, user_id, **kwargs)
+        return captured["config"]
+
+    def test_identity_reaches_metadata_verbatim(self):
+        uid = "web-alice_smith-42"
+        config = self._invoke(uid)
+        self.assertEqual(config["metadata"]["user_id"], uid)
+        self.assertEqual(config["configurable"]["user_id"], uid)
+
+    def test_thread_id_defaults_to_the_identity(self):
+        uid = "discord-123456789"
+        config = self._invoke(uid)
+        self.assertEqual(config["configurable"]["thread_id"], uid)
+
+    def test_explicit_thread_id_wins(self):
+        config = self._invoke("web-alice", thread_id="web-alice#7")
+        self.assertEqual(config["configurable"]["thread_id"], "web-alice#7")
+        # …but does not contaminate the memory namespace.
+        self.assertEqual(config["metadata"]["user_id"], "web-alice")
+
+    def test_channel_key_scopes_the_thread_only_when_enabled(self):
+        import fritz_utils
+        with patch.object(fritz_utils, "THREADS_PER_CHANNEL", False):
+            off = self._invoke("discord-1", channel_key="999")
+        with patch.object(fritz_utils, "THREADS_PER_CHANNEL", True):
+            on = self._invoke("discord-1", channel_key="999")
+        self.assertEqual(off["configurable"]["thread_id"], "discord-1")
+        self.assertEqual(on["configurable"]["thread_id"], "discord-1#999")
+        # The namespace never branches by channel — memories are per person.
+        self.assertEqual(on["metadata"]["user_id"], "discord-1")
+
+    def test_identity_links_are_resolved(self):
+        import fritz_utils
+        with patch.object(fritz_utils, "IDENTITY_LINKS", {"web-a": "discord-1"}):
+            config = self._invoke("web-a")
+        self.assertEqual(config["metadata"]["user_id"], "discord-1")
+        self.assertEqual(config["configurable"]["thread_id"], "discord-1")
+
+
 if __name__ == "__main__":
     unittest.main()

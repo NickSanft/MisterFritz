@@ -23,6 +23,7 @@ from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from fritz_utils import MAX_SCHEDULES_PER_USER, SCHEDULE_DB, SCHEDULE_MIN_DELAY_MIN, MessageSource
+import identity_store
 
 logger = logging.getLogger(__name__)
 
@@ -106,9 +107,16 @@ class ScheduleManager:
 
         loop = asyncio.get_running_loop()
         try:
+            # A cron job has no live user object, which is exactly why the
+            # alias table exists: without it Fritz would greet the owner as
+            # "discord-123456789" every morning.
+            display = identity_store.display_name(user_id)
             response_data = await loop.run_in_executor(
                 None,
-                lambda: ask_stuff(prompt, MessageSource.LOCAL, user_id),
+                lambda: ask_stuff(
+                    prompt, MessageSource.LOCAL, user_id,
+                    display_name=display, channel_key=str(channel_id),
+                ),
             )
             text = response_data.get("text") or "No response generated."
         except Exception as e:

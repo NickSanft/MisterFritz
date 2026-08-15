@@ -66,6 +66,13 @@ def _build_client(schedule_manager=None, chat_password="__default__") -> TestCli
     return TestClient(app)
 
 
+# The cookie carries "alice"; every store keys off the namespaced identity
+# derived from it, and uploads are named from a filesystem-safe rendering of
+# that identity. Three different strings for the same person, deliberately.
+ALICE_ID = "web-alice"
+ALICE_FILE_PREFIX = "web-alice_"
+
+
 def _login(client: TestClient, username: str = "alice",
            password: str = CHAT_PASSWORD, **kwargs):
     """Obtain a chat identity cookie. /chat/login now needs a password, so
@@ -1026,11 +1033,15 @@ class TestChatSend(unittest.TestCase):
 
         self.assertEqual(r.status_code, 200)
         self.assertIn("Very well.", r.text)
-        # ask_stuff received the cookie's username as user_id.
+        # ask_stuff received the cookie's name as a NAMESPACED identity, not
+        # as the bare string — that namespace is what stops a self-asserted
+        # cookie from reaching a Discord user's memories.
         args, kwargs = fake_module.ask_stuff.call_args
         # ask_stuff(message, source, user_id, ...)
         self.assertEqual(args[0], "hello fritz")
-        self.assertEqual(args[2], "alice")
+        self.assertEqual(args[2], "web-alice")
+        # The human-readable name still travels, separately, for the prompt.
+        self.assertEqual(kwargs.get("display_name"), "alice")
 
     def test_send_audit_log_records_message_chars(self):
         client = _build_client()
@@ -1046,7 +1057,7 @@ class TestChatSend(unittest.TestCase):
         calls = [c for c in audit.call_args_list if c.args and c.args[0] == "chat_message"]
         self.assertEqual(len(calls), 1)
         kwargs = calls[0].kwargs
-        self.assertEqual(kwargs["user_id"], "alice")
+        self.assertEqual(kwargs["user_id"], "web-alice")
         self.assertEqual(kwargs["chars"], len("this is a test message"))
         self.assertEqual(kwargs["result"], "ok")
 
@@ -1150,7 +1161,7 @@ class TestChatStreamSuccess(unittest.TestCase):
         calls = [c for c in audit.call_args_list if c.args and c.args[0] == "chat_message"]
         self.assertEqual(len(calls), 1)
         kwargs = calls[0].kwargs
-        self.assertEqual(kwargs["user_id"], "alice")
+        self.assertEqual(kwargs["user_id"], "web-alice")
         self.assertEqual(kwargs["result"], "ok")
         self.assertTrue(kwargs.get("streamed"))
 
@@ -1351,11 +1362,11 @@ class TestChatForget(unittest.TestCase):
         self.assertEqual(r.headers["location"], "/chat")
         # Must target the WEB thread — clearing "alice" here would wipe the
         # Discord conversation instead of the one the user is looking at.
-        fc.assert_called_once_with("alice", thread_id="web-alice")
+        fc.assert_called_once_with("web-alice", thread_id="web-alice")
         # Audit entry recorded.
         calls = [c for c in audit.call_args_list if c.args and c.args[0] == "chat_forget_conversation"]
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0].kwargs["user_id"], "alice")
+        self.assertEqual(calls[0].kwargs["user_id"], "web-alice")
         self.assertEqual(calls[0].kwargs["removed"], 3)
 
     def test_unauthed_redirects_without_touching_privacy(self):
@@ -1368,31 +1379,31 @@ class TestChatForget(unittest.TestCase):
 
 class TestChatThreadId(unittest.TestCase):
     """The chat cookie's username is self-asserted, so the web chat must not
-    share a LangGraph checkpoint with the Discord user of the same name."""
+    share a LangGraph checkpoint with the Discord user of the same name.
 
-    def test_web_thread_is_namespaced(self):
-        self.assertEqual(admin_panel._chat_thread_id("alice"), "web-alice")
+    The namespace now lives in the identity itself, so _chat_thread_id is a
+    pass-through and these tests operate on canonical ids.
+    """
+
+    def test_web_thread_is_the_identity(self):
+        self.assertEqual(admin_panel._chat_thread_id("web-alice"), "web-alice")
 
     def test_web_thread_cannot_collide_with_a_discord_user(self):
-        # A Discord user literally named "webalice" gets thread "webalice"
-        # (alphanumerics only). Keeping the dash is what keeps these apart.
+        # The separator makes `web-alice` unreachable from any Discord id,
+        # which are all `discord-<snowflake>`.
         self.assertNotEqual(
-            admin_panel._chat_thread_id("alice"),
-            re.sub(r"[^a-zA-Z0-9]", "", "webalice"),
+            admin_panel._chat_thread_id("web-alice"),
+            admin_panel._chat_thread_id("discord-alice"),
         )
-
-    def test_punctuation_is_stripped_but_dash_and_underscore_survive(self):
-        self.assertEqual(admin_panel._chat_thread_id("al.i/ce"), "web-alice")
-        self.assertEqual(admin_panel._chat_thread_id("a_b-c"), "web-a_b-c")
 
     def test_empty_user_gives_empty_thread(self):
         self.assertEqual(admin_panel._chat_thread_id(""), "")
 
-    def test_share_flag_restores_the_discord_thread(self):
-        # The rollback lever, and the single-user case where continuing one
-        # conversation across Discord and the browser is the point.
-        with patch.object(admin_panel, "CHAT_SHARE_DISCORD_THREAD", True):
-            self.assertEqual(admin_panel._chat_thread_id("alice"), "alice")
+    def test_login_mints_the_namespaced_identity(self):
+        # The transformation moved from _chat_thread_id to _chat_identity;
+        # this is where the `web-` prefix is applied now.
+        self.assertEqual(fritz_utils.canonical_user_id("web", "al.i/ce"), "web-alice")
+        self.assertEqual(fritz_utils.canonical_user_id("web", "a_b-c"), "web-a_b-c")
 
     def test_history_load_uses_the_same_thread_as_the_write_path(self):
         # The read path used to re-derive the thread id with its own inline
@@ -1409,8 +1420,8 @@ class TestChatThreadId(unittest.TestCase):
             "configurable": {"thread_id": c["metadata"]["thread_id"]},
         }
         with patch.dict(sys.modules, {"mister_fritz": fake_mf}):
-            admin_panel._load_chat_history("alice")
-        self.assertEqual(captured["thread_id"], admin_panel._chat_thread_id("alice"))
+            admin_panel._load_chat_history("web-alice")
+        self.assertEqual(captured["thread_id"], admin_panel._chat_thread_id("web-alice"))
 
 
 class TestChatAsset(unittest.TestCase):
@@ -1478,12 +1489,13 @@ class TestChatAsset(unittest.TestCase):
         _login(client, "bob")
         os.makedirs("temp_images", exist_ok=True)
         # Named as chat_upload_image would name one of alice's uploads.
-        victim = os.path.join("temp_images", "alice_123_secret.png")
+        victim = os.path.join("temp_images", f"{ALICE_FILE_PREFIX}123_secret.png")
         with open(victim, "wb") as f:
             f.write(_TINY_PNG)
         try:
             with patch.object(admin_panel, "audit_log") as audit:
-                r = client.get("/chat/assets/temp_images/alice_123_secret.png")
+                r = client.get(
+                    f"/chat/assets/temp_images/{ALICE_FILE_PREFIX}123_secret.png")
             self.assertEqual(r.status_code, 404)
             self.assertEqual(audit.call_args.args[0], "chat_asset_denied")
         finally:
@@ -1493,11 +1505,11 @@ class TestChatAsset(unittest.TestCase):
         client = _build_client()
         _login(client, "alice")
         os.makedirs("temp_images", exist_ok=True)
-        mine = os.path.join("temp_images", "alice_123_mine.png")
+        mine = os.path.join("temp_images", f"{ALICE_FILE_PREFIX}123_mine.png")
         with open(mine, "wb") as f:
             f.write(_TINY_PNG)
         try:
-            r = client.get("/chat/assets/temp_images/alice_123_mine.png")
+            r = client.get(f"/chat/assets/temp_images/{ALICE_FILE_PREFIX}123_mine.png")
             self.assertEqual(r.status_code, 200)
         finally:
             os.unlink(mine)
@@ -1541,14 +1553,14 @@ def _drain_for_user(user: str):
 
 class TestChatUploadImage(unittest.TestCase):
     def setUp(self):
-        _drain_for_user("alice")
+        _drain_for_user(ALICE_ID)
 
     def tearDown(self):
-        _drain_for_user("alice")
+        _drain_for_user(ALICE_ID)
         # Clean up the temp_images dir of any test artefacts.
         if os.path.isdir("temp_images"):
             for f in os.listdir("temp_images"):
-                if f.startswith("alice_") or f.startswith("_admin_panel_test_"):
+                if f.startswith(ALICE_FILE_PREFIX) or f.startswith("_admin_panel_test_"):
                     try:
                         os.unlink(os.path.join("temp_images", f))
                     except OSError:
@@ -1574,7 +1586,7 @@ class TestChatUploadImage(unittest.TestCase):
         self.assertIsNotNone(body["url"])
         # The pending dict has an entry for alice now.
         with admin_panel._pending_images_lock:
-            pending = list(admin_panel._pending_images.get("alice", []))
+            pending = list(admin_panel._pending_images.get(ALICE_ID, []))
         self.assertEqual(len(pending), 1)
         self.assertTrue(os.path.isfile(pending[0]))
 
@@ -1610,13 +1622,13 @@ class TestChatUploadImageSniffing(unittest.TestCase):
     """The declared Content-Type is not evidence — the bytes are."""
 
     def setUp(self):
-        _drain_for_user("alice")
+        _drain_for_user(ALICE_ID)
 
     def tearDown(self):
-        _drain_for_user("alice")
+        _drain_for_user(ALICE_ID)
         if os.path.isdir("temp_images"):
             for f in os.listdir("temp_images"):
-                if f.startswith("alice_"):
+                if f.startswith(ALICE_FILE_PREFIX):
                     try:
                         os.unlink(os.path.join("temp_images", f))
                     except OSError:
@@ -1656,7 +1668,7 @@ class TestChatUploadImageSniffing(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.json()["name"].endswith(".png"))
         with admin_panel._pending_images_lock:
-            pending = list(admin_panel._pending_images.get("alice", []))
+            pending = list(admin_panel._pending_images.get(ALICE_ID, []))
         self.assertEqual(len(pending), 1)
         self.assertTrue(pending[0].endswith(".png"))
         self.assertNotIn(".html", os.path.basename(pending[0]))
@@ -1768,15 +1780,15 @@ class TestAdminUploadDocument(unittest.TestCase):
 
 class TestPendingImagePlumbing(unittest.TestCase):
     def setUp(self):
-        _drain_for_user("alice")
+        _drain_for_user(ALICE_ID)
 
     def tearDown(self):
-        _drain_for_user("alice")
+        _drain_for_user(ALICE_ID)
 
     def test_send_picks_up_pending_image_and_clears(self):
         client = _build_client()
         _login(client)
-        admin_panel._stash_pending_image("alice", "/tmp/fake-img.png")
+        admin_panel._stash_pending_image(ALICE_ID, "/tmp/fake-img.png")
 
         captured = {}
 
@@ -1800,7 +1812,7 @@ class TestPendingImagePlumbing(unittest.TestCase):
         self.assertEqual(captured["source"].name, "DISCORD_TEXT_AND_IMAGE")
         # The pending registry is empty after consumption.
         with admin_panel._pending_images_lock:
-            self.assertNotIn("alice", admin_panel._pending_images)
+            self.assertNotIn(ALICE_ID, admin_panel._pending_images)
 
     def test_send_without_pending_uses_local_source(self):
         client = _build_client()

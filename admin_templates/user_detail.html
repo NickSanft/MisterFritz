@@ -1,17 +1,20 @@
 {% extends "base.html" %}
-{% block title %}{{ user_id }} · Mister Fritz Admin{% endblock %}
+{# `who` is what a human recognises; user_id stays visible as the actual key. #}
+{% set who = display_name or user_id %}
+{% block title %}{{ who }} · Mister Fritz Admin{% endblock %}
 
 {% block body %}
 <p><a href="/users">← back to users</a></p>
 
 <div class="card">
-    <h2>{{ user_id }}</h2>
+    <h2>{{ who }}</h2>
     <table>
+        <tr><th>Identity</th><td><code>{{ user_id }}</code></td></tr>
         <tr><th>Workspace</th><td>
             {% if data.workspace_path %}
             <code>{{ data.workspace_path }}</code>
-            <form class="inline" method="post" action="/users/{{ user_id }}/workspace/disable"
-                  onsubmit="return confirm('Disable workspace for {{ user_id }}? Files on disk are kept.');">
+            <form class="inline" method="post" action="/users/{{ user_id | urlencode }}/workspace/disable"
+                  onsubmit="return confirm('Disable workspace for {{ who }}? Files on disk are kept.');">
                 <button type="submit">Disable workspace</button>
             </form>
             {% else %}<span class="muted">none</span>{% endif %}
@@ -20,9 +23,9 @@
         <tr><th>Memory entries</th><td>{{ data.memories | length }}</td></tr>
         <tr><th>Schedules</th><td>{{ data.schedules | length }}</td></tr>
     </table>
-    <form method="post" action="/users/{{ user_id }}/forget" style="margin-top: 1rem;"
-          onsubmit="return confirm('Permanently delete ALL data for {{ user_id }} (memories, conversation, schedules, workspace)? This cannot be undone.');">
-        <button type="submit" class="danger">Forget everything about {{ user_id }}</button>
+    <form method="post" action="/users/{{ user_id | urlencode }}/forget" style="margin-top: 1rem;"
+          onsubmit="return confirm('Permanently delete ALL data for {{ who }} (memories, conversation, schedules, workspace)? This cannot be undone.');">
+        <button type="submit" class="danger">Forget everything about {{ who }}</button>
     </form>
 </div>
 

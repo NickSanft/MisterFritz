@@ -50,7 +50,11 @@ from fritz_utils import (
     SUMMARIZE_ASYNC,
     SUMMARIZE_THRESHOLD,
     THINKING_OLLAMA_MODEL,
+    resolve_identity,
+    split_user_id,
+    thread_id_for,
 )
+import identity_store
 from observability import METRICS, init_logging
 from storage import SQLiteStore
 
@@ -116,26 +120,33 @@ Tools:
     """
 
 
-def get_source_info(source: MessageSource, user_id: str) -> str:
-    """Generate source information based on the messaging platform."""
+def get_source_info(source: MessageSource, display_name: str) -> str:
+    """Generate source information based on the messaging platform.
+
+    Takes the HUMAN-READABLE NAME, not the storage key. `ask_stuff` resolves it
+    through identity_store first, so the prompt reads "alice" and Fritz still
+    addresses people by name even though every store is now keyed on
+    "discord-123456789".
+    """
     if source == MessageSource.DISCORD_TEXT:
-        return f"User is texting from Discord (User ID: {user_id})"
+        return f"User is texting from Discord (User ID: {display_name})"
     elif source == MessageSource.DISCORD_TEXT_AND_IMAGE:
-        return f"User is texting from Discord with and has an image that the analyze_image tool has the path for already. (User ID: {user_id})"
+        return f"User is texting from Discord with and has an image that the analyze_image tool has the path for already. (User ID: {display_name})"
     elif source == MessageSource.DISCORD_VOICE:
-        return f"User is speaking from Discord (User ID: {user_id}). Please answer in 30 words or less."
+        return f"User is speaking from Discord (User ID: {display_name}). Please answer in 30 words or less."
     elif source == MessageSource.TELEGRAM_TEXT:
-        return f"User is texting from Telegram (User ID: {user_id})"
+        return f"User is texting from Telegram (User ID: {display_name})"
     elif source == MessageSource.TELEGRAM_VOICE:
-        return f"User is speaking from Telegram (User ID: {user_id}). Please answer in 30 words or less."
-    return f"User is interacting via CLI (User ID: {user_id})"
+        return f"User is speaking from Telegram (User ID: {display_name}). Please answer in 30 words or less."
+    return f"User is interacting via CLI (User ID: {display_name})"
 
 
-def format_prompt(prompt: str, source: MessageSource, user_id: str, additional_info: str = "") -> str:
+def format_prompt(prompt: str, source: MessageSource, display_name: str,
+                  additional_info: str = "") -> str:
     """Format the final prompt for the chatbot."""
     return f"""
     Context:
-        {get_source_info(source, user_id)}
+        {get_source_info(source, display_name)}
     Question:
         {prompt}
     """
@@ -621,13 +632,20 @@ def ask_stuff(
     schedule_manager=None,
     *,
     thread_id: str | None = None,
+    display_name: str | None = None,
+    channel_key: str | None = None,
 ) -> dict:
     """Process user input and return structured output with text and attachments.
 
-    `user_id` selects the memory namespace; `thread_id` selects the LangGraph
-    checkpoint. They are the same thing for Discord, Telegram and the
-    scheduler, which pass nothing. The web chat passes its own thread so a web
-    session cannot read or overwrite the Discord history of the same name.
+    `user_id` must be a CANONICAL identity (fritz_utils.canonical_user_id) —
+    e.g. "discord-123456789". It is used verbatim as the memory namespace and,
+    unless overridden, as the LangGraph thread. Callers no longer pass a
+    display name as the key: `display_name` carries the human-readable name for
+    the prompt, and `channel_key` optionally scopes the thread per channel.
+
+    `thread_id` selects the checkpoint explicitly, overriding `channel_key`.
+    The web chat uses it so a web session cannot read or overwrite the Discord
+    history of the same identity.
 
     streaming_callback(delta, accumulated, restart) is called as tokens arrive:
       delta       — new text since the last call
@@ -638,17 +656,25 @@ def ask_stuff(
 
     progress_callback(message) is called with human-readable tool notices.
     """
-    import re as _re
-    user_id_clean = _re.sub(r'[^a-zA-Z0-9]', '', user_id)
-    # An explicit thread id keeps _ and - so a namespaced thread ("web-alice")
-    # cannot collide with an alnum-only Discord thread for a user literally
-    # named "webalice".
-    thread_id_clean = _re.sub(r'[^a-zA-Z0-9_-]', '', thread_id) if thread_id else user_id_clean
+    # No transformation here any more. `user_id` arrives canonical from the
+    # adapter (canonical_user_id at the boundary), and is passed VERBATIM to
+    # the Chroma namespace, the LangGraph thread and every store. The old
+    # inline re.sub was one of four divergent copies — which is precisely why
+    # the write path and the delete path disagreed.
+    user_id_clean = resolve_identity(user_id)
+    thread_id_clean = thread_id or thread_id_for(user_id_clean, channel_key)
+    # Fritz addresses the human by name; the id is an opaque key.
+    if display_name:
+        # Backstop for callers that pass a name but do not record it
+        # themselves. Cached, so a repeat turn costs no SQLite round trip.
+        identity_store.record(user_id_clean, display_name,
+                              split_user_id(user_id_clean)[0])
+    who = display_name or identity_store.display_name(user_id_clean)
     if user_image_paths:
-        full_prompt = format_prompt(base_prompt, source, user_id_clean, f" User has attached images: {user_image_paths}")
+        full_prompt = format_prompt(base_prompt, source, who, f" User has attached images: {user_image_paths}")
     else:
         user_image_paths = []
-        full_prompt = format_prompt(base_prompt, source, user_id_clean)
+        full_prompt = format_prompt(base_prompt, source, who)
 
     # NOTE: this used to rebuild the entire tool registry and system prompt on
     # every single request purely to feed a logger.debug — whose argument is

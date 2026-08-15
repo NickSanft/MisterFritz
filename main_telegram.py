@@ -8,7 +8,13 @@ import tempfile
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters
 
-from fritz_utils import TELEGRAM_BOT_TOKEN, MessageSource, validate_config
+from fritz_utils import (
+    TELEGRAM_BOT_TOKEN,
+    MessageSource,
+    canonical_user_id,
+    validate_config,
+)
+import identity_store
 from mister_fritz import ask_stuff
 from observability import init_logging, start_metrics_server
 from stt import transcribe
@@ -17,15 +23,39 @@ init_logging()
 logger = logging.getLogger(__name__)
 
 
+def _identity(update: Update) -> tuple[str, str]:
+    """(canonical id, display name) for the sender.
+
+    Telegram already keyed off the numeric id — but bare, so a Telegram user
+    whose id happened to equal a Discord snowflake would have shared that
+    person's memories. The namespace is what makes cross-platform collision
+    impossible.
+    """
+    user = update.effective_user
+    user_id = canonical_user_id("telegram", user.id)
+    name = user.full_name or user.username or str(user.id)
+    identity_store.record(user_id, name, "telegram")
+    return user_id, name
+
+
+def _chat_key(update: Update) -> str | None:
+    chat = getattr(update, "effective_chat", None)
+    return str(chat.id) if chat is not None and chat.id is not None else None
+
+
 async def handle_text(update: Update, context) -> None:
-    user_id = str(update.effective_user.id)
+    user_id, display = _identity(update)
+    channel_key = _chat_key(update)
     text = update.message.text or ""
     await update.message.reply_text("✍️ *Mister Fritz is thinking...*", parse_mode="Markdown")
 
     loop = asyncio.get_running_loop()
     response_data = await loop.run_in_executor(
         None,
-        lambda: ask_stuff(text, MessageSource.TELEGRAM_TEXT, user_id),
+        lambda: ask_stuff(
+            text, MessageSource.TELEGRAM_TEXT, user_id,
+            display_name=display, channel_key=channel_key,
+        ),
     )
     reply = response_data.get("text") or "I appear to have misplaced my thoughts."
     # Telegram max message length is 4096 characters
@@ -33,7 +63,8 @@ async def handle_text(update: Update, context) -> None:
 
 
 async def handle_voice(update: Update, context) -> None:
-    user_id = str(update.effective_user.id)
+    user_id, display = _identity(update)
+    channel_key = _chat_key(update)
     voice = update.message.voice
     tg_file = await context.bot.get_file(voice.file_id)
 
@@ -51,7 +82,10 @@ async def handle_voice(update: Update, context) -> None:
 
         response_data = await loop.run_in_executor(
             None,
-            lambda: ask_stuff(text, MessageSource.TELEGRAM_VOICE, user_id),
+            lambda: ask_stuff(
+                text, MessageSource.TELEGRAM_VOICE, user_id,
+                display_name=display, channel_key=channel_key,
+            ),
         )
         reply = response_data.get("text") or "Most peculiar — I have no response."
         await update.message.reply_text(reply[:4096])

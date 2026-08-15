@@ -6,17 +6,25 @@
     <h2>Users with data</h2>
     {% if users %}
     <p class="muted">
-        Showing users with schedules or workspaces. Users with only memories
-        won't appear (Chroma namespaces aren't enumerable in v1).
+        Showing users with schedules, workspaces or a recorded name. Users with
+        only memories won't appear (Chroma namespaces aren't enumerable in v1).
     </p>
     <table>
         <thead>
-            <tr><th>User</th><th>Memories</th><th>Schedules</th><th>Workspace</th></tr>
+            <tr><th>User</th><th>Identity</th><th>Memories</th><th>Schedules</th><th>Workspace</th></tr>
         </thead>
         <tbody>
             {% for u in users %}
             <tr>
-                <td><a href="/users/{{ u.user_id }}"><code>{{ u.user_id }}</code></a></td>
+                {# The id is opaque (discord-1234…); the name is what makes the
+                   row recognisable. urlencode because a legacy id can still
+                   carry punctuation that would break the path. #}
+                <td>
+                    <a href="/users/{{ u.user_id | urlencode }}">
+                        {% if u.display_name %}{{ u.display_name }}{% else %}<span class="muted">unknown</span>{% endif %}
+                    </a>
+                </td>
+                <td><code>{{ u.user_id }}</code></td>
                 <td>{{ u.memory_count }}</td>
                 <td>{{ u.schedule_count }}</td>
                 <td>
