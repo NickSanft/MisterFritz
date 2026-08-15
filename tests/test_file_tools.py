@@ -6,6 +6,7 @@ Authorization runs through fritz_utils.is_admin; we patch fritz_utils.ROOT_USER
 in each test to control who counts as admin.
 """
 import os
+import shlex
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -319,6 +320,41 @@ class TestExecuteCommand(unittest.TestCase):
                 config=_config(self.tmp),
             )
         self.assertIn("outside the workspace", result.lower())
+
+    def test_rooted_arguments_rejected_on_every_platform(self):
+        """Regression: the containment check used os.path.isabs(), which is
+        inert on Windows.
+
+        Python's ntpath.isabs() reports False for '/etc/passwd',
+        '\\Users\\me\\.ssh\\id_rsa' and the drive-relative 'C:x', so on Windows
+        every one of these arguments skipped the workspace check entirely and
+        the command ran. posixpath.isabs() returns True for the first, which is
+        why this only ever failed on one platform. Each form below must be
+        rejected regardless of the platform the suite runs on.
+        """
+        for arg in ("/etc/passwd",
+                    r"\Users\nicho\.ssh\id_rsa",
+                    "C:/Windows/win.ini",
+                    "C:x"):
+            with self.subTest(arg=arg):
+                with patch.object(fritz_utils, "ROOT_USER", _ROOT):
+                    result = execute_command.invoke(
+                        {"command": f"cat {shlex.quote(arg)}", "timeout": 5},
+                        config=_config(self.tmp),
+                    )
+                self.assertIn("outside the workspace", result.lower())
+
+    def test_relative_arguments_still_allowed(self):
+        """The fix must not over-reject: a plain relative path is resolved
+        against the workspace (the subprocess cwd) and stays inside it."""
+        with open(os.path.join(self.tmp, "notes.txt"), "w") as f:
+            f.write("kept")
+        with patch.object(fritz_utils, "ROOT_USER", _ROOT):
+            result = execute_command.invoke(
+                {"command": "cat notes.txt", "timeout": 5},
+                config=_config(self.tmp),
+            )
+        self.assertNotIn("outside the workspace", result.lower())
 
     def test_shell_metacharacters_not_interpreted(self):
         # With argv mode, `<echo> a && echo b` parses as one command whose

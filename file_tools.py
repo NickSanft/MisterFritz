@@ -435,6 +435,31 @@ def _exec_denied_reason(user_id: str) -> Optional[str]:
     )
 
 
+def _is_rooted(path: str) -> bool:
+    """True if `path` is anchored somewhere other than the current directory.
+
+    Cross-platform stand-in for os.path.isabs(), which cannot be used for
+    containment checks: on Windows, ntpath.isabs() reports False for paths that
+    are absolutely rooted in every sense that matters here —
+
+        ntpath.isabs('/etc/passwd')              -> False
+        ntpath.isabs('\\\\Users\\\\me\\\\.ssh\\\\id_rsa')  -> False
+        ntpath.isabs('C:x')                      -> False   (drive-relative)
+
+    while posixpath.isabs('/etc/passwd') is True. A guard written on isabs()
+    therefore silently does nothing on Windows.
+
+    Anything that is not rooted is interpreted relative to the workspace (which
+    is the subprocess cwd) and is safe by construction, modulo the '..' check.
+    """
+    if not path:
+        return False
+    if path[0] in ("/", "\\"):
+        return True
+    # Drive-qualified: "C:\x", "C:/x" and the drive-relative "C:x" alike.
+    return bool(re.match(r"^[A-Za-z]:", path))
+
+
 def _validate_command_argv(argv: list[str], workspace: str) -> Optional[str]:
     """Validate a parsed argv list. Returns an error message if rejected, else None.
 
@@ -451,7 +476,7 @@ def _validate_command_argv(argv: list[str], workspace: str) -> Optional[str]:
     # absolute path to a workspace file the user just wrote with write_file
     # (e.g. <workspace>/git.bat) passes the basename + suffix-strip check below
     # and executes — CreateProcess runs .bat/.cmd through cmd.exe.
-    if os.path.isabs(argv[0]) or re.search(r"[\\/]", argv[0]):
+    if _is_rooted(argv[0]) or re.search(r"[\\/]", argv[0]):
         return (
             f"Error: '{argv[0]}' must be a bare program name, not a path. "
             "Commands are resolved from PATH only."
@@ -478,8 +503,16 @@ def _validate_command_argv(argv: list[str], workspace: str) -> Optional[str]:
         if ".." in segments:
             return f"Error: Argument '{arg}' contains '..' which is not allowed."
 
-        # If the arg looks like an absolute path, ensure it stays within the workspace.
-        if os.path.isabs(arg):
+        # If the arg is rooted anywhere but the workspace, reject it.
+        #
+        # Deliberately NOT `os.path.isabs`. On Windows, ntpath.isabs() returns
+        # False for a single-separator-rooted path — isabs('/etc/passwd'),
+        # isabs('\\Users\\me\\.ssh\\id_rsa') and isabs('C:x') are all False —
+        # so guarding on it made this check inert on Windows and let arguments
+        # rooted outside the workspace straight through. _is_rooted() treats
+        # anything with a leading separator or a drive prefix as rooted on
+        # every platform, which is the property this check actually needs.
+        if _is_rooted(arg):
             resolved = os.path.normpath(os.path.abspath(arg))
             if resolved != workspace_norm and not resolved.startswith(workspace_norm + os.sep):
                 return f"Error: Argument '{arg}' resolves outside the workspace."

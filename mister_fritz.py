@@ -485,13 +485,24 @@ def executor(state: EnhancedState, config: RunnableConfig):
                             if size > MEMORY_INJECT_MAX_CHARS:
                                 break
                             kept[k] = v
-                        past_context = json.dumps(kept)
+                        # A single memory larger than the whole budget leaves
+                        # `kept` empty, and json.dumps({}) is "{}" — i.e. the
+                        # cap would silently delete the user's most relevant
+                        # memory instead of shortening it. That is the common
+                        # case, not a corner one: summarize_conversation writes
+                        # one large value per memory and a summary of a long
+                        # thread routinely runs past the budget. Keep the best
+                        # match, character-cut, rather than dropping everything.
+                        past_context = json.dumps(kept) if kept else past_context[:MEMORY_INJECT_MAX_CHARS]
                     except Exception:
                         # Not JSON after all — fall back to a hard character cut.
                         past_context = past_context[:MEMORY_INJECT_MAX_CHARS]
                     METRICS.increment("memory_inject_truncated")
-                system_prompt = system_prompt + f"\n\nWhat I know about this user:\n{past_context}"
-                logger.debug("Injected memory context for %s (%d chars)", user_id, len(past_context))
+                # Re-checked after truncation: an empty result must not become
+                # the literal text "What I know about this user:\n{}".
+                if past_context and past_context != "{}":
+                    system_prompt = system_prompt + f"\n\nWhat I know about this user:\n{past_context}"
+                    logger.debug("Injected memory context for %s (%d chars)", user_id, len(past_context))
     except Exception as e:
         logger.warning("Memory injection failed (non-fatal): %s", e)
 

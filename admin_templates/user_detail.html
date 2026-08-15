@@ -14,7 +14,7 @@
             {% if data.workspace_path %}
             <code>{{ data.workspace_path }}</code>
             <form class="inline" method="post" action="/users/{{ user_id | urlencode }}/workspace/disable"
-                  onsubmit="return confirm('Disable workspace for {{ who }}? Files on disk are kept.');">
+                  data-confirm="Disable workspace for {{ who }}? Files on disk are kept.">
                 <button type="submit">Disable workspace</button>
             </form>
             {% else %}<span class="muted">none</span>{% endif %}
@@ -24,7 +24,7 @@
         <tr><th>Schedules</th><td>{{ data.schedules | length }}</td></tr>
     </table>
     <form method="post" action="/users/{{ user_id | urlencode }}/forget" style="margin-top: 1rem;"
-          onsubmit="return confirm('Permanently delete ALL data for {{ who }} (memories, conversation, schedules, workspace)? This cannot be undone.');">
+          data-confirm="Permanently delete ALL data for {{ who }} (memories, conversation, schedules, workspace)? This cannot be undone.">
         <button type="submit" class="danger">Forget everything about {{ who }}</button>
     </form>
 </div>

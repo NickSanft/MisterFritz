@@ -71,6 +71,10 @@ def _build_client(schedule_manager=None, chat_password="__default__") -> TestCli
 # that identity. Three different strings for the same person, deliberately.
 ALICE_ID = "web-alice"
 ALICE_FILE_PREFIX = "web-alice_"
+# Uploads live in a per-user DIRECTORY under temp_images/, not behind a
+# filename prefix — '_' is a legal identity character, so a prefix test also
+# matched web-alice_2's files. See TestChatAssetOwnership.
+ALICE_UPLOAD_DIR = "web-alice"
 
 
 def _login(client: TestClient, username: str = "alice",
@@ -127,6 +131,43 @@ def _contrast(fg: str, bg: str) -> float:
     a, b = _relative_luminance(fg), _relative_luminance(bg)
     hi, lo = max(a, b), min(a, b)
     return (hi + 0.05) / (lo + 0.05)
+
+
+class TestDestructiveConfirmsSurviveTheCSP(unittest.TestCase):
+    """Regression: the global CSP silently disabled every admin confirmation.
+
+    _SecurityHeadersMiddleware applies script-src 'nonce-…' with no
+    'unsafe-inline' to EVERY response, not just /chat. A nonce cannot be
+    attached to an inline event-handler attribute, so the three
+    onsubmit="return confirm(...)" handlers on the admin pages were blocked
+    and their destructive POSTs — cancel schedule, disable workspace, and
+    "Permanently delete ALL data for <user>" — fired with no prompt at all.
+    This is the same defect class chat.html was fixed for.
+    """
+
+    _DESTRUCTIVE = ("schedules.html", "user_detail.html")
+
+    def test_no_admin_template_uses_an_inline_event_handler(self):
+        for name in self._DESTRUCTIVE:
+            with self.subTest(template=name):
+                src = _template(name)
+                for attr in ("onsubmit=", "onclick=", "onchange="):
+                    self.assertNotIn(attr, src)
+
+    def test_every_destructive_form_declares_data_confirm(self):
+        for name in self._DESTRUCTIVE:
+            with self.subTest(template=name):
+                src = _template(name)
+                posts = re.findall(r"<form[^>]*method=\"post\"[^>]*>", src)
+                self.assertTrue(posts, f"{name} has no POST forms")
+                for form in posts:
+                    self.assertIn("data-confirm=", form)
+
+    def test_base_registers_the_confirm_handler_under_a_nonce(self):
+        src = _template("base.html")
+        self.assertIn('<script nonce="{{ csp_nonce(request) }}">', src)
+        self.assertIn("data-confirm", src)
+        self.assertIn("preventDefault", src)
 
 
 class TestThemeSplit(unittest.TestCase):
@@ -1487,15 +1528,16 @@ class TestChatAsset(unittest.TestCase):
     def test_user_cannot_fetch_another_users_upload(self):
         client = _build_client()
         _login(client, "bob")
-        os.makedirs("temp_images", exist_ok=True)
-        # Named as chat_upload_image would name one of alice's uploads.
-        victim = os.path.join("temp_images", f"{ALICE_FILE_PREFIX}123_secret.png")
+        victim_dir = os.path.join("temp_images", ALICE_UPLOAD_DIR)
+        os.makedirs(victim_dir, exist_ok=True)
+        # Placed as chat_upload_image would place one of alice's uploads.
+        victim = os.path.join(victim_dir, "123_secret.png")
         with open(victim, "wb") as f:
             f.write(_TINY_PNG)
         try:
             with patch.object(admin_panel, "audit_log") as audit:
                 r = client.get(
-                    f"/chat/assets/temp_images/{ALICE_FILE_PREFIX}123_secret.png")
+                    f"/chat/assets/temp_images/{ALICE_UPLOAD_DIR}/123_secret.png")
             self.assertEqual(r.status_code, 404)
             self.assertEqual(audit.call_args.args[0], "chat_asset_denied")
         finally:
@@ -1504,15 +1546,61 @@ class TestChatAsset(unittest.TestCase):
     def test_user_can_fetch_their_own_upload(self):
         client = _build_client()
         _login(client, "alice")
-        os.makedirs("temp_images", exist_ok=True)
-        mine = os.path.join("temp_images", f"{ALICE_FILE_PREFIX}123_mine.png")
+        mine_dir = os.path.join("temp_images", ALICE_UPLOAD_DIR)
+        os.makedirs(mine_dir, exist_ok=True)
+        mine = os.path.join(mine_dir, "123_mine.png")
         with open(mine, "wb") as f:
             f.write(_TINY_PNG)
         try:
-            r = client.get(f"/chat/assets/temp_images/{ALICE_FILE_PREFIX}123_mine.png")
+            r = client.get(f"/chat/assets/temp_images/{ALICE_UPLOAD_DIR}/123_mine.png")
             self.assertEqual(r.status_code, 200)
         finally:
             os.unlink(mine)
+
+
+class TestChatAssetOwnership(unittest.TestCase):
+    """Regression: ownership is a directory match, not a filename prefix.
+
+    The prefix form was exploitable because '_' is a legal identity character
+    (fritz_utils.safe_user_token keeps it), so
+    "web-alice_2_<ts>_secret.png".startswith("web-alice_") was True and
+    web-alice could read web-alice_2's uploads. Verified live before the fix:
+    HTTP 200, image/png, and no chat_asset_denied audit entry.
+    """
+
+    def test_identity_that_is_a_prefix_of_another_cannot_read_their_uploads(self):
+        client = _build_client()
+        _login(client, "alice")          # identity web-alice
+        # web-alice_2 is a DIFFERENT person whose identity happens to start
+        # with alice's, exactly the collision the old check missed.
+        victim_dir = os.path.join("temp_images", "web-alice_2")
+        os.makedirs(victim_dir, exist_ok=True)
+        victim = os.path.join(victim_dir, "123_secret.png")
+        with open(victim, "wb") as f:
+            f.write(_TINY_PNG)
+        try:
+            with patch.object(admin_panel, "audit_log") as audit:
+                r = client.get("/chat/assets/temp_images/web-alice_2/123_secret.png")
+            self.assertEqual(r.status_code, 404)
+            self.assertEqual(audit.call_args.args[0], "chat_asset_denied")
+        finally:
+            os.unlink(victim)
+            os.rmdir(victim_dir)
+
+    def test_upload_lands_in_a_per_user_directory(self):
+        """The write path and the ownership check have to agree, or every
+        upload 404s for its own uploader."""
+        client = _build_client()
+        _login(client, "alice")
+        r = client.post(
+            "/chat/upload/image",
+            files={"file": ("shot.png", _TINY_PNG, "image/png")},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        url = r.json()["url"]
+        self.assertIn(f"/temp_images/{ALICE_UPLOAD_DIR}/", url)
+        # And the uploader can actually fetch it back.
+        self.assertEqual(client.get(url).status_code, 200)
 
 
 class TestChatAssetUrlHelper(unittest.TestCase):

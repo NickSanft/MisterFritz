@@ -930,13 +930,16 @@ async def chat_asset(request: Request) -> Response:
         if full == root or full.startswith(root + os.sep):
             if not os.path.isfile(full):
                 continue
-            # temp_images holds uploads, named "<safe_user>_<ts>_<name>" by
-            # chat_upload_image, so only the uploader may fetch their own.
+            # temp_images holds uploads, written to "temp_images/<safe_user>/"
+            # by chat_upload_image, so only the uploader may fetch their own.
+            # Compared as an exact directory match: the previous filename-prefix
+            # form was unsafe because '_' is a legal identity character, so
+            # "web-alice_" also prefixed web-alice_2's uploads.
             # ./output holds images Fritz generated; those are named
             # generated_image-<ts>.png with no owner recorded anywhere, so they
             # stay readable by any signed-in chat user until there is a registry.
             if os.path.basename(root) == "temp_images" and \
-                    not os.path.basename(full).startswith(f"{safe_user}_"):
+                    os.path.dirname(full) != os.path.join(root, safe_user):
                 audit_log("chat_asset_denied", user_id=identity, path=rel)
                 return Response(status_code=404)
             return FileResponse(full, media_type=media_type,
@@ -1077,14 +1080,20 @@ async def chat_upload_image(request: Request) -> Response:
         )
     canonical_ext, _canonical_mime = CHAT_ALLOWED_IMAGE_FORMATS[fmt]
 
-    os.makedirs("temp_images", exist_ok=True)
     ts = int(time.time())
     # Extension comes from what the bytes actually are, never from the client.
     safe_name = f"{_safe_stem(getattr(upload, 'filename', 'upload'))}.{canonical_ext}"
     # Identity-derived, so chat_asset's ownership check matches even after a
     # rename — and never contains a character Windows rejects in a path.
     safe_user = safe_user_token(user)
-    target = os.path.abspath(os.path.join("temp_images", f"{safe_user}_{ts}_{safe_name}"))
+    # Ownership lives in a DIRECTORY, not a filename prefix. The prefix form
+    # ("<safe_user>_<ts>_<name>") could not be checked safely: '_' is a legal
+    # identity character, so a startswith("web-alice_") test also matched
+    # web-alice_2's uploads and let one user read another's files. A directory
+    # component can be compared with ==, which has no such ambiguity.
+    user_dir = os.path.abspath(os.path.join("temp_images", safe_user))
+    os.makedirs(user_dir, exist_ok=True)
+    target = os.path.join(user_dir, f"{ts}_{safe_name}")
     with open(target, "wb") as f:
         f.write(raw)
 

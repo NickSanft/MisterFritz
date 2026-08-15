@@ -23,7 +23,7 @@
                 <td class="muted">{{ s.created }}</td>
                 <td>
                     <form class="inline" method="post" action="/schedules/{{ s.id }}/cancel"
-                          onsubmit="return confirm('Cancel schedule {{ s.id }} for {{ s.user_id }}?');">
+                          data-confirm="Cancel schedule {{ s.id }} for {{ s.user_id }}?">
                         <button type="submit" class="danger">Cancel</button>
                     </form>
                 </td>

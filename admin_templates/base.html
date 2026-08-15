@@ -26,5 +26,22 @@
     <main id="main-content">
         {% block body %}{% endblock %}
     </main>
+    {# Confirmations for destructive admin POSTs.
+
+       These MUST be registered here rather than as onsubmit="" attributes on
+       the forms. The global CSP sets script-src 'nonce-…' with no
+       'unsafe-inline', and a nonce cannot be applied to an inline event-handler
+       attribute — so an onsubmit= handler is silently blocked and the
+       destructive POST fires with no confirmation at all. That is exactly the
+       bug chat.html was fixed for; the same rule applies to every surface. #}
+    <script nonce="{{ csp_nonce(request) }}">
+        document.addEventListener("submit", function (ev) {
+            var form = ev.target;
+            if (!form || !form.matches("form[data-confirm]")) return;
+            if (!window.confirm(form.getAttribute("data-confirm"))) {
+                ev.preventDefault();
+            }
+        });
+    </script>
 </body>
 </html>

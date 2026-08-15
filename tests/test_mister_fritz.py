@@ -212,6 +212,37 @@ class TestMemoryInjectionCap(unittest.TestCase):
         # Chroma returns most-similar-first, so the best match must survive.
         self.assertIn("memory_0", injected)
 
+    def test_single_memory_larger_than_the_budget_is_cut_not_dropped(self):
+        """Regression: the cap deleted the memory instead of shortening it.
+
+        The keep-loop breaks on the first entry that crosses the budget, so a
+        lone oversized memory left `kept` empty and json.dumps({}) == "{}" —
+        the prompt then carried the literal text "What I know about this
+        user:\n{}" and the user's most relevant memory was gone entirely.
+        This is the common case, not a corner one: summarize_conversation
+        writes one large value per memory and a summary of a long thread
+        routinely runs past the budget.
+        """
+        blob = json.dumps({"summary_of_everything": "v" * 10000})
+        agent = _RecordingAgent()
+        with patch.object(mister_fritz, "MEMORY_INJECT_MAX_CHARS", 4000):
+            _run_executor(self._state(), agent,
+                          search_memories_internal=lambda *a, **k: blob)
+        system_prompt = agent.seen["messages"][0][1]
+        injected = system_prompt.split("What I know about this user:\n")[1]
+        self.assertNotEqual(injected.strip(), "{}")
+        self.assertEqual(len(injected), 4000)
+        self.assertIn("summary_of_everything", injected)
+
+    def test_empty_memory_result_injects_no_header(self):
+        """An empty blob must not leave a dangling 'What I know about this
+        user:' header with nothing under it."""
+        agent = _RecordingAgent()
+        _run_executor(self._state(), agent,
+                      search_memories_internal=lambda *a, **k: "{}")
+        system_prompt = agent.seen["messages"][0][1]
+        self.assertNotIn("What I know about this user:", system_prompt)
+
     def test_small_memory_blob_passes_through_unmodified(self):
         blob = json.dumps({"memory_of_pie": "the user likes pie"})
         agent = _RecordingAgent()
