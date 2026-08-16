@@ -142,15 +142,44 @@ def get_source_info(source: MessageSource, display_name: str) -> str:
     return f"User is interacting via CLI (User ID: {display_name})"
 
 
-def format_prompt(prompt: str, source: MessageSource, display_name: str,
-                  additional_info: str = "") -> str:
-    """Format the final prompt for the chatbot."""
+def format_turn(prompt: str, context_line: str) -> str:
+    """Wrap a user's words in the per-turn framing sent to the model.
+
+    Split out from format_prompt so the framing can be applied at the moment
+    the model is called rather than baked into what gets checkpointed. What the
+    user actually typed is what belongs in the transcript; the "Context: User
+    is texting from Discord (User ID: …)" scaffolding is an instruction to the
+    model about *this* turn, and storing it caused three problems:
+
+      - the web chat rendered it verbatim as the user's own message, so a
+        reload showed internal scaffolding (and told a browser user they were
+        "texting from Discord");
+      - every replayed turn in the history window carried it again, spending
+        context on boilerplate the model had already acted on;
+      - stale per-turn instructions leaked forward — a DISCORD_VOICE turn's
+        "answer in 30 words or less" stayed in the transcript and kept
+        pressuring later text replies to be terse.
+    """
     return f"""
     Context:
-        {get_source_info(source, display_name)}
+        {context_line}
     Question:
         {prompt}
     """
+
+
+def format_prompt(prompt: str, source: MessageSource, display_name: str,
+                  additional_info: str = "") -> str:
+    """Format the final prompt for the chatbot.
+
+    NOTE: `additional_info` has never been interpolated — it appears in this
+    signature and nowhere in the body, so the " User has attached images: […]"
+    string ask_stuff passes for image turns has always been discarded. Left
+    inert deliberately: wiring it up now would change what the model sees on
+    every image turn, which is a behaviour change and not this fix's business.
+    The image paths do reach the agent, via config metadata.
+    """
+    return format_turn(prompt, get_source_info(source, display_name))
 
 
 # ── Routing ───────────────────────────────────────────────────────────────────
@@ -285,6 +314,22 @@ def summarize_conversation(state: EnhancedState, config: RunnableConfig):
 
     delete_messages = [RemoveMessage(id=m.id) for m in state["messages"][:-1]]
     return {"messages": delete_messages}
+
+
+def _framed_for_model(msg):
+    """Re-apply a turn's framing on its way to the model.
+
+    ask_stuff stores what the user actually said and parks the framing in
+    additional_kwargs["ctx"]. This puts the two back together for the single
+    turn being answered. Returns the message unchanged when there is no ctx —
+    Fritz's own replies, and any turn checkpointed before this landed.
+    """
+    if msg is None:
+        return None
+    ctx = (getattr(msg, "additional_kwargs", None) or {}).get("ctx")
+    if not ctx or not isinstance(getattr(msg, "content", None), str):
+        return msg
+    return HumanMessage(content=format_turn(msg.content, ctx))
 
 
 def _now_iso() -> str:
@@ -569,13 +614,18 @@ def executor(state: EnhancedState, config: RunnableConfig):
     if history:
         # history[-1] IS the current user turn — ask_stuff appended it before
         # the graph ran — so no separate ("user", ...) entry is needed, and
-        # adding one would send the question twice.
-        inputs = {"messages": [("system", system_prompt), *history]}
+        # adding one would send the question twice. Only that last turn gets
+        # its framing re-applied: replaying it on older turns is what used to
+        # spend context on repeated boilerplate and carry stale per-turn
+        # instructions forward.
+        inputs = {"messages": [("system", system_prompt),
+                               *history[:-1], _framed_for_model(history[-1])]}
     else:
         # Budget disabled, empty state, or a single oversized message.
         # Never send a system-prompt-only input to the model.
-        latest_message = messages[-1].content if messages else ""
-        inputs = {"messages": [("system", system_prompt), ("user", latest_message)]}
+        latest = _framed_for_model(messages[-1]) if messages else None
+        inputs = {"messages": [("system", system_prompt),
+                               ("user", latest.content if latest is not None else "")]}
 
     final_state = None
     emitter = _DeltaEmitter(streaming_callback)
@@ -692,17 +742,19 @@ def ask_stuff(
         identity_store.record(user_id_clean, display_name,
                               split_user_id(user_id_clean)[0])
     who = display_name or identity_store.display_name(user_id_clean)
-    if user_image_paths:
-        full_prompt = format_prompt(base_prompt, source, who, f" User has attached images: {user_image_paths}")
-    else:
+    if not user_image_paths:
         user_image_paths = []
-        full_prompt = format_prompt(base_prompt, source, who)
+    # The per-turn framing is computed here (only ask_stuff knows the source
+    # and the display name) but NOT folded into the message content — the
+    # executor re-applies it to the current turn on its way to the model. See
+    # format_turn for why the transcript keeps the user's actual words.
+    turn_context = get_source_info(source, who)
 
     # NOTE: this used to rebuild the entire tool registry and system prompt on
     # every single request purely to feed a logger.debug — whose argument is
     # evaluated even at INFO level. The executor builds its own prompt; nothing
     # here consumed it.
-    logger.debug("Prompt to ask: %s", full_prompt)
+    logger.debug("Prompt to ask: %s", format_turn(base_prompt, turn_context))
 
     config = {
         "configurable": {"user_id": user_id_clean, "thread_id": thread_id_clean},
@@ -719,12 +771,14 @@ def ask_stuff(
     }
     inputs = {
         # HumanMessage rather than a bare ("user", str) tuple so the turn can
-        # carry a creation timestamp. LangGraph checkpoints preserve no time of
-        # their own, so without stamping it here the web chat can only show
-        # times for messages it watched arrive live — and every page reload
-        # would look like the timestamps had been lost.
-        "messages": [HumanMessage(content=full_prompt,
-                                  additional_kwargs={"ts": _now_iso()})],
+        # carry metadata. LangGraph checkpoints preserve no time of their own,
+        # so `ts` is stamped here or the web chat can only show times for
+        # messages it watched arrive live. `ctx` is the per-turn framing, kept
+        # beside the content instead of inside it — see format_turn.
+        "messages": [HumanMessage(
+            content=base_prompt,
+            additional_kwargs={"ts": _now_iso(), "ctx": turn_context},
+        )],
         "image_paths": [],
         "user_image_paths": user_image_paths,
     }

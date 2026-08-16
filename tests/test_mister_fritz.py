@@ -147,6 +147,35 @@ class TestExecutorInputs(unittest.TestCase):
         self.assertEqual([m.type for m in sent[1:]],
                          ["human", "ai", "human", "ai", "human"])
 
+    def test_turn_framing_is_applied_to_the_current_turn_only(self):
+        """The framing is an instruction about THIS turn. Replaying it on older
+        turns spent context on boilerplate and carried stale per-turn
+        instructions (e.g. voice mode's "30 words or less") forward."""
+        older = HumanMessage(content="first question", id="h1",
+                             additional_kwargs={"ctx": "User is speaking from Discord. "
+                                                       "Please answer in 30 words or less."})
+        current = HumanMessage(content="second question", id="h2",
+                               additional_kwargs={"ctx": "User is texting from Discord (User ID: alice)"})
+        agent = _RecordingAgent()
+        _run_executor(self._state([older, AIMessage(content="ok", id="a1"), current]), agent)
+        sent = agent.seen["messages"]
+        bodies = [m.content for m in sent[1:] if not isinstance(m, tuple)]
+        # The old turn is replayed as the user's actual words, unwrapped.
+        self.assertEqual(bodies[0], "first question")
+        self.assertNotIn("30 words or less", bodies[0])
+        # The current turn carries its framing.
+        self.assertIn("Context:", bodies[-1])
+        self.assertIn("User is texting from Discord (User ID: alice)", bodies[-1])
+        self.assertIn("second question", bodies[-1])
+
+    def test_message_without_ctx_is_passed_through_unchanged(self):
+        """Fritz's own replies, and anything checkpointed before ctx existed."""
+        msgs = [HumanMessage(content="plain old turn", id="h1")]
+        agent = _RecordingAgent()
+        _run_executor(self._state(msgs), agent)
+        bodies = [m.content for m in agent.seen["messages"][1:] if not isinstance(m, tuple)]
+        self.assertEqual(bodies, ["plain old turn"])
+
     def test_simple_mode_does_not_duplicate_the_latest_turn(self):
         # history[-1] IS the current turn; appending a ("user", ...) entry too
         # would ask the question twice.
@@ -790,6 +819,54 @@ class TestProfileSignalsSchema(unittest.TestCase):
         self.assertIs(captured["schema"], mister_fritz.ProfileSignals)
         upd.assert_called_once()
         self.assertEqual(upd.call_args.args[1]["interests"], ["tea"])
+
+
+class TestCheckpointStoresWhatTheUserSaid(unittest.TestCase):
+    """The transcript holds the user's words, not the prompt scaffolding.
+
+    ask_stuff used to checkpoint the fully-framed prompt, so /chat rendered
+    "Context: User is texting from Discord (User ID: nick) Question: …" as the
+    user's own message on every reload.
+    """
+
+    def _captured_inputs(self, text, source=None, **kwargs):
+        captured = {}
+
+        def _fake_stream(payload, config, **_kw):
+            captured["inputs"] = payload
+            return iter(())
+
+        with patch.object(mister_fritz.app, "stream", side_effect=_fake_stream), \
+             patch.object(mister_fritz.app, "get_state") as get_state:
+            get_state.return_value = MagicMock(values={"messages": []})
+            mister_fritz.ask_stuff(
+                text, source or mister_fritz.MessageSource.DISCORD_TEXT,
+                "discord-1", display_name="nick", **kwargs)
+        return captured["inputs"]
+
+    def test_content_is_the_raw_user_text(self):
+        inputs = self._captured_inputs("what is dirtying my git status?")
+        msg = inputs["messages"][0]
+        self.assertEqual(msg.content, "what is dirtying my git status?")
+        self.assertNotIn("Context:", msg.content)
+        self.assertNotIn("User ID", msg.content)
+
+    def test_framing_travels_in_additional_kwargs(self):
+        inputs = self._captured_inputs("hello")
+        kw = inputs["messages"][0].additional_kwargs
+        self.assertIn("User is texting from Discord", kw["ctx"])
+        self.assertIn("nick", kw["ctx"])
+        self.assertIn("ts", kw)
+
+    def test_voice_terseness_does_not_enter_the_transcript(self):
+        """A DISCORD_VOICE turn's "30 words or less" is an instruction for that
+        turn. Stored in the content it would replay into every later text
+        reply through the history window."""
+        inputs = self._captured_inputs(
+            "how are you", source=mister_fritz.MessageSource.DISCORD_VOICE)
+        msg = inputs["messages"][0]
+        self.assertEqual(msg.content, "how are you")
+        self.assertIn("30 words or less", msg.additional_kwargs["ctx"])
 
 
 class TestAskStuffIdentity(unittest.TestCase):
