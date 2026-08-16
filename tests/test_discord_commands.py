@@ -123,6 +123,29 @@ class TestStatusLine(unittest.IsolatedAsyncioTestCase):
         return StreamingMessageHandler(msg, asyncio.get_event_loop(),
                                        min_update_interval=0.0), msg
 
+    async def test_status_before_the_first_token_is_shown(self):
+        """The common case for a tool-using turn, and the one that was broken.
+
+        A progress notice arriving before any token had pending_text == "",
+        which is falsy — the old guard skipped the edit entirely, so the
+        placeholder sat on "Mister Fritz is thinking..." and the notice only
+        appeared once tokens started arriving, by which point it was stale.
+        The existing test below hides this because it calls update_text first.
+        """
+        handler, msg = self._make_handler()
+        await handler.set_status("🌐 Making enquiries further afield.")
+        msg.edit.assert_awaited()
+        self.assertIn("Making enquiries further afield.",
+                      msg.edit.call_args.kwargs["content"])
+
+    async def test_status_then_tokens_keeps_both(self):
+        handler, msg = self._make_handler()
+        await handler.set_status("📚 Consulting the library.")
+        await handler.update_text("Here is what I found")
+        content = msg.edit.call_args.kwargs["content"]
+        self.assertTrue(content.startswith("📚 Consulting the library."))
+        self.assertIn("Here is what I found", content)
+
     async def test_status_appears_above_the_body(self):
         handler, msg = self._make_handler()
         await handler.update_text("the reply so far")

@@ -254,5 +254,73 @@ class TestChroma(unittest.TestCase):
         self.assertEqual(migrate_identity.survey_chroma(str(self.tmp / "nope")), {})
 
 
+class TestCanonicalKeysNeedNoMapping(_MigrationTestCase):
+    """Any database the bot has been started against post-cutover contains
+    canonical keys alongside legacy ones. Demanding a --map entry for those
+    made the documented runbook abort, and the identity entries the operator
+    had to invent were what broke --reverse."""
+
+    def setUp(self):
+        super().setUp()
+        with sqlite3.connect(self.db) as c:
+            c.execute("INSERT INTO schedules VALUES ('s3', 'discord-999', 'p3')")
+            c.execute("INSERT INTO checkpoints VALUES ('discord-999', 'd')")
+            c.commit()
+
+    def test_apply_succeeds_without_an_identity_entry(self):
+        rc = self._run("--apply", "--map", "divora=discord-1",
+                       "--map", "someone_else=discord-2")
+        self.assertEqual(rc, 0)
+        # The legacy keys moved; the canonical one was left exactly alone.
+        self.assertIn("discord-999", self._keys("schedules", "user_id"))
+        self.assertIn("discord-1", self._keys("schedules", "user_id"))
+        self.assertNotIn("divora", self._keys("schedules", "user_id"))
+
+    def test_survey_marks_canonical_keys_as_needing_nothing(self):
+        arrow, needs = migrate_identity._survey_arrow("discord-999", {})
+        self.assertFalse(needs)
+        self.assertIn("already canonical", arrow)
+        arrow, needs = migrate_identity._survey_arrow("divora", {})
+        self.assertTrue(needs)
+
+
+class TestReverseIsHonest(_MigrationTestCase):
+    """--reverse used to derive its mapping by inverting a dict, which silently
+    keeps only the last source for a duplicated target. With identity entries
+    present, {"divora": X, X: X} inverted to {X: X} — the reverse reported
+    success and restored nothing."""
+
+    def _write_mapping(self, mapping):
+        path = str(self.tmp / "m.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"db": self.db, "chroma": "", "mapping": mapping}, f)
+        return path
+
+    def test_round_trip_restores_the_original_keys(self):
+        rc = self._run("--apply", "--map", "divora=discord-1",
+                       "--map", "someone_else=discord-2")
+        self.assertEqual(rc, 0)
+        record = next(p for p in os.listdir(self.tmp)
+                      if p.startswith("identity_migration_"))
+        rc = self._run("--apply", "--reverse", str(self.tmp / record))
+        self.assertEqual(rc, 0)
+        keys = self._keys("schedules", "user_id")
+        self.assertIn("divora", keys)
+        self.assertIn("someone_else", keys)
+        self.assertNotIn("discord-1", keys)
+
+    def test_ambiguous_mapping_is_refused_not_silently_collapsed(self):
+        path = self._write_mapping({"divora": "discord-1", "dvora": "discord-1"})
+        rc = self._run("--apply", "--reverse", path)
+        self.assertEqual(rc, 2)
+        # And nothing was touched.
+        self.assertIn("divora", self._keys("schedules", "user_id"))
+
+    def test_identity_only_mapping_reverses_to_a_no_op(self):
+        path = self._write_mapping({"discord-1": "discord-1"})
+        rc = self._run("--apply", "--reverse", path)
+        self.assertEqual(rc, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

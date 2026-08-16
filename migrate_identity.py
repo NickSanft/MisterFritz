@@ -47,6 +47,8 @@ import sqlite3
 import sys
 import time
 
+from fritz_utils import is_canonical_user_id
+
 # Imported lazily inside main() so --help works without a configured .env.
 CHROMA_COLLECTION = "langchain_store"
 
@@ -285,8 +287,27 @@ def _parse_map(pairs: list[str]) -> dict[str, str]:
     return mapping
 
 
+def _survey_arrow(key: str, mapping: dict) -> tuple[str, bool]:
+    """Render one survey line's arrow. Returns (arrow, needs_a_mapping).
+
+    A key that is ALREADY canonical needs no mapping — it is where the
+    migration is trying to get to. Without this, any database the bot has been
+    started against post-cutover contains canonical keys alongside legacy ones,
+    every canonical key is reported as unmapped, and --apply refuses to run.
+    The operator's only escape was to hand-write identity entries
+    (discord-285…=discord-285…), which is exactly what used to break --reverse:
+    inverting {divora: X, X: X} collapses to {X: X} and loses the real entry.
+    """
+    target = mapping.get(key)
+    if target:
+        return f"-> {target}", False
+    if is_canonical_user_id(key):
+        return "-- already canonical, left alone", False
+    return "-> ?  (NO --map ENTRY)", True
+
+
 def _print_survey(sqlite_found: dict, chroma_found: dict, mapping: dict) -> list[str]:
-    """Print what is there and return the keys with no mapping."""
+    """Print what is there and return the keys that genuinely need a mapping."""
     unmapped: set[str] = set()
     print("\nSQLite stores:")
     for table, keys in sqlite_found.items():
@@ -295,18 +316,16 @@ def _print_survey(sqlite_found: dict, chroma_found: dict, mapping: dict) -> list
             continue
         print(f"  {table}:")
         for key, count in sorted(keys.items()):
-            target = mapping.get(key)
-            arrow = f"-> {target}" if target else "-> ?  (NO --map ENTRY)"
-            if not target:
+            arrow, needs_mapping = _survey_arrow(key, mapping)
+            if needs_mapping:
                 unmapped.add(key)
             print(f"    {key!r} ({count} rows) {arrow}")
     print("\nChroma namespaces:")
     if not chroma_found:
         print("  (none)")
     for ns, count in sorted(chroma_found.items()):
-        target = mapping.get(ns)
-        arrow = f"-> {target}" if target else "-> ?  (NO --map ENTRY)"
-        if not target:
+        arrow, needs_mapping = _survey_arrow(ns, mapping)
+        if needs_mapping:
             unmapped.add(ns)
         print(f"  {ns!r} ({count} docs) {arrow}")
     return sorted(unmapped)
@@ -349,11 +368,34 @@ def main(argv: list[str] | None = None) -> int:
     if args.reverse:
         with open(args.reverse, encoding="utf-8") as f:
             saved = json.load(f)
-        # Invert: the file records old→new, so undoing means new→old.
-        mapping = {v: k for k, v in saved.get("mapping", {}).items()}
-        if not mapping:
+        forward = saved.get("mapping", {})
+        if not forward:
             print("error: mapping file has no 'mapping' object")
             return 2
+        # Invert: the file records old→new, so undoing means new→old.
+        #
+        # Refuse rather than invert a non-injective mapping. A dict inversion
+        # silently keeps only the last entry for a duplicated target, so
+        # {"divora": X, X: X} would invert to {X: X} — the reverse would report
+        # success and restore nothing, which is the worst possible outcome for
+        # a command whose entire job is undoing a migration. Identity entries
+        # are no longer needed (see _survey_arrow), so a collision now means a
+        # genuinely ambiguous mapping the operator has to resolve.
+        collisions: dict[str, list[str]] = {}
+        for old, new in forward.items():
+            collisions.setdefault(new, []).append(old)
+        ambiguous = {new: olds for new, olds in collisions.items() if len(olds) > 1}
+        if ambiguous:
+            print("error: mapping is not reversible — these targets have more "
+                  "than one source, so undoing them is ambiguous:")
+            for new, olds in sorted(ambiguous.items()):
+                print(f"  {new!r} <- {', '.join(repr(o) for o in sorted(olds))}")
+            print("Edit the mapping file to keep exactly one source per target.")
+            return 2
+        mapping = {new: old for old, new in forward.items() if new != old}
+        if not mapping:
+            print("Nothing to reverse: every entry maps a key to itself.")
+            return 0
         print(f"Reversing {len(mapping)} mapping(s) from {args.reverse}")
 
     if not os.path.exists(db_path):

@@ -6,6 +6,7 @@ from the lock, or the `fitz` pin coming back.
 """
 import importlib.metadata as md
 import pathlib
+import re
 import tomllib
 import unittest
 
@@ -220,6 +221,37 @@ class TestDependencyDeclaration(unittest.TestCase):
             f"purged packages are back in requirements.txt: {sorted(present)}. "
             "That is what `pip freeze > requirements.txt` does — regenerate by "
             "hand from pyproject.toml instead (DECISIONS #9).",
+        )
+
+
+class TestDeclaredCoreDepsAreInstalled(unittest.TestCase):
+    """Catches a core dependency silently dropped from the lock.
+
+    Not hypothetical: prometheus-client is declared core but was missing from
+    the working venv, and observability.py guards its import with try/except —
+    so metrics degraded silently instead of failing loudly. A declared core dep
+    that is not installed means requirements.txt and pyproject.toml have
+    drifted apart.
+    """
+
+    @staticmethod
+    def _normalise(name: str) -> str:
+        return re.sub(r"[-_.]+", "-", name).strip().lower()
+
+    def test_every_declared_core_dep_is_importable_as_a_distribution(self):
+        declared = set()
+        for raw in _pyproject()["project"]["dependencies"]:
+            spec = raw.split(";")[0]           # drop environment markers
+            name = re.split(r"[<>=!\[~]", spec)[0]
+            declared.add(self._normalise(name))
+        installed = {self._normalise(d.metadata["Name"])
+                     for d in md.distributions() if d.metadata["Name"]}
+        missing = sorted(declared - installed)
+        self.assertEqual(
+            missing, [],
+            f"declared as core in pyproject.toml but not installed: {missing}. "
+            "Either install them (pip install -e '.[dev]') or stop declaring "
+            "them core — a guarded import means this degrades silently.",
         )
 
 

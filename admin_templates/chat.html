@@ -392,6 +392,16 @@
         color: var(--text-meta); font-size: 14px;
     }
     .attach-chip button:hover { color: var(--rose); }
+    /* This button lives INSIDE a clip-path'd container, so an outline — even
+       on a .facet wrapper — is clipped by the ancestor and never appears. A
+       filled indicator paints within the element's own box, which is inside
+       the clip region, so it survives. Same reasoning as .facet, different
+       mechanism, because the clipping element here is the parent. */
+    .attach-chip button:focus-visible {
+        outline: none;
+        color: var(--text-hi);
+        background: var(--focus, #c9a75f);
+    }
 
     /* Sent-image card. The caption's dimensions and format come from the
        upload response, which reads them off the sniffed bytes — never from
@@ -478,9 +488,12 @@
                     as to enthusiasm.
                 </p>
                 <div class="suggestions">
-                    <button type="button" class="suggestion">What is dirtying my git status?</button>
-                    <button type="button" class="suggestion">Run ruff and report back.</button>
-                    <button type="button" class="suggestion">Are my secrets safe in exec?</button>
+                    {# .facet wrappers are load-bearing, not decoration: the
+                       chips carry a clip-path, which clips the focus outline
+                       away. Without the wrapper they have no focus indicator. #}
+                    <span class="facet"><button type="button" class="suggestion">What is dirtying my git status?</button></span>
+                    <span class="facet"><button type="button" class="suggestion">Run ruff and report back.</button></span>
+                    <span class="facet"><button type="button" class="suggestion">Are my secrets safe in exec?</button></span>
                 </div>
             </div>
         {% endif %}
@@ -639,7 +652,26 @@
         veil.addEventListener("click", closeConfirm);
         if (confirmCard) confirmCard.addEventListener("click", (e) => e.stopPropagation());
         document.addEventListener("keydown", function(e) {
-            if (e.key === "Escape" && veil.classList.contains("open")) closeConfirm();
+            if (!veil.classList.contains("open")) return;
+            if (e.key === "Escape") { closeConfirm(); return; }
+            // Trap Tab inside the dialog. aria-modal tells assistive tech the
+            // rest of the page is inert, but it does not change the browser's
+            // tab order — without this a keyboard user tabs straight out of a
+            // modal asking whether to destroy their conversation, and lands on
+            // controls behind a veil they cannot see past.
+            if (e.key !== "Tab") return;
+            const focusables = [confirmCancel, confirmAccept].filter(Boolean);
+            if (!focusables.length) return;
+            const first = focusables[0];
+            const last = focusables[focusables.length - 1];
+            const active = document.activeElement;
+            if (e.shiftKey && (active === first || !veil.contains(active))) {
+                e.preventDefault();
+                last.focus();
+            } else if (!e.shiftKey && (active === last || !veil.contains(active))) {
+                e.preventDefault();
+                first.focus();
+            }
         });
     }
 
@@ -761,6 +793,19 @@
             textarea.focus();
         });
     });
+
+    // ── Focus rings on faceted controls ──────────────────────────────────
+    // clip-path clips outline and outer box-shadow, so a focus ring drawn on a
+    // faceted control is invisible. .facet is an unclipped wrapper that carries
+    // the ring instead (see _theme_base.html). Anything with a clip-path that
+    // can take focus MUST be wrapped, or it has no focus indicator at all —
+    // WCAG 2.4.7. Wrap dynamically-created controls through here.
+    function faceted(el) {
+        const span = document.createElement("span");
+        span.className = "facet";
+        span.appendChild(el);
+        return span;
+    }
 
     // ── Timestamps ───────────────────────────────────────────────────────
     // Server-rendered history carries an ISO instant in datetime= (the correct
@@ -1170,7 +1215,7 @@
             copy.addEventListener("click", function() {
                 copyText(pre.innerText, copy);
             });
-            bar.append(dot, lang, copy);
+            bar.append(dot, lang, faceted(copy));
 
             wrap.appendChild(bar);
             wrap.appendChild(target);
@@ -1206,7 +1251,7 @@
             b.addEventListener("click", function() {
                 textarea.value = label; autoGrow(); textarea.focus();
             });
-            chips.appendChild(b);
+            chips.appendChild(faceted(b));
         });
         wrap.appendChild(chips);
         list.insertBefore(wrap, document.getElementById("status-row"));

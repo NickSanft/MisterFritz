@@ -1649,6 +1649,62 @@ class TestChatUploadImage(unittest.TestCase):
         self.assertEqual(r.status_code, 400)
 
 
+class TestFacetedControlsKeepAFocusRing(unittest.TestCase):
+    """clip-path clips outline, so a faceted control needs an unclipped .facet
+    wrapper or it has no visible focus indicator at all (WCAG 2.4.7).
+
+    Source-level because the failure is invisible without a browser: the
+    control still works, still focuses, and still activates — the ring simply
+    is not painted. Nothing else in the suite would notice.
+    """
+
+    def test_suggestion_chips_are_wrapped(self):
+        src = _template("chat.html")
+        # Server-rendered block.
+        self.assertNotIn('<button type="button" class="suggestion">', src.replace(
+            '<span class="facet"><button type="button" class="suggestion">', ""))
+        # JS-rebuilt block (renderEmptyState) goes through the helper.
+        self.assertIn("chips.appendChild(faceted(b))", src)
+
+    def test_copy_buttons_are_wrapped(self):
+        src = _template("chat.html")
+        self.assertIn("faceted(copy)", src)
+
+    def test_faceted_helper_exists(self):
+        src = _template("chat.html")
+        self.assertIn("function faceted(", src)
+        self.assertIn('span.className = "facet"', src)
+
+    def test_control_inside_a_clipped_parent_uses_a_filled_indicator(self):
+        """The attachment × sits inside .attach-chip, which is itself clipped —
+        a wrapper there would be clipped by the ancestor, so it needs a focus
+        style that paints inside the element's own box."""
+        src = _template("chat.html")
+        self.assertIn(".attach-chip button:focus-visible", src)
+
+
+class TestConfirmDialogTrapsFocus(unittest.TestCase):
+    """aria-modal tells assistive tech the rest of the page is inert; it does
+    not change the browser's tab order. Without an explicit trap a keyboard
+    user tabs out of a modal asking whether to destroy their conversation."""
+
+    def test_tab_is_trapped_inside_the_dialog(self):
+        src = _template("chat.html")
+        self.assertIn('e.key !== "Tab"', src)
+        self.assertIn("veil.contains(active)", src)
+
+    def test_dialog_carries_modal_semantics(self):
+        src = _template("chat.html")
+        self.assertIn('role="dialog"', src)
+        self.assertIn('aria-modal="true"', src)
+        self.assertIn('aria-labelledby="confirm-title"', src)
+
+    def test_focus_moves_in_and_is_restored(self):
+        src = _template("chat.html")
+        self.assertIn("lastFocused = document.activeElement", src)
+        self.assertIn("confirmCancel.focus()", src)
+
+
 class TestMessageTimestamps(unittest.TestCase):
     """DECISIONS.md #16: messages carry a creation timestamp.
 

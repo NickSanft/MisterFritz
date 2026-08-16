@@ -90,14 +90,23 @@ class StreamingMessageHandler:
             # Compare the COMPOSED output, not just the body: a new status line
             # over unchanged text is still a change the user needs to see, and
             # comparing bodies alone would silently swallow it.
-            rendered = self._compose(self.pending_text) if self.pending_text else None
-            if self.pending_text and rendered != self.current_rendered:
+            #
+            # `is not None`, NOT truthiness. A status arriving before the first
+            # token — the common case for a tool-using turn, where the notice
+            # is the whole point — has pending_text == "", which is falsy. The
+            # old guard skipped the edit entirely, so the placeholder sat on
+            # "Mister Fritz is thinking..." and the user never saw "Searching
+            # the web..." until tokens started arriving, by which point it was
+            # stale. A status alone is reason enough to render.
+            body = self.pending_text if self.pending_text is not None else self.current_text
+            rendered = self._compose(body) if (self.pending_text is not None or self.status_text) else None
+            if rendered is not None and rendered != self.current_rendered:
                 time_since_last = time.time() - self.last_update_time
                 if time_since_last < self.min_update_interval:
                     await asyncio.sleep(self.min_update_interval - time_since_last)
                 try:
                     await self.message.edit(content=rendered)
-                    self.current_text = self.pending_text
+                    self.current_text = body
                     self.current_rendered = rendered
                     self.last_update_time = time.time()
                     self.pending_text = None

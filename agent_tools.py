@@ -5,6 +5,7 @@ import logging
 import os
 import random
 import re
+import threading
 import uuid
 from datetime import datetime
 
@@ -174,6 +175,12 @@ _RELATIONSHIP_LEVELS = [
     (0,  "stranger"),
 ]
 
+# Guards the read-modify-write in update_user_profile. Process-wide rather than
+# per-user: profile writes are rare and short, so the contention a single lock
+# adds is not measurable, and a per-user registry would need its own eviction
+# policy to avoid growing without bound.
+_PROFILE_LOCK = threading.Lock()
+
 
 def get_user_profile(user_id: str) -> dict:
     """Fetch the structured profile for a user, returning an empty dict if none exists."""
@@ -193,7 +200,18 @@ def update_user_profile(user_id: str, updates: dict) -> None:
 
     Automatically increments the interaction count and derives the
     relationship_level from it — those two fields are not settable via updates.
+
+    Serialised because this is a read-modify-write against a shared store and
+    summarisation now runs on a daemon thread: two overlapping calls could each
+    read the same interaction_count, both write count+1, and lose an increment.
+    The failure is silent and slow — relationship_level simply stops
+    progressing — so it surfaces only as Fritz never warming up to someone.
     """
+    with _PROFILE_LOCK:
+        _update_user_profile_locked(user_id, updates)
+
+
+def _update_user_profile_locked(user_id: str, updates: dict) -> None:
     profile = get_user_profile(user_id)
 
     for key, value in updates.items():

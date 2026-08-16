@@ -6,6 +6,7 @@ chroma directory, and attempts to write a Mermaid PNG). The PNG write is
 wrapped in a try/except in the source, so it won't fail. The DB and chroma
 directory creation are lightweight and acceptable in a test environment.
 """
+import json
 import re
 import unittest
 from unittest.mock import MagicMock, patch
@@ -200,7 +201,12 @@ class TestMemoryExtractionSkipGuard(unittest.TestCase):
     def test_substantial_turn_still_calls_llm(self):
         with patch("agent_tools._ollama_client") as mock_client:
             mock_resp = MagicMock()
-            mock_resp.message.content = "[]"
+            # The structured-output payload, not the pre-change "[]". With a
+            # bare list here json.loads(...).get("facts") raises AttributeError,
+            # the bare `except Exception` in _extract_and_store_memories
+            # swallows it, and this test passes while proving only that chat()
+            # was reached — never that the reply is parsed.
+            mock_resp.message.content = '{"facts": []}'
             mock_client.chat.return_value = mock_resp
             agent_tools._extract_and_store_memories(
                 user_id="alice",
@@ -211,6 +217,111 @@ class TestMemoryExtractionSkipGuard(unittest.TestCase):
                 ),
             )
         mock_client.chat.assert_called_once()
+        # Native structured output, not a "respond ONLY with JSON" instruction.
+        self.assertEqual(mock_client.chat.call_args.kwargs["format"],
+                         agent_tools._EXTRACTION_SCHEMA)
+
+
+class TestMemoryExtractionStructuredOutput(unittest.TestCase):
+    """What the extractor does with a well-formed reply. None of this was
+    covered — the one test that reached the parse path fed it a payload that
+    made the parse throw."""
+
+    _LONG_USER = "I work as a backend engineer at a fintech startup in Berlin."
+    _LONG_REPLY = ("Excellent. I shall make a note of your profession and "
+                   "location. Berlin is a fine city for the trade.")
+
+    def _run(self, facts):
+        with patch("agent_tools._ollama_client") as mock_client, \
+             patch.object(agent_tools, "add_memory") as add_memory:
+            mock_resp = MagicMock()
+            mock_resp.message.content = json.dumps({"facts": facts})
+            mock_client.chat.return_value = mock_resp
+            agent_tools._extract_and_store_memories(
+                user_id="alice",
+                user_message=self._LONG_USER,
+                assistant_response=self._LONG_REPLY,
+            )
+        return add_memory
+
+    def test_each_fact_becomes_a_memory(self):
+        add_memory = self._run(["Works as a backend engineer",
+                                "Lives in Berlin"])
+        self.assertEqual(add_memory.call_count, 2)
+        stored = [c.args[2] for c in add_memory.call_args_list]
+        self.assertIn("Lives in Berlin", stored)
+
+    def test_facts_are_capped_at_five_per_turn(self):
+        add_memory = self._run([f"Fact number {i} about the user" for i in range(8)])
+        self.assertEqual(add_memory.call_count, 5)
+
+    def test_trivially_short_facts_are_dropped(self):
+        add_memory = self._run(["Berlin", "  ", "Works as a backend engineer"])
+        self.assertEqual(add_memory.call_count, 1)
+
+    def test_malformed_reply_is_swallowed_without_storing(self):
+        add_memory = self._run_raw("not json at all")
+        self.assertEqual(add_memory.call_count, 0)
+
+    def _run_raw(self, content):
+        with patch("agent_tools._ollama_client") as mock_client, \
+             patch.object(agent_tools, "add_memory") as add_memory:
+            mock_resp = MagicMock()
+            mock_resp.message.content = content
+            mock_client.chat.return_value = mock_resp
+            agent_tools._extract_and_store_memories(
+                user_id="alice",
+                user_message=self._LONG_USER,
+                assistant_response=self._LONG_REPLY,
+            )
+        return add_memory
+
+
+class TestProfileUpdateIsSerialised(unittest.TestCase):
+    """update_user_profile is a read-modify-write against a shared store, and
+    summarisation now runs on a daemon thread. Without a lock two overlapping
+    calls each read the same interaction_count and both write count+1, losing
+    an increment — silently, so relationship_level just stops progressing.
+
+    The fake store below widens the window between read and write so the race
+    is deterministic rather than a coin flip: without _PROFILE_LOCK this test
+    fails every run, not one in fifty.
+    """
+
+    def test_concurrent_updates_do_not_lose_increments(self):
+        import threading
+        import time
+
+        state = {"profile_data": json.dumps({"interaction_count": 0})}
+
+        class _SlowStore:
+            def mget(self, _keys):
+                return [dict(state)]
+
+            def get(self, _key):
+                return dict(state)
+
+            def put(self, _ns, _key, value):
+                # Simulate a slow write; the unlocked version interleaves here.
+                time.sleep(0.02)
+                state.update(value)
+
+        store = _SlowStore()
+        with patch.object(agent_tools, "_get_chroma_store", return_value=store), \
+             patch.object(agent_tools, "get_user_profile",
+                          side_effect=lambda uid: json.loads(state["profile_data"])):
+            threads = [threading.Thread(target=agent_tools.update_user_profile,
+                                        args=("discord-1", {}))
+                       for _ in range(6)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        final = json.loads(state["profile_data"])["interaction_count"]
+        self.assertEqual(final, 6,
+                         f"lost {6 - final} increment(s) — update_user_profile "
+                         "is not serialised")
 
 
 if __name__ == "__main__":

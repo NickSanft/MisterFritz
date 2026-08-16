@@ -465,7 +465,10 @@ class TestExecutorTokenStreaming(unittest.TestCase):
             ("values", {"messages": [AIMessage(content="done")]}),
         ]
         _agent, _calls, progress, _r = self._run(script)
-        self.assertEqual(progress, ["Searching the web..."])
+        # Asserted against the registry rather than a literal, so rewording a
+        # notice does not fail a test that is really about de-duplication.
+        self.assertEqual(progress, [mister_fritz.TOOL_NOTICES["search_web"]])
+        self.assertEqual(len(progress), 1, "the same tool must notify once")
 
     def test_requests_values_and_messages_when_a_callback_is_present(self):
         script = [("values", {"messages": [AIMessage(content="x")]})]

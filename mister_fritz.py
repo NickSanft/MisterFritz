@@ -316,6 +316,34 @@ def summarize_conversation(state: EnhancedState, config: RunnableConfig):
     return {"messages": delete_messages}
 
 
+# Progress notices, in Fritz's voice rather than an assistant's. These are
+# among the most-read strings in the product — a user waiting on a slow tool
+# call stares at one for the whole generation — so generic boilerplate here
+# undercut the persona everything else maintains. Both surfaces render them:
+# Discord inside the placeholder message, the web chat as an SSE progress
+# event. Module-level so tests can assert against the registry instead of
+# pinning literals that a reword would break.
+TOOL_NOTICES = {
+    "generate_image": "🎨 Conjuring an image. These things will not be rushed.",
+    "search_documents": "📚 Consulting the library.",
+    "search_web": "🌐 Making enquiries further afield.",
+    "scrape_web": "📄 Reading the page so you need not.",
+    "scrape_website": "📄 Reading the page so you need not.",
+    "search_memories": "🗝️ Consulting my notes on you.",
+    "save_memory": "🖋️ Committing that to the ledger.",
+    "analyze_image": "🔍 Examining the picture closely.",
+    "schedule_message": "⏳ Entering that in the diary.",
+    "list_my_schedules": "📔 Reviewing your engagements.",
+    "cancel_reminder": "✂️ Striking that from the diary.",
+    "list_directory": "🗂️ Surveying the workspace.",
+    "read_file": "📖 Reading the file.",
+    "write_file": "✒️ Setting it down in writing.",
+    "edit_file": "📝 Amending the document.",
+    "search_files": "🔎 Searching the files.",
+    "execute_command": "⚙️ Running that below stairs.",
+}
+
+
 def _framed_for_model(msg):
     """Re-apply a turn's framing on its way to the model.
 
@@ -589,25 +617,6 @@ def executor(state: EnhancedState, config: RunnableConfig):
     except Exception as e:
         logger.warning("Profile injection failed (non-fatal): %s", e)
 
-    tool_messages = {
-        "generate_image": "Generating an image, this may take a moment...",
-        "search_documents": "Searching through documents for you...",
-        "search_web": "Searching the web...",
-        "scrape_web": "Scraping website content...",
-        "scrape_website": "Scraping website content...",
-        "search_memories": "Looking through my memories...",
-        "save_memory": "Filing that away for future reference...",
-        "analyze_image": "Analyzing your image(s) with vision AI...",
-        "schedule_message": "Scheduling that for later...",
-        "list_my_schedules": "Checking your schedules...",
-        "cancel_reminder": "Cancelling that reminder...",
-        "list_directory": "Browsing the workspace...",
-        "read_file": "Reading a file...",
-        "write_file": "Writing to a file...",
-        "edit_file": "Editing a file...",
-        "search_files": "Searching through files...",
-        "execute_command": "Running a command...",
-    }
     notified_tools: set = set()
 
     history = _history_window(messages)
@@ -646,8 +655,8 @@ def executor(state: EnhancedState, config: RunnableConfig):
                     if progress_callback:
                         for tool_call in latest.tool_calls:
                             tool_name = tool_call.get('name', '')
-                            if tool_name in tool_messages and tool_name not in notified_tools:
-                                progress_callback(tool_messages[tool_name])
+                            if tool_name in TOOL_NOTICES and tool_name not in notified_tools:
+                                progress_callback(TOOL_NOTICES[tool_name])
                                 notified_tools.add(tool_name)
             continue
 
