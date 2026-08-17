@@ -26,6 +26,8 @@ Every file:line reference was verified against the working tree at plan time. Wh
 
 This file is the integration layer: what to build once, what collides with what, and the order to ship it in. **Read this before any individual plan.**
 
+[11. The minor findings](11-minor-findings.md) — the post-implementation audit's long tail, batched into 9 low-risk commits. The criticals and majors it found are already closed.
+
 
 ---
 
