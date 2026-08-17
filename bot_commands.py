@@ -162,7 +162,7 @@ class _ForgetConfirmView(discord.ui.View):
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        result = privacy.forget_all(self.requester, self.schedule_manager)
+        result = await run_blocking(privacy.forget_all, self.requester, self.schedule_manager)
         audit_log("forget", user_id=self.requester, scope="all", result=result)
         await interaction.response.edit_message(
             content=(
@@ -345,7 +345,7 @@ class FritzCommands(commands.Cog):
     async def forget_memories_slash(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.forget.memories")
         user_id = _identity(interaction)
-        count = privacy.forget_memories(user_id)
+        count = await run_blocking(privacy.forget_memories, user_id)
         audit_log("forget", user_id=user_id, scope="memories", removed=count)
         await interaction.response.send_message(
             f"✅ Removed {count} memory entry(ies).", ephemeral=True,
@@ -355,7 +355,7 @@ class FritzCommands(commands.Cog):
     async def forget_conversation_slash(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.forget.conversation")
         user_id = _identity(interaction)
-        count = privacy.forget_conversation(user_id)
+        count = await run_blocking(privacy.forget_conversation, user_id)
         audit_log("forget", user_id=user_id, scope="conversation", removed=count)
         await interaction.response.send_message(
             f"✅ Cleared {count} checkpoint row(s). Your next message starts a fresh thread.",
@@ -366,7 +366,7 @@ class FritzCommands(commands.Cog):
     async def forget_schedules_slash(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.forget.schedules")
         user_id = _identity(interaction)
-        count = privacy.forget_schedules(user_id, self.schedule_manager)
+        count = await run_blocking(privacy.forget_schedules, user_id, self.schedule_manager)
         audit_log("forget", user_id=user_id, scope="schedules", removed=count)
         await interaction.response.send_message(
             f"✅ Cancelled {count} schedule(s).", ephemeral=True,
@@ -399,7 +399,7 @@ class FritzCommands(commands.Cog):
         METRICS.increment("discord_commands.export")
         user_id = _identity(interaction)
         await interaction.response.defer(ephemeral=True, thinking=True)
-        data = privacy.export_user_data(user_id, self.schedule_manager)
+        data = await run_blocking(privacy.export_user_data, user_id, self.schedule_manager)
         payload = json.dumps(data, indent=2, default=str).encode("utf-8")
         # Discord's free-tier per-message attachment cap is 25 MB; we cap at 8 MB
         # as a comfortable safety margin since exports should be tiny.
@@ -430,10 +430,16 @@ class FritzCommands(commands.Cog):
         # a spinner. Range rejects it up front; the chunking below is belt and
         # braces, and keeps the trailing ``` summary block intact when it does
         # need to split.
+        METRICS.increment("discord_commands.draw")
         await interaction.response.defer(thinking=True)
-        for chunk in split_into_chunks(
-            draw_cards(num_cards, _identity(interaction), _display(interaction))
-        ):
+        drawn = draw_cards(num_cards, _identity(interaction), _display(interaction))
+        # split_into_chunks returns [] for empty input, which would make the
+        # loop below a no-op — and a deferred interaction that never receives a
+        # followup leaves the user staring at "thinking…" until it expires.
+        # Something must always be sent.
+        for chunk in split_into_chunks(drawn) or [
+            "The deck yielded nothing, which I did not think possible."
+        ]:
             await interaction.followup.send(content=chunk)
 
     @app_commands.command(name="cards_remaining", description="Check cards remaining in the deck")
@@ -627,7 +633,13 @@ class FritzCommands(commands.Cog):
         # detached messages that can interleave with other traffic. The old
         # "The answer was over 2000 …" header announced an implementation
         # detail nobody asked about.
-        for chunk in split_into_chunks(original_response):
+        # Empty is a real outcome here — the corpus may hold nothing on the
+        # subject — and split_into_chunks returns [] for it, so without a
+        # fallback the deferred interaction never gets a followup and the user
+        # watches "thinking…" until it expires.
+        for chunk in split_into_chunks(original_response) or [
+            "The library holds nothing on that, sir."
+        ]:
             await interaction.followup.send(chunk)
 
     # ── Voice channel ─────────────────────────────────────────────────────────

@@ -6,6 +6,7 @@ We mock the heavy modules before importing so no Discord connection or TTS
 model load is required.
 """
 import asyncio
+import pathlib
 import time
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -225,6 +226,35 @@ class TestFinalUpdateChunking(unittest.IsolatedAsyncioTestCase):
         await handler.final_update("word " * 900, files=[MagicMock()])
         self.assertTrue(any(
             "files" in c.kwargs for c in msg.channel.send.await_args_list))
+
+
+class TestIdentityRecordedOnlyForRealTurns(unittest.TestCase):
+    """The bot used to record ITSELF as one of its own users.
+
+    identity_store.record ran before the `ctx.author == client.user` guard, so
+    every message Fritz sent upserted an alias row for the bot account — and it
+    also fired for ambient guild chatter he was never addressed in, quietly
+    building a roster of people who had not interacted with him at all.
+
+    Source-level because on_message is a client event handler whose collaborators
+    (a live gateway, a Message, a Channel) make a behavioural test far more
+    scaffolding than the assertion is worth — and the bug is purely one of
+    statement order, which is exactly what this checks.
+    """
+
+    def test_record_comes_after_the_early_returns(self):
+        src = (pathlib.Path(__file__).resolve().parent.parent
+               / "main_discord.py").read_text(encoding="utf-8")
+        body = src.split("async def on_message(", 1)[1]
+        self_guard = body.index("ctx.author == client.user")
+        mention_guard = body.index("client.user.mentioned_in(ctx)")
+        record = body.index("identity_store.record(")
+        self.assertGreater(record, self_guard,
+                           "identity_store.record runs before the self-check — "
+                           "the bot records itself as a user")
+        self.assertGreater(record, mention_guard,
+                           "identity_store.record runs before the mention "
+                           "check — ambient chatter creates alias rows")
 
 
 if __name__ == "__main__":

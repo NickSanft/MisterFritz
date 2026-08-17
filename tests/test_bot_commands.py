@@ -626,5 +626,63 @@ class TestIdentityFromSnowflake(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(":", bot_commands._identity(_fake_interaction("Nick")))
 
 
+class TestDeferredCommandsAlwaysAnswer(unittest.IsolatedAsyncioTestCase):
+    """A deferred interaction that never receives a followup leaves the user
+    staring at "thinking…" until Discord expires it.
+
+    split_into_chunks returns [] for empty input, so iterating it was a silent
+    no-op on an empty result — and empty is a REAL outcome for /lore, whose
+    corpus may simply hold nothing on the subject. Note the obvious fix of
+    `... or [text]` does not work either: `followup.send(content="")` raises.
+    """
+
+    async def test_lore_with_an_empty_result_still_sends_something(self):
+        cog = _make_cog()
+        interaction = _fake_interaction("someone")
+        with unittest.mock.patch("bot_commands.query_documents", lambda q: ""):
+            await cog.lore_slash.callback(cog, interaction, query="anything")
+        interaction.followup.send.assert_awaited_once()
+        sent = interaction.followup.send.await_args.args[0]
+        self.assertTrue(sent.strip(), "a deferred command sent empty content")
+
+    async def test_draw_with_an_empty_result_still_sends_something(self):
+        cog = _make_cog()
+        interaction = _fake_interaction("someone")
+        with unittest.mock.patch("bot_commands.draw_cards", lambda *a, **k: ""):
+            await cog.draw_slash.callback(cog, interaction, num_cards=1)
+        interaction.followup.send.assert_awaited_once()
+        sent = interaction.followup.send.await_args.kwargs.get("content")
+        self.assertTrue((sent or "").strip(), "a deferred command sent empty content")
+
+    async def test_draw_records_a_metric_like_every_other_command(self):
+        cog = _make_cog()
+        interaction = _fake_interaction("someone")
+        with unittest.mock.patch("bot_commands.draw_cards", lambda *a, **k: "AS"), \
+             unittest.mock.patch.object(bot_commands.METRICS, "increment") as inc:
+            await cog.draw_slash.callback(cog, interaction, num_cards=1)
+        self.assertIn("discord_commands.draw",
+                      [c.args[0] for c in inc.call_args_list])
+
+
+class TestPrivacyWorkRunsOffTheLoop(unittest.IsolatedAsyncioTestCase):
+    """privacy.* touches Chroma and SQLite. Left on the event loop it freezes
+    every other user's streaming for the duration of a /forget."""
+
+    async def test_forget_memories_is_offloaded(self):
+        loop_thread = threading.get_ident()
+        seen = {}
+
+        def fake_forget(user_id):
+            seen["thread"] = threading.get_ident()
+            return 3
+
+        cog = _make_cog()
+        interaction = _fake_interaction("someone")
+        with unittest.mock.patch.object(bot_commands.privacy, "forget_memories",
+                                        fake_forget):
+            await cog.forget_memories_slash.callback(cog, interaction)
+        self.assertNotEqual(seen["thread"], loop_thread)
+
+
 if __name__ == "__main__":
     unittest.main()

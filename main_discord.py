@@ -217,7 +217,6 @@ async def on_message(ctx):
     # for the prompt and for filenames.
     user_id = canonical_user_id("discord", ctx.author.id)
     author = ctx.author.display_name or ctx.author.name
-    identity_store.record(user_id, author, "discord")
     channel = ctx.channel
     message_clean = ctx.clean_content
     if ctx.author == client.user:
@@ -227,6 +226,13 @@ async def on_message(ctx):
         return
     elif not isinstance(channel, discord.DMChannel) and not client.user.mentioned_in(ctx):
         return
+
+    # Recorded AFTER the early returns, not before. Above the self-check this
+    # ran for every message Fritz himself sent, so the bot account had an alias
+    # row in user_aliases — it was recorded as one of its own users. It also
+    # fired for ambient guild chatter the bot was never addressed in, quietly
+    # building a roster of people who had not interacted with it at all.
+    identity_store.record(user_id, author, "discord")
 
     METRICS.increment("discord_messages")
     request_id = str(uuid.uuid4())[:8]
