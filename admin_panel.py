@@ -393,9 +393,16 @@ async def reindex_document_action(request: Request) -> Response:
 
 
 # ── /chat — local chat UI (Phase web-chat-1) ────────────────────────────────
-# A separate identity model from the admin panel: cookie-based, no password.
-# Threat model is "me + my friends on a port-forwarded local network." For
-# per-user namespacing of memories/schedules/threads, that's enough.
+# A separate identity model from the admin panel, but no longer an unguarded
+# one: /chat/login requires CHAT_PASSWORD (deliberately NOT falling back to
+# ADMIN_PANEL_PASSWORD, so chat access never hands out the panel's secret).
+#
+# The distinction that matters: the cookie proves the perimeter was cleared,
+# not WHICH person cleared it. The username still decides whose memories,
+# schedules and thread you get, and anyone past the password can type someone
+# else's name — narrow that with CHAT_ALLOWED_USERS. Threat model is "me and
+# my friends"; per-user separation needs the invite tokens costed in
+# DECISIONS.md #2, not this.
 
 def _chat_user(request: Request) -> str | None:
     """Return the verified chat *display name* from the cookie, or None.
@@ -734,10 +741,9 @@ async def chat_stream(request: Request) -> Response:
         # reply costs O(n) bytes on the wire instead of O(n^2) — previously
         # every frame re-sent the whole reply so far.
         #
-        # `reset` means the model started a fresh answer segment: it narrated
-        # before calling a tool and then began again, or the synthesizer took
-        # over. Without it the client would concatenate the preamble onto the
-        # real answer.
+        # `reset` means the model started a fresh answer segment — it narrated
+        # before calling a tool and then began again. Without it the client
+        # would concatenate the preamble onto the real answer.
         if restart:
             event_queue.put(("reset", ""))
         event_queue.put(("token", delta))

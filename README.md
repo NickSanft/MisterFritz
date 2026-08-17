@@ -32,10 +32,10 @@ Mister Fritz is an AI-powered Discord bot with a sophisticated, sardonic persona
 | `/gen <prompt>` | Generate an image from a text description |
 | `/voice <message>` | Synthesize speech (plays in voice channel or uploads file) |
 | `/join` / `/leave` | Join or leave the current voice channel |
-| `/draw [n]` | Draw cards from a deck |
+| `/draw [n]` | Draw cards from a deck (1–40) |
 | `/cards_remaining` | Check how many cards remain |
 | `/reload_deck` | Reset your deck |
-| `/health` | Show system health and metrics |
+| `/health` | Show system health and metrics *(ephemeral — only you see it)* |
 | `/help`, `/about` | Discover bot capabilities and version info |
 | `/workspace enable` | Create a sandboxed workspace and turn on file tools for yourself |
 | `/workspace disable` / `status` | Manage your workspace |
@@ -427,22 +427,26 @@ The identity cookie is HMAC-signed (so it can't be tampered to impersonate anoth
 |---|---|
 | **Streaming responses** | Fritz's reply appears token-by-token via Server-Sent Events (delta frames), with a blinking cursor while he writes. A `reset` frame clears the bubble when he starts a fresh answer — e.g. after narrating, calling a tool, and beginning again. |
 | **Markdown rendering** | Code blocks, tables, lists, bold/italic all render. Markdown is finalised when the response completes. |
-| **Tool progress** | Ephemeral italic lines ("🔍 Searching the web…", "🧠 Looking through my memories…") show what Fritz is doing, then vanish when the answer lands. |
+| **Tool progress** | Ephemeral italic lines in Fritz's voice ("🌐 Making enquiries further afield.", "🗝️ Consulting my notes on you.") show what he is doing, then vanish when the answer lands. |
 | **Conversation history** | The page hydrates with your last 40 messages on load, so a refresh doesn't lose context. |
 | **New conversation** | A header button resets just this thread's context (calls `forget_conversation`). Your memories and schedules are untouched. |
 | **Image analysis** | Drag an image anywhere onto the chat, or click 📎, then send a message — Fritz analyses it with the vision model. |
 | **Inline images** | Images Fritz generates render directly in his reply bubble. |
-| **Document upload** *(admin only)* | Admins get a "Add to shared docs" control that drops a file into `DOC_FOLDER`; the watchdog auto-indexes it for `/lore` and `search_documents`. |
+| **Document upload** | **Not on this surface.** It lives on the admin panel's Documents page (`POST /documents/upload`) behind `ADMIN_PANEL_PASSWORD` — `DOC_FOLDER` is the shared corpus every user's RAG answers come from, so a privilege decision cannot be made from a name the user chose for themselves at the chat login. |
 
-No JavaScript? The message form still works — it falls back to a synchronous submit-and-render (you just don't get streaming).
+The chat requires JavaScript. The old synchronous `POST /chat/send` fallback was removed: it was a second copy of the render wiring that had already drifted from the streaming path, and nothing proved a real no-JS browser worked through it.
 
 ### Configuration
 
 | Variable | Default | Description |
 |---|---|---|
+| `CHAT_PASSWORD` | **none** | Shared password required at `/chat/login`. **No default and no fallback to `ADMIN_PANEL_PASSWORD`** — giving someone chat access must never hand them the panel's secret. Until you set this, the chat is off. |
+| `CHAT_ALLOWED_USERS` | empty (any) | Comma-separated allowlist of usernames that may be claimed at login. The password decides *whether* you may be here; the username decides *whose* memories and thread you get, so anyone past the password can still type someone else's name. Set this to narrow that. |
+| `CHAT_COOKIE_SECURE` | `false` | Mark the identity cookie `Secure`. Leave off when reaching the panel over plain http through an SSH tunnel — `Secure` would silently break login there. |
+| `CHAT_CODE_HIGHLIGHT` | `true` | Syntax-highlight fenced code blocks via Pygments. Degrades to plain `<pre><code>` if Pygments is unavailable. |
 | `CHAT_COOKIE_SECRET` | auto-generated | HMAC secret for the identity cookie. Set this explicitly if you run multiple instances or want stable cookies across redeploys. |
 | `CHAT_IMAGE_UPLOAD_MAX_BYTES` | `10485760` (10 MB) | Max size for an uploaded image. |
-| `CHAT_DOC_UPLOAD_MAX_BYTES` | `10485760` (10 MB) | Max size for an admin document upload. |
+| `CHAT_DOC_UPLOAD_MAX_BYTES` | `10485760` (10 MB) | Max size for an admin document upload (on the admin panel, not here). |
 
 Image uploads accept JPEG / PNG / WEBP / GIF only. Document uploads accept the same extensions as the RAG engine (`.pdf`, `.docx`, `.xlsx`, `.csv`, `.txt`, `.md`). Every chat turn and every upload is written to `AUDIT_LOG_PATH` (`chat_message`, `chat_upload_image`, `chat_upload_document`, `chat_login`/`chat_logout` events).
 

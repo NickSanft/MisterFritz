@@ -1011,11 +1011,16 @@
         followScroll(true);
 
         // ── The wire-format seam ─────────────────────────────────────────
-        // Token frames are CUMULATIVE today: the server sends the whole reply
-        // so far each time. When that flips to deltas, this function is the
-        // only thing that changes — everything downstream already works off
-        // `accumulated`. Keeping the seam here is why that migration is a
-        // two-line edit rather than a rewrite of the stream reader.
+        // Token frames carry DELTAS: the server sends only the new text and
+        // this appends (admin_panel.py puts ("token", delta) on the queue), so
+        // a long reply costs O(n) bytes on the wire rather than O(n²). A
+        // `reset` frame clears the buffer when the model starts a fresh answer
+        // segment.
+        //
+        // The `cumulative` parameter is kept anyway: it is the seam. Should the
+        // wire format ever flip back, or a second producer send whole-text
+        // frames, this function absorbs it and everything downstream keeps
+        // working off `accumulated`.
         let accumulated = "";
         function applyToken(delta, cumulative, restart) {
             if (restart) accumulated = "";
