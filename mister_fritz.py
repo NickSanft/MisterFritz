@@ -238,7 +238,18 @@ def _summarize_and_profile(messages: list, user_id: str | None,
     reads its output — the summary lands in Chroma and is re-surfaced later by
     the memory injection in `executor` — so the user has no reason to wait for
     it.
+
+    Timed as `summarize_background` so /health can answer "is the background
+    summariser keeping up?" — the whole point of moving it off the critical
+    path was that its cost stopped being the user's problem, which is only
+    true if someone is still watching the cost.
     """
+    with METRICS.time_block("summarize_background"):
+        _summarize_and_profile_inner(messages, user_id, config_values)
+
+
+def _summarize_and_profile_inner(messages: list, user_id: str | None,
+                                 config_values: dict) -> None:
     try:
         prompt = messages + [HumanMessage(content="Please summarize the conversation above:")]
         summary_response = ollama_instance.invoke(prompt)

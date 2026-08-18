@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import os
+import time
 from typing import Optional
 
 import discord
@@ -68,7 +69,7 @@ def _display(interaction: discord.Interaction) -> str:
 
 async def _reply_error(interaction: discord.Interaction, operation: str,
                        exc: BaseException | None = None, *,
-                       note: str | None = None) -> None:
+                       note: str | None = None, record: bool = True) -> None:
     """Send butler-voiced failure copy ephemerally, whichever response stage
     the interaction is in.
 
@@ -76,7 +77,7 @@ async def _reply_error(interaction: discord.Interaction, operation: str,
     not must answer via response. Getting it wrong raises, which is how a
     failure handler ends up compounding the failure.
     """
-    text = fritz_error(operation, exc, note=note)
+    text = fritz_error(operation, exc, note=note, record=record)
     try:
         if interaction.response.is_done():
             await interaction.followup.send(text, ephemeral=True)
@@ -570,7 +571,14 @@ class FritzCommands(commands.Cog):
                     channel_key=str(interaction.channel_id) if interaction.channel_id else None,
                 )
                 original_response = response_data["text"]
-                async with self._tts_semaphore:
+            # Outside the agent timer, and the synthesis is timed separately:
+            # a /voice that waits on another user's synthesis should not report
+            # that wait as its own work. See the note in gen_slash.
+            queued_at = time.perf_counter()
+            async with self._tts_semaphore:
+                METRICS.record_latency("discord_commands.voice.tts.queue",
+                                       time.perf_counter() - queued_at)
+                with METRICS.time_block("discord_commands.voice.tts"):
                     output_file = await run_blocking(
                         self.sayer.generate_speech, original_response,
                     )
@@ -578,7 +586,8 @@ class FritzCommands(commands.Cog):
             # Previously absent: a failure in either call raised out of the
             # handler, leaving the deferred interaction hanging with a spinner
             # until Discord timed it out.
-            await _reply_error(interaction, "discord_commands.voice", e)
+            # record=False — see the note in gen_slash.
+            await _reply_error(interaction, "discord_commands.voice", e, record=False)
             return
         try:
             if interaction.guild and interaction.guild.voice_client:
@@ -592,6 +601,8 @@ class FritzCommands(commands.Cog):
                     files=[discord.File(output_file)],
                 )
         except AttributeError as e:
+            # No record= here: this block is OUTSIDE the time_block above, so
+            # nothing has recorded this failure yet.
             await _reply_error(interaction, "discord_commands.voice", e)
 
     @app_commands.command(name="gen", description="Generate an image based on a prompt")
@@ -604,8 +615,17 @@ class FritzCommands(commands.Cog):
                 await interaction.followup.send(
                     "\U0001f5bc️ Queued — another image is rendering."
                 )
-            with METRICS.time_block("discord_commands.gen"):
-                async with self._image_semaphore:
+            # The semaphore is acquired OUTSIDE the timer. Enclosing it meant
+            # a queued /gen reported another user's render as its own latency:
+            # with IMAGE_GEN_MAX_CONCURRENCY=1 the recorded time was mostly
+            # queue wait, which made the histogram unusable for answering "is
+            # generation slow?". Queue time is still measured — separately,
+            # where it answers a different and equally useful question.
+            queued_at = time.perf_counter()
+            async with self._image_semaphore:
+                METRICS.record_latency("discord_commands.gen.queue",
+                                       time.perf_counter() - queued_at)
+                with METRICS.time_block("discord_commands.gen"):
                     # The import goes INSIDE the offloaded callable, not beside
                     # it. Deferring it off module scope keeps [image] optional,
                     # but executing it here would still run image_generator's
@@ -617,7 +637,9 @@ class FritzCommands(commands.Cog):
                     output_file = await run_blocking(_render_image, prompt)
             await interaction.followup.send(content="Here is your file!", file=discord.File(output_file))
         except Exception as e:
-            await _reply_error(interaction, "discord_commands.gen", e)
+            # record=False: time_block already recorded this failure and
+            # re-raised it, so recording again double-counts the error.
+            await _reply_error(interaction, "discord_commands.gen", e, record=False)
 
     @app_commands.command(name="lore", description="Query the document engine for lore")
     @app_commands.describe(query="The question about the lore")

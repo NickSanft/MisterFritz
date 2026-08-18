@@ -686,3 +686,59 @@ class TestPrivacyWorkRunsOffTheLoop(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMetricsMeasureTheRightThing(unittest.IsolatedAsyncioTestCase):
+    """These bugs produce plausible-but-wrong numbers, which is worse than no
+    numbers: nothing fails, the dashboard just quietly lies."""
+
+    async def test_gen_failure_is_recorded_once_not_twice(self):
+        """METRICS.time_block records the exception and re-raises; the except
+        block then routed it through fritz_error, which recorded it again."""
+        cog = _make_cog()
+        interaction = _fake_interaction("someone")
+
+        def boom(prompt):
+            raise RuntimeError("gpu on fire")
+
+        with unittest.mock.patch("image_generator.generate_image", boom), \
+             unittest.mock.patch.object(bot_commands.METRICS, "record_error") as rec:
+            await cog.gen_slash.callback(cog, interaction, prompt="a cat")
+        gen_errors = [c for c in rec.call_args_list
+                      if c.args and c.args[0] == "discord_commands.gen"]
+        self.assertEqual(len(gen_errors), 1,
+                         f"recorded {len(gen_errors)} times, expected 1")
+
+    async def test_gen_latency_excludes_time_spent_queuing(self):
+        """With IMAGE_GEN_MAX_CONCURRENCY=1 a queued /gen used to report the
+        other render's duration as its own."""
+        cog = _make_cog()
+        interaction = _fake_interaction("someone")
+        recorded = {}
+
+        def fake_latency(name, seconds):
+            recorded.setdefault(name, []).append(seconds)
+
+        # Hold the semaphore so the command has to wait for it.
+        await cog._image_semaphore.acquire()
+
+        async def release_soon():
+            await asyncio.sleep(0.15)
+            cog._image_semaphore.release()
+
+        with unittest.mock.patch("image_generator.generate_image", lambda p: "out.png"), \
+             unittest.mock.patch("bot_commands.discord.File", MagicMock()), \
+             unittest.mock.patch.object(bot_commands.METRICS, "record_latency",
+                                        fake_latency):
+            await asyncio.gather(
+                cog.gen_slash.callback(cog, interaction, prompt="a cat"),
+                release_soon(),
+            )
+
+        work = recorded.get("discord_commands.gen", [None])[0]
+        queue = recorded.get("discord_commands.gen.queue", [None])[0]
+        self.assertIsNotNone(work, "work latency was not recorded")
+        self.assertIsNotNone(queue, "queue latency was not recorded")
+        # The wait was ~0.15s; the render is a no-op lambda.
+        self.assertGreater(queue, 0.05, "queue time was not measured")
+        self.assertLess(work, 0.05, "work latency still includes the queue wait")

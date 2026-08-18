@@ -134,8 +134,13 @@ _ERROR_COPY = (
 
 
 def fritz_error(operation: str, exc: BaseException | None = None, *,
-                note: str | None = None) -> str:
+                note: str | None = None, record: bool = True) -> str:
     """Record `exc` and return user-facing copy in Mister Fritz's voice.
+
+    Pass record=False when the caller has already recorded this failure —
+    METRICS.time_block records and re-raises, so a handler that wraps its work
+    in time_block AND routes the exception through here counted every error
+    twice.
 
     The real exception goes to METRICS and the log only. The returned string
     carries a short ref so an admin can grep the log for the exact failure
@@ -147,7 +152,8 @@ def fritz_error(operation: str, exc: BaseException | None = None, *,
     """
     ref = uuid.uuid4().hex[:8]
     if exc is not None:
-        METRICS.record_error(operation, exc)
+        if record:
+            METRICS.record_error(operation, exc)
         logger.exception("[%s] %s failed", ref, operation, exc_info=exc)
     else:
         logger.error("[%s] %s failed", ref, operation)
