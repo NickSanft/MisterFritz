@@ -175,3 +175,8 @@ dmypy.json
 cython_debug/
 
 .idea/
+
+# Undo files written by migrate_identity.py --apply. They name a
+# specific machine's paths and are worthless anywhere else, but keep
+# YOUR copy until you are sure the migration stuck -- --reverse needs it.
+identity_migration_*.json
