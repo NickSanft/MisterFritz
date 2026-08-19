@@ -164,17 +164,46 @@ MAX_SCHEDULES_PER_USER: int = int(os.environ.get("MAX_SCHEDULES_PER_USER", "10")
 MEMORY_EXTRACT_MIN_USER_CHARS: int = int(os.environ.get("MEMORY_EXTRACT_MIN_USER_CHARS", "20"))
 MEMORY_EXTRACT_MIN_REPLY_CHARS: int = int(os.environ.get("MEMORY_EXTRACT_MIN_REPLY_CHARS", "40"))
 
+# Concurrency knobs that must never be < 1. asyncio.Semaphore(0) is perfectly
+# legal and simply never releases, so IMAGE_GEN_MAX_CONCURRENCY=0 did not fail
+# — it made /gen hang on `async with` until Discord expired the interaction 15
+# minutes later, every time, with nothing in the log to explain it.
+#
+# Clamped at import so the bot cannot deadlock, and remembered so
+# validate_config() can say so out loud once logging is actually configured
+# (a warning emitted at import time may have nowhere to go yet).
+_CLAMPED_KNOBS: list[tuple[str, str]] = []
+
+
+def _at_least_one(name: str, default: str) -> int:
+    """Read an int env var, clamping to a minimum of 1 and recording if we did.
+
+    The raw string is what gets recorded, so the warning can quote back exactly
+    what was set — including a non-numeric value, which is a different mistake
+    from setting 0 and deserves to read that way.
+    """
+    raw = os.environ.get(name, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        _CLAMPED_KNOBS.append((name, repr(raw)))
+        return 1
+    if value < 1:
+        _CLAMPED_KNOBS.append((name, str(value)))
+        return 1
+    return value
+
+
 # Worker count for the shared bounded thread pool (bot_adapters.run_blocking)
 # that keeps ask_stuff / STT / TTS work off the Discord event loop.
-BLOCKING_POOL_SIZE: int = int(os.environ.get("BLOCKING_POOL_SIZE", "8"))
+BLOCKING_POOL_SIZE: int = _at_least_one("BLOCKING_POOL_SIZE", "8")
 
-# Concurrent SDXL renders permitted by the /gen semaphore. Must be >= 1;
-# 0 would deadlock the command. The pipeline is GPU-bound — leave at 1 unless
-# you have VRAM to burn.
-IMAGE_GEN_MAX_CONCURRENCY: int = int(os.environ.get("IMAGE_GEN_MAX_CONCURRENCY", "1"))
+# Concurrent SDXL renders permitted by the /gen semaphore. The pipeline is
+# GPU-bound — leave at 1 unless you have VRAM to burn.
+IMAGE_GEN_MAX_CONCURRENCY: int = _at_least_one("IMAGE_GEN_MAX_CONCURRENCY", "1")
 
-# Concurrent XTTS syntheses permitted by the /voice semaphore. Must be >= 1.
-TTS_MAX_CONCURRENCY: int = int(os.environ.get("TTS_MAX_CONCURRENCY", "1"))
+# Concurrent XTTS syntheses permitted by the /voice semaphore.
+TTS_MAX_CONCURRENCY: int = _at_least_one("TTS_MAX_CONCURRENCY", "1")
 
 # Admin panel: shared password gate + local-only port. If ADMIN_PANEL_PASSWORD
 # is unset the panel won't start at all.
@@ -555,6 +584,14 @@ def validate_config() -> None:
             + "\n".join(f"  - {m}" for m in missing)
             + "\nSet these in a .env file or as environment variables."
             + " See .env.example for reference."
+        )
+
+    for knob, requested in _CLAMPED_KNOBS:
+        logging.getLogger(__name__).warning(
+            "%s was set to %s, which is not a usable worker count; using 1. "
+            "Below 1 a semaphore never releases (the guarded command hangs "
+            "until Discord expires the interaction) and a thread pool refuses "
+            "to start.", knob, requested,
         )
 
     legacy = [u for u in ([ROOT_USER] if ROOT_USER else []) + sorted(ADMIN_USERS)

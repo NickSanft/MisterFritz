@@ -209,3 +209,55 @@ class TestMessageSource(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestConcurrencyKnobsCannotDeadlock(unittest.TestCase):
+    """asyncio.Semaphore(0) is legal and simply never releases.
+
+    IMAGE_GEN_MAX_CONCURRENCY=0 therefore did not fail — it made /gen hang on
+    `async with` until Discord expired the interaction 15 minutes later, every
+    time, with nothing in the log to explain it. The helper clamps so the bot
+    cannot deadlock, and records so validate_config can say so out loud once
+    logging is configured (a warning at import time may have nowhere to go).
+    """
+
+    def setUp(self):
+        self._saved = list(fu._CLAMPED_KNOBS)
+        fu._CLAMPED_KNOBS.clear()
+
+    def tearDown(self):
+        fu._CLAMPED_KNOBS[:] = self._saved
+
+    def test_zero_is_clamped_to_one(self):
+        with patch.dict(os.environ, {"_KNOB": "0"}):
+            self.assertEqual(fu._at_least_one("_KNOB", "1"), 1)
+        self.assertEqual(fu._CLAMPED_KNOBS, [("_KNOB", "0")])
+
+    def test_negative_is_clamped_to_one(self):
+        with patch.dict(os.environ, {"_KNOB": "-3"}):
+            self.assertEqual(fu._at_least_one("_KNOB", "1"), 1)
+
+    def test_non_numeric_is_clamped_and_quoted_back(self):
+        """A typo is a different mistake from setting 0 and should read that
+        way in the warning."""
+        with patch.dict(os.environ, {"_KNOB": "abc"}):
+            self.assertEqual(fu._at_least_one("_KNOB", "1"), 1)
+        self.assertEqual(fu._CLAMPED_KNOBS, [("_KNOB", "'abc'")])
+
+    def test_a_valid_value_passes_through_and_records_nothing(self):
+        with patch.dict(os.environ, {"_KNOB": "4"}):
+            self.assertEqual(fu._at_least_one("_KNOB", "1"), 4)
+        self.assertEqual(fu._CLAMPED_KNOBS, [])
+
+    def test_shipped_knobs_are_all_usable(self):
+        for name in ("BLOCKING_POOL_SIZE", "IMAGE_GEN_MAX_CONCURRENCY",
+                     "TTS_MAX_CONCURRENCY"):
+            self.assertGreaterEqual(getattr(fu, name), 1, name)
+
+    def test_validate_config_warns_about_a_clamped_knob(self):
+        fu._CLAMPED_KNOBS.append(("IMAGE_GEN_MAX_CONCURRENCY", "0"))
+        with patch.object(fu, "DISCORD_BOT_TOKEN", "x"), \
+             patch.object(fu, "ROOT_USER", "discord-1"):
+            with self.assertLogs("fritz_utils", level="WARNING") as logs:
+                fu.validate_config()
+        self.assertTrue(any("IMAGE_GEN_MAX_CONCURRENCY" in m for m in logs.output))

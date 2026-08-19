@@ -306,6 +306,30 @@ def _survey_arrow(key: str, mapping: dict) -> tuple[str, bool]:
     return "-> ?  (NO --map ENTRY)", True
 
 
+def _live_wal_files(db_path: str, chroma_path: str,
+                    skip_chroma: bool) -> list[tuple[str, int]]:
+    """Return [(path, size)] for every non-empty write-ahead log we can see.
+
+    A non-empty -wal means something has the database open with uncommitted
+    pages — in practice, the bot. This is the guard against running the
+    migration at the wrong time: SQLite will happily let two writers interleave
+    here, and a checkpoint written mid-rewrite lands under the OLD key with no
+    error anywhere.
+    """
+    candidates = [db_path + "-wal"]
+    if not skip_chroma:
+        candidates.append(os.path.join(chroma_path, "chroma.sqlite3-wal"))
+    busy = []
+    for path in candidates:
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            continue          # absent is the normal, healthy case
+        if size > 0:
+            busy.append((path, size))
+    return busy
+
+
 def _print_survey(sqlite_found: dict, chroma_found: dict, mapping: dict) -> list[str]:
     """Print what is there and return the keys that genuinely need a mapping."""
     unmapped: set[str] = set()
@@ -348,6 +372,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="leave the vector store alone")
     parser.add_argument("--reverse", metavar="MAPPING.JSON",
                         help="undo a previous --apply using its mapping file")
+    parser.add_argument("--ignore-wal", action="store_true",
+                        help="proceed even if a non-empty -wal suggests the bot "
+                             "is still running (you have verified it is not)")
     parser.add_argument("--db", help="override the fritz.db path")
     parser.add_argument("--chroma", help="override the chroma_store path")
     args = parser.parse_args(argv)
@@ -421,6 +448,20 @@ def main(argv: list[str] | None = None) -> int:
         print("Every discovered key must be mapped, or --apply would leave the")
         print("stores half-migrated. Add the missing entries and retry.")
         return 2
+
+    if not args.ignore_wal:
+        busy = _live_wal_files(db_path, chroma_path, args.skip_chroma)
+        if busy:
+            print()
+            print("error: the bot appears to be running — these write-ahead "
+                  "logs are not empty:")
+            for path, size in busy:
+                print(f"  {path}  ({size} bytes)")
+            print("Rewriting keys underneath a live SqliteSaver loses whatever "
+                  "it checkpoints mid-run, and the damage is silent. Stop the "
+                  "bot and retry, or pass --ignore-wal if you have verified it "
+                  "is stopped (a -wal can linger after an unclean shutdown).")
+            return 2
 
     # Write the mapping BEFORE mutating anything, so --reverse is always
     # possible even if the run dies partway through.

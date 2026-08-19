@@ -324,3 +324,43 @@ class TestReverseIsHonest(_MigrationTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRefusesToRunAgainstALiveDatabase(_MigrationTestCase):
+    """A non-empty -wal means something has the database open with uncommitted
+    pages — in practice, the bot. SQLite will happily let the migration and a
+    live SqliteSaver interleave, and a checkpoint written mid-rewrite lands
+    under the OLD key with no error anywhere."""
+
+    def _make_wal(self, size: int = 32):
+        with open(self.db + "-wal", "wb") as f:
+            f.write(b"x" * size)
+
+    def test_apply_refuses_when_the_wal_is_non_empty(self):
+        self._make_wal()
+        rc = self._run("--apply", "--map", "divora=discord-1",
+                       "--map", "someone_else=discord-2")
+        self.assertEqual(rc, 2)
+        # And nothing was touched.
+        self.assertIn("divora", self._keys("schedules", "user_id"))
+
+    def test_ignore_wal_overrides_it(self):
+        self._make_wal()
+        rc = self._run("--apply", "--ignore-wal", "--map", "divora=discord-1",
+                       "--map", "someone_else=discord-2")
+        self.assertEqual(rc, 0)
+        self.assertIn("discord-1", self._keys("schedules", "user_id"))
+
+    def test_an_empty_wal_is_not_treated_as_live(self):
+        """A zero-byte -wal is the normal resting state after a clean
+        checkpoint; refusing on its mere existence would block every run."""
+        self._make_wal(size=0)
+        rc = self._run("--apply", "--map", "divora=discord-1",
+                       "--map", "someone_else=discord-2")
+        self.assertEqual(rc, 0)
+
+    def test_dry_run_is_never_blocked(self):
+        """Surveying a live database is harmless and is exactly what an
+        operator does first."""
+        self._make_wal()
+        self.assertEqual(self._run("--dry-run", "--map", "divora=discord-1"), 0)
