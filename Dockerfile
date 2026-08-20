@@ -11,7 +11,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+# pyproject.toml travels with the lock so the image carries the INTENTIONAL
+# dependency declaration next to the pinned closure of it. Without it the
+# image records what was installed but not what was asked for.
+COPY requirements.txt pyproject.toml ./
 
 # Install all Python deps into a user-local prefix so we can copy them cleanly
 RUN pip install --no-cache-dir --user -r requirements.txt

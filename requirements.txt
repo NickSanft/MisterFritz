@@ -15,8 +15,13 @@
 # puremagic, pydot, httplib2), the google-* chain rooted solely at
 # langchain-google-community, packages with zero import sites anywhere in the
 # repo (pygame, pyttsx3, pdf2image, pytesseract, ffmpeg, ffmpeg-python), and the
-# Python 2 `pathlib` backport. `zstandard` was ADDED: faster-whisper needs it and
-# the old freeze never listed it, so the "lock" did not actually lock.
+# Python 2 `pathlib` backport.
+#
+# Three packages were ADDED because the old freeze omitted them, so the
+# "lock" did not actually lock: `zstandard` (required unconditionally by
+# langsmith - NOT by faster-whisper, as an earlier draft of this header
+# claimed), plus `av` and `ctranslate2`, which faster-whisper does require
+# and which nothing else pulls in.
 #
 # DO NOT ADD A `fitz` PIN. `import fitz` is provided by PyMuPDF, below. The
 # package published as `fitz` on PyPI is unrelated neuroimaging software that
@@ -266,11 +271,19 @@ yarl==1.22.0
 zipp==3.23.0
 watchdog==6.0.0
 pydub==0.25.1
-# [voice] and [telegram] extras: floors, not pins - these are not installed
-# in the reference environment used to freeze this file.
-faster-whisper>=1.0.0
+# Pinned like everything else above: these ARE installed in the reference
+# environment, so the freeze can state exactly what was resolved. The old
+# comment here claimed the opposite for entries that were pinned anyway,
+# and swept core packages in among the extras.
+faster-whisper==1.2.1
+av==17.0.0                 # faster-whisper transitive
+ctranslate2==4.7.1         # faster-whisper transitive
+prometheus-client==0.26.0  # core, not an extra
+#
+# A genuine floor: python-telegram-bot is the ONE dependency here that is
+# not installed in the reference environment, so there is no resolved
+# version to pin. main_telegram.py is opt-in and untested in CI.
 python-telegram-bot>=20.0
-prometheus-client>=0.20.0
 APScheduler==3.11.3
 starlette==1.3.1
 python-multipart==0.0.32

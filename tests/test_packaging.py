@@ -297,3 +297,44 @@ class TestHeavyImportsRunOffTheEventLoop(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheLockActuallyLocks(unittest.TestCase):
+    """The file's stated job is "the pinned closure of those roots".
+
+    A root whose own dependencies are missing is not a closure — pip resolves
+    them at build time, so two builds of the same commit can differ. This
+    caught faster-whisper's `av` and `ctranslate2`, which nothing else pulls in.
+    """
+
+    def test_faster_whisper_transitives_are_pinned(self):
+        pinned = _requirements_names()
+        self.assertIn("faster-whisper", pinned)
+        for dep in ("av", "ctranslate2"):
+            self.assertIn(
+                dep, pinned,
+                f"faster-whisper requires {dep} and nothing else pulls it in, "
+                "so leaving it out means the lock does not lock.",
+            )
+
+    def test_no_unbounded_floors(self):
+        """An UNBOUNDED floor lets two builds of the same commit resolve
+        differently. A bounded range (nh3>=0.3,<0.4) is a deliberate choice —
+        patch updates for a security package, no major bump — so it passes.
+        Only `>=` with nothing above it is the oversight worth catching."""
+        unbounded = []
+        for line in (REPO / "requirements.txt").read_text(encoding="utf-8").splitlines():
+            line = line.split("#")[0].strip()
+            if not line or "==" in line:
+                continue
+            if any(op in line for op in (">=", ">", "~=")) and "<" not in line:
+                unbounded.append(line)
+        self.assertEqual(
+            sorted(unbounded), ["python-telegram-bot>=20.0"],
+            "a new unbounded floor appeared in the lock; pin it to the resolved "
+            "version, give it an upper bound, or document why it cannot be pinned",
+        )
+    def test_zstandard_is_present_for_its_real_reason(self):
+        """It is langsmith's, not faster-whisper's — an earlier header claimed
+        the latter, which sent someone looking in the wrong place."""
+        self.assertIn("zstandard", _requirements_names())
