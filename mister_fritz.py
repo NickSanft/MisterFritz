@@ -210,8 +210,33 @@ class ProfileSignals(BaseModel):
     dislikes: list[str] = Field(default_factory=list, description="Topics or styles the user dislikes")
     notes: str = Field(default="", description="Anything else worth remembering")
 
+    @classmethod
+    def __get_pydantic_json_schema__(cls, core_schema, handler):
+        """Mark every field required in the JSON schema handed to Ollama.
+
+        Two different contracts, deliberately: the WIRE schema says "emit all
+        four", so the model is pushed to consider each one instead of returning
+        {} and producing no profile update at all. The PYTHON defaults stay, so
+        an absent field still means "no evidence" rather than a None the profile
+        writer has to defend against — which is what
+        test_defaults_are_empty_not_none pins.
+        """
+        schema = handler(core_schema)
+        schema["required"] = list(cls.model_fields)
+        return schema
+
 
 _MEMORY_KEY_MAX = 64
+
+# Filtered out of generated memory keys. Taking the first 8 words verbatim
+# produced slugs like "memory_of_the_user_said_that_they_would_like_to" — all
+# grammar, no subject. The key is a Chroma metadata key AND contributes to the
+# embedded document, so a slug made of content words is worth the frozenset.
+_MEMORY_KEY_STOPWORDS = frozenset("""
+a an and are as at be been but by for from had has have he her his i if in is
+it its me my not of on or our she that the their them then there they this to
+was we were what when which who will with would you your
+""".split())
 
 
 def _make_memory_key(summary: str) -> str:
@@ -226,7 +251,10 @@ def _make_memory_key(summary: str) -> str:
     # Skip the "Summary made at <timestamp>" preamble the caller prepends.
     body = summary.split("\r\n", 1)[-1] if "\r\n" in summary else summary
     words = re.findall(r"[a-zA-Z0-9]+", body.lower())
-    slug = "_".join(words[:8]) or "conversation"
+    content = [w for w in words if w not in _MEMORY_KEY_STOPWORDS]
+    # Fall back to the raw words rather than to "conversation" when a summary is
+    # somehow all stopwords — a weak slug still beats every memory sharing one.
+    slug = "_".join((content or words)[:5]) or "conversation"
     return f"memory_of_{slug}"[:_MEMORY_KEY_MAX]
 
 
@@ -323,7 +351,13 @@ def summarize_conversation(state: EnhancedState, config: RunnableConfig):
     else:
         _summarize_and_profile(snapshot, user_id, config_values)
 
-    delete_messages = [RemoveMessage(id=m.id) for m in state["messages"][:-1]]
+    # Keep the last TWO, not the last one. The trim runs after the executor has
+    # appended its reply, so [:-1] left only Fritz's own AIMessage — and the
+    # very next turn opened its history window on a lone assistant message with
+    # no question attached. That is the same amnesia the window exists to fix,
+    # arriving on schedule every SUMMARIZE_THRESHOLD messages. [Human, AI] is
+    # the smallest slice that is still a conversation.
+    delete_messages = [RemoveMessage(id=m.id) for m in state["messages"][:-2]]
     return {"messages": delete_messages}
 
 
@@ -574,12 +608,23 @@ def executor(state: EnhancedState, config: RunnableConfig):
                         # Chroma returns most-similar-first and the dict
                         # preserves that order, so truncating the tail drops the
                         # weakest matches rather than an arbitrary slice.
-                        kept, size = {}, 0
+                        kept = {}
                         for k, v in json.loads(past_context).items():
-                            size += len(k) + len(str(v))
-                            if size > MEMORY_INJECT_MAX_CHARS:
-                                break
-                            kept[k] = v
+                            candidate = {**kept, k: v}
+                            if len(json.dumps(candidate)) > MEMORY_INJECT_MAX_CHARS:
+                                # `continue`, not `break`. Breaking on the first
+                                # entry that does not fit let one long summary
+                                # block every shorter memory behind it, leaving
+                                # the budget roughly half spent. Skipping it and
+                                # trying the rest keeps filling — still in
+                                # most-similar-first order, so what lands is the
+                                # best set that fits rather than the best prefix.
+                                continue
+                            kept = candidate
+                        # Measured on the SERIALISED form: the old sum of
+                        # len(k)+len(v) ignored the quotes, colons and commas
+                        # json.dumps adds, so the block handed to the model was
+                        # always somewhat larger than the cap claimed.
                         # A single memory larger than the whole budget leaves
                         # `kept` empty, and json.dumps({}) is "{}" — i.e. the
                         # cap would silently delete the user's most relevant

@@ -745,11 +745,34 @@ class TestOffPathSummarisation(unittest.TestCase):
         self.assertLess(elapsed, 1.0, "node blocked on the summariser")
         self.assertTrue(result["messages"])
 
-    def test_trim_leaves_exactly_one_message(self):
+    def test_trim_leaves_the_last_two_messages(self):
+        """The trim runs AFTER the executor appended its reply, so keeping only
+        the last message left a lone AIMessage — and the next turn opened its
+        history window on an answer with no question attached. That is the same
+        amnesia the window exists to fix, arriving every SUMMARIZE_THRESHOLD
+        messages."""
         state = self._state(n=5)
         with patch.object(mister_fritz, "_summarize_and_profile"):
             result = mister_fritz.summarize_conversation(state, self._config())
-        self.assertEqual(len(result["messages"]), 4)
+        removed = {m.id for m in result["messages"]}
+        survivors = [m.id for m in state["messages"] if m.id not in removed]
+        self.assertEqual(survivors, ["h3", "h4"])
+
+    def test_the_surviving_pair_is_a_real_exchange(self):
+        """Same rule against a realistic alternating transcript: what is left
+        behind is a question and its answer, not a dangling half."""
+        state = {"messages": _thread(3), "image_paths": [], "user_image_paths": []}
+        with patch.object(mister_fritz, "_summarize_and_profile"):
+            result = mister_fritz.summarize_conversation(state, self._config())
+        removed = {m.id for m in result["messages"]}
+        survivors = [m for m in state["messages"] if m.id not in removed]
+        self.assertEqual([m.type for m in survivors], ["human", "ai"])
+
+    def test_trim_is_a_no_op_on_a_thread_shorter_than_one_exchange(self):
+        state = self._state(n=1)
+        with patch.object(mister_fritz, "_summarize_and_profile"):
+            result = mister_fritz.summarize_conversation(state, self._config())
+        self.assertEqual(result["messages"], [])
 
     def test_sync_mode_runs_inline(self):
         # The rollback lever: SUMMARIZE_ASYNC=false restores the old ordering.
@@ -934,3 +957,94 @@ class TestAskStuffIdentity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMemoryCapFillsTheBudget(unittest.TestCase):
+    """The cap is a budget, not a tripwire.
+
+    Breaking on the first entry that did not fit let one long summary block
+    every shorter memory behind it, so a 4000-char budget routinely carried
+    ~2000 chars of the available context.
+    """
+
+    def _state(self, msgs=None):
+        return {"messages": msgs or [HumanMessage(content="q", id="h1")],
+                "image_paths": [], "user_image_paths": []}
+
+    def _inject(self, blob, cap):
+        agent = _RecordingAgent()
+        with patch.object(mister_fritz, "MEMORY_INJECT_MAX_CHARS", cap):
+            _run_executor(self._state(), agent,
+                          search_memories_internal=lambda *a, **k: blob)
+        prompt = agent.seen["messages"][0][1]
+        if "What I know about this user:" not in prompt:
+            return ""
+        return prompt.split("What I know about this user:")[1].lstrip()
+
+    def test_a_long_entry_does_not_block_the_shorter_ones_behind_it(self):
+        blob = json.dumps({
+            "huge": "v" * 3000,      # fits alone, but not with others
+            "small_a": "a" * 100,
+            "small_b": "b" * 100,
+        })
+        injected = self._inject(blob, 1000)
+        # The oversized head is skipped; the ones that fit are kept.
+        self.assertIn("small_a", injected)
+        self.assertIn("small_b", injected)
+
+    def test_injected_block_never_exceeds_the_cap(self):
+        blob = json.dumps({f"k{i}": "v" * 300 for i in range(30)})
+        for cap in (500, 1500, 4000):
+            with self.subTest(cap=cap):
+                self.assertLessEqual(len(self._inject(blob, cap)), cap)
+
+    def test_a_single_oversized_memory_is_cut_not_dropped(self):
+        blob = json.dumps({"only_one": "v" * 10000})
+        injected = self._inject(blob, 4000)
+        self.assertNotEqual(injected.strip(), "{}")
+        self.assertEqual(len(injected), 4000)
+
+
+class TestMemoryKeyIsMadeOfContentWords(unittest.TestCase):
+    """The key is a Chroma metadata key AND part of the embedded document, so
+    a slug of pure grammar makes every memory look alike."""
+
+    def test_stopwords_are_filtered_out(self):
+        key = mister_fritz._make_memory_key(
+            "The user said that they would like to discuss the pie incident")
+        for stop in ("the", "that", "they", "would", "to"):
+            self.assertNotIn(f"_{stop}_", key)
+        self.assertIn("user", key)
+        self.assertIn("pie", key)
+
+    def test_an_all_stopword_summary_still_yields_something(self):
+        key = mister_fritz._make_memory_key("the and of to it")
+        self.assertTrue(key.startswith("memory_of_"))
+        self.assertGreater(len(key), len("memory_of_"))
+
+    def test_key_stays_within_the_length_cap(self):
+        key = mister_fritz._make_memory_key("supercalifragilistic " * 30)
+        self.assertLessEqual(len(key), mister_fritz._MEMORY_KEY_MAX)
+
+    def test_timestamp_preamble_is_skipped(self):
+        key = mister_fritz._make_memory_key(
+            "Summary made at 2026-01-01T00:00:00 \r\n Nick prefers oxblood")
+        self.assertNotIn("2026", key)
+        self.assertIn("oxblood", key)
+
+
+class TestProfileSignalsWireSchema(unittest.TestCase):
+    """Two contracts on purpose: the wire schema requires all four fields so
+    the model cannot answer {} and produce no profile update, while the Python
+    defaults keep "absent" meaning "no evidence"."""
+
+    def test_every_field_is_required_in_the_json_schema(self):
+        schema = mister_fritz.ProfileSignals.model_json_schema()
+        self.assertEqual(sorted(schema["required"]),
+                         ["communication_style", "dislikes", "interests", "notes"])
+
+    def test_python_defaults_are_unchanged(self):
+        s = mister_fritz.ProfileSignals()
+        self.assertEqual((s.communication_style, s.interests, s.dislikes, s.notes),
+                         ("", [], [], ""))
+
