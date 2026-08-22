@@ -12,6 +12,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import fritz_utils
+
 # ddgs (kept out of the import chain so privacy → fritz_utils stays fast) is
 # stubbed in tests/conftest.py before any test module is collected.
 
@@ -429,6 +431,45 @@ class TestAuditLog(unittest.TestCase):
         # abort the user's deletion.
         with patch.object(self.observability, "AUDIT_LOG_PATH", "/nonexistent_dir/audit.log"):
             self.observability.audit_log("forget", user_id="alice")  # must not raise
+
+
+class TestIdentityIsResolvedEverywhere(unittest.TestCase):
+    """IDENTITY_LINKS was honoured in two of seven operations.
+
+    So a linked alias had its memories forgotten while its conversation,
+    schedules and workspace were looked up under the un-resolved id — a
+    /forget that reported success and left most of the person behind.
+    """
+
+    LINKS = {"web-nick": "discord-1"}
+
+    def setUp(self):
+        import privacy
+        importlib.reload(privacy)
+        self.privacy = privacy
+
+    def test_forget_workspace_resolves_the_alias(self):
+        seen = {}
+        with patch.dict(fritz_utils.IDENTITY_LINKS, self.LINKS, clear=False):
+            import workspace_store
+            with patch.object(workspace_store, "remove",
+                              side_effect=lambda uid: seen.setdefault("id", uid)):
+                self.privacy.forget_workspace("web-nick")
+        self.assertEqual(seen["id"], "discord-1")
+
+    def test_forget_schedules_resolves_the_alias(self):
+        manager = MagicMock()
+        manager.remove_all_for_user.return_value = 0
+        with patch.dict(fritz_utils.IDENTITY_LINKS, self.LINKS, clear=False):
+            self.privacy.forget_schedules("web-nick", manager)
+        manager.remove_all_for_user.assert_called_once_with("discord-1")
+
+    def test_an_unlinked_identity_is_unchanged(self):
+        manager = MagicMock()
+        manager.remove_all_for_user.return_value = 0
+        with patch.dict(fritz_utils.IDENTITY_LINKS, self.LINKS, clear=False):
+            self.privacy.forget_schedules("discord-99", manager)
+        manager.remove_all_for_user.assert_called_once_with("discord-99")
 
 
 if __name__ == "__main__":

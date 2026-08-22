@@ -456,7 +456,13 @@ def _chat_thread_id(user_id: str) -> str:
     """
     if not user_id:
         return ""
-    return thread_id_for(user_id)
+    # "web" is the channel key, so the web surface branches like any other
+    # channel when THREADS_PER_CHANNEL is enabled. Passing nothing was
+    # identical while the flag was off — and would have silently made the web
+    # the ONE surface that kept a single global thread the moment it was
+    # turned on, which is exactly the sort of divergence that only shows up
+    # after someone flips a flag and cannot reproduce the report.
+    return thread_id_for(user_id, "web")
 
 
 # Markdown extensions enabled for Fritz's replies. fenced_code handles ```py

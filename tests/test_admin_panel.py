@@ -1991,5 +1991,23 @@ class TestPendingImagePlumbing(unittest.TestCase):
         self.assertEqual(captured["source"].name, "LOCAL")
 
 
+class TestWebThreadBranchesLikeAnyChannel(unittest.TestCase):
+    """The web surface passed no channel key. Identical while
+    THREADS_PER_CHANNEL was off — and silently the ONE surface that kept a
+    single global thread the moment it was turned on."""
+
+    def test_web_thread_is_per_channel_when_the_flag_is_on(self):
+        with patch.object(fritz_utils, "THREADS_PER_CHANNEL", True):
+            self.assertEqual(admin_panel._chat_thread_id("web-alice"),
+                             "web-alice#web")
+
+    def test_web_thread_is_the_identity_when_the_flag_is_off(self):
+        with patch.object(fritz_utils, "THREADS_PER_CHANNEL", False):
+            self.assertEqual(admin_panel._chat_thread_id("web-alice"), "web-alice")
+
+    def test_empty_identity_yields_empty(self):
+        self.assertEqual(admin_panel._chat_thread_id(""), "")
+
+
 if __name__ == "__main__":
     unittest.main()

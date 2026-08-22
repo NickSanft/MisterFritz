@@ -1048,3 +1048,35 @@ class TestProfileSignalsWireSchema(unittest.TestCase):
         self.assertEqual((s.communication_style, s.interests, s.dislikes, s.notes),
                          ("", [], [], ""))
 
+
+class TestSourceInfoCarriesBothIdentifiers(unittest.TestCase):
+    """The display name and the canonical id are different things, and the
+    prompt used to present the name under the label "User ID" — telling the
+    model that Divora's user id was "Divora"."""
+
+    def test_both_values_appear_and_are_labelled(self):
+        line = mister_fritz.get_source_info(
+            mister_fritz.MessageSource.DISCORD_TEXT, "Divora", "discord-285249831696465921")
+        self.assertIn("name: Divora", line)
+        self.assertIn("User ID: discord-285249831696465921", line)
+
+    def test_the_name_is_not_presented_as_the_id(self):
+        line = mister_fritz.get_source_info(
+            mister_fritz.MessageSource.DISCORD_TEXT, "Divora", "discord-1")
+        self.assertNotIn("User ID: Divora", line)
+
+    def test_two_argument_callers_still_work(self):
+        """Backward compatible: without an id the name stands in, which is the
+        old behaviour, so existing callers and tests are unaffected."""
+        line = mister_fritz.get_source_info(
+            mister_fritz.MessageSource.LOCAL, "dave")
+        self.assertIn("dave", line)
+        self.assertIn("CLI", line)
+
+    def test_every_source_carries_the_pair(self):
+        for source in mister_fritz.MessageSource:
+            with self.subTest(source=source):
+                line = mister_fritz.get_source_info(source, "alice", "discord-9")
+                self.assertIn("name: alice", line)
+                self.assertIn("User ID: discord-9", line)
+

@@ -121,25 +121,31 @@ Tools:
     """
 
 
-def get_source_info(source: MessageSource, display_name: str) -> str:
+def get_source_info(source: MessageSource, display_name: str,
+                    user_id: str | None = None) -> str:
     """Generate source information based on the messaging platform.
 
-    Takes the HUMAN-READABLE NAME, not the storage key. `ask_stuff` resolves it
-    through identity_store first, so the prompt reads "alice" and Fritz still
-    addresses people by name even though every store is now keyed on
-    "discord-123456789".
+    Carries BOTH values, labelled for what they are. The display name is how
+    Fritz addresses someone; the canonical id is the storage key. Passing only
+    the name and calling it "User ID" told the model that Divora's user id was
+    "Divora" — so anything the model said or did with an id was wrong, and the
+    real key it would need to reason about its own tool results was absent.
+
+    `user_id` is optional so existing two-argument callers keep working; when
+    it is missing the name stands in, which is the old behaviour.
     """
+    who = f"name: {display_name}, User ID: {user_id or display_name}"
     if source == MessageSource.DISCORD_TEXT:
-        return f"User is texting from Discord (User ID: {display_name})"
+        return f"User is texting from Discord ({who})"
     elif source == MessageSource.DISCORD_TEXT_AND_IMAGE:
-        return f"User is texting from Discord with and has an image that the analyze_image tool has the path for already. (User ID: {display_name})"
+        return f"User is texting from Discord with and has an image that the analyze_image tool has the path for already. ({who})"
     elif source == MessageSource.DISCORD_VOICE:
-        return f"User is speaking from Discord (User ID: {display_name}). Please answer in 30 words or less."
+        return f"User is speaking from Discord ({who}). Please answer in 30 words or less."
     elif source == MessageSource.TELEGRAM_TEXT:
-        return f"User is texting from Telegram (User ID: {display_name})"
+        return f"User is texting from Telegram ({who})"
     elif source == MessageSource.TELEGRAM_VOICE:
-        return f"User is speaking from Telegram (User ID: {display_name}). Please answer in 30 words or less."
-    return f"User is interacting via CLI (User ID: {display_name})"
+        return f"User is speaking from Telegram ({who}). Please answer in 30 words or less."
+    return f"User is interacting via CLI ({who})"
 
 
 def format_turn(prompt: str, context_line: str) -> str:
@@ -813,7 +819,7 @@ def ask_stuff(
     # and the display name) but NOT folded into the message content — the
     # executor re-applies it to the current turn on its way to the model. See
     # format_turn for why the transcript keeps the user's actual words.
-    turn_context = get_source_info(source, who)
+    turn_context = get_source_info(source, who, user_id_clean)
 
     # NOTE: this used to rebuild the entire tool registry and system prompt on
     # every single request purely to feed a logger.debug — whose argument is

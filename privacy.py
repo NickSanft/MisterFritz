@@ -41,13 +41,19 @@ def forget_memories(user_id: str) -> int:
     deleted nothing. The fix was to stop transforming the id at all — both
     sides now use the identity verbatim.
     """
+    # Resolved HERE, at the entry point. It used to happen inside two of
+    # these functions and nowhere else, so an IDENTITY_LINKS alias was
+    # honoured when forgetting memories but ignored when forgetting the
+    # conversation, schedules or workspace — a /forget that reported
+    # success while leaving most of the person behind.
+    user_id = resolve_identity(user_id) if user_id else user_id
     if not user_id:
         return 0
     # Lazy import: ChromaStore boots embeddings on first construction, and
     # we go through the singleton so the cost is paid once per process.
     from storage import get_default_chroma_store
     try:
-        return get_default_chroma_store().delete_namespace((str(resolve_identity(user_id)),))
+        return get_default_chroma_store().delete_namespace((str(user_id),))
     except Exception as e:
         logger.warning("forget_memories failed for %s: %s", user_id, e)
         return 0
@@ -59,11 +65,17 @@ def export_memories(user_id: str) -> list[dict]:
     Had the same raw/stripped mismatch as forget_memories, which is why the
     admin panel's per-user memory counts read 0 for punctuated names.
     """
+    # Resolved HERE, at the entry point. It used to happen inside two of
+    # these functions and nowhere else, so an IDENTITY_LINKS alias was
+    # honoured when forgetting memories but ignored when forgetting the
+    # conversation, schedules or workspace — a /forget that reported
+    # success while leaving most of the person behind.
+    user_id = resolve_identity(user_id) if user_id else user_id
     if not user_id:
         return []
     from storage import get_default_chroma_store
     try:
-        return get_default_chroma_store().export_namespace((str(resolve_identity(user_id)),))
+        return get_default_chroma_store().export_namespace((str(user_id),))
     except Exception as e:
         logger.warning("export_memories failed for %s: %s", user_id, e)
         return []
@@ -95,6 +107,12 @@ def forget_conversation(user_id: str, thread_id: str | None = None) -> int:
     Returns the total number of rows removed across the checkpoints + writes
     tables. Next message starts a fresh conversation.
     """
+    # Resolved HERE, at the entry point. It used to happen inside two of
+    # these functions and nowhere else, so an IDENTITY_LINKS alias was
+    # honoured when forgetting memories but ignored when forgetting the
+    # conversation, schedules or workspace — a /forget that reported
+    # success while leaving most of the person behind.
+    user_id = resolve_identity(user_id) if user_id else user_id
     if not user_id and not thread_id:
         return 0
     sweep_channels = False
@@ -138,6 +156,12 @@ def forget_conversation(user_id: str, thread_id: str | None = None) -> int:
 
 def count_conversation_checkpoints(user_id: str) -> int:
     """Return the number of checkpoint rows for user_id. Used by /export."""
+    # Resolved HERE, at the entry point. It used to happen inside two of
+    # these functions and nowhere else, so an IDENTITY_LINKS alias was
+    # honoured when forgetting memories but ignored when forgetting the
+    # conversation, schedules or workspace — a /forget that reported
+    # success while leaving most of the person behind.
+    user_id = resolve_identity(user_id) if user_id else user_id
     if not user_id:
         return 0
     thread_id = _sanitise_thread_id(user_id)
@@ -161,6 +185,12 @@ def count_conversation_checkpoints(user_id: str) -> int:
 
 def forget_schedules(user_id: str, schedule_manager: Any) -> int:
     """Bulk-delete every schedule belonging to user_id."""
+    # Resolved HERE, at the entry point. It used to happen inside two of
+    # these functions and nowhere else, so an IDENTITY_LINKS alias was
+    # honoured when forgetting memories but ignored when forgetting the
+    # conversation, schedules or workspace — a /forget that reported
+    # success while leaving most of the person behind.
+    user_id = resolve_identity(user_id) if user_id else user_id
     if not user_id or schedule_manager is None:
         return 0
     try:
@@ -172,6 +202,12 @@ def forget_schedules(user_id: str, schedule_manager: Any) -> int:
 
 def export_schedules(user_id: str, schedule_manager: Any) -> list[dict]:
     """Return user's schedules in a JSON-friendly shape."""
+    # Resolved HERE, at the entry point. It used to happen inside two of
+    # these functions and nowhere else, so an IDENTITY_LINKS alias was
+    # honoured when forgetting memories but ignored when forgetting the
+    # conversation, schedules or workspace — a /forget that reported
+    # success while leaving most of the person behind.
+    user_id = resolve_identity(user_id) if user_id else user_id
     if not user_id or schedule_manager is None:
         return []
     try:
@@ -185,6 +221,12 @@ def export_schedules(user_id: str, schedule_manager: Any) -> list[dict]:
 
 def forget_workspace(user_id: str) -> bool:
     """Drop the user's workspace registration. Files on disk are kept."""
+    # Resolved HERE, at the entry point. It used to happen inside two of
+    # these functions and nowhere else, so an IDENTITY_LINKS alias was
+    # honoured when forgetting memories but ignored when forgetting the
+    # conversation, schedules or workspace — a /forget that reported
+    # success while leaving most of the person behind.
+    user_id = resolve_identity(user_id) if user_id else user_id
     if not user_id:
         return False
     import workspace_store
@@ -196,6 +238,12 @@ def forget_workspace(user_id: str) -> bool:
 
 
 def get_workspace_for_export(user_id: str) -> Optional[str]:
+    # Resolved HERE, at the entry point. It used to happen inside two of
+    # these functions and nowhere else, so an IDENTITY_LINKS alias was
+    # honoured when forgetting memories but ignored when forgetting the
+    # conversation, schedules or workspace — a /forget that reported
+    # success while leaving most of the person behind.
+    user_id = resolve_identity(user_id) if user_id else user_id
     if not user_id:
         return None
     import workspace_store
@@ -210,6 +258,12 @@ def get_workspace_for_export(user_id: str) -> Optional[str]:
 def forget_all(user_id: str, schedule_manager: Any = None) -> dict:
     """Run every forget_* op and report counts back. Best-effort — partial
     failure in one store does not abort the others."""
+    # Resolved HERE, at the entry point. It used to happen inside two of
+    # these functions and nowhere else, so an IDENTITY_LINKS alias was
+    # honoured when forgetting memories but ignored when forgetting the
+    # conversation, schedules or workspace — a /forget that reported
+    # success while leaving most of the person behind.
+    user_id = resolve_identity(user_id) if user_id else user_id
     return {
         "memories": forget_memories(user_id),
         "conversation_rows": forget_conversation(user_id),
@@ -223,6 +277,12 @@ def forget_all(user_id: str, schedule_manager: Any = None) -> dict:
 
 def forget_alias(user_id: str) -> bool:
     """Drop the identity → display-name mapping."""
+    # Resolved HERE, at the entry point. It used to happen inside two of
+    # these functions and nowhere else, so an IDENTITY_LINKS alias was
+    # honoured when forgetting memories but ignored when forgetting the
+    # conversation, schedules or workspace — a /forget that reported
+    # success while leaving most of the person behind.
+    user_id = resolve_identity(user_id) if user_id else user_id
     if not user_id:
         return False
     import identity_store
@@ -235,6 +295,12 @@ def forget_alias(user_id: str) -> bool:
 
 def export_user_data(user_id: str, schedule_manager: Any = None) -> dict:
     """Return a JSON-serialisable snapshot of everything we have on this user."""
+    # Resolved HERE, at the entry point. It used to happen inside two of
+    # these functions and nowhere else, so an IDENTITY_LINKS alias was
+    # honoured when forgetting memories but ignored when forgetting the
+    # conversation, schedules or workspace — a /forget that reported
+    # success while leaving most of the person behind.
+    user_id = resolve_identity(user_id) if user_id else user_id
     import identity_store
     return {
         "user_id": user_id,

@@ -423,6 +423,14 @@ def _exec_denied_reason(user_id: str) -> Optional[str]:
 
     Returns a string rather than raising (unlike _authorize) so the refusal
     reaches the LLM as a normal tool result and lands in the audit log.
+
+    DELIBERATELY calls is_admin WITHOUT display_name, unlike the slash-command
+    gate in bot_commands. That means ADMIN_LEGACY_NAME_MATCH cannot open this
+    door even when it is switched on: arbitrary code execution as the bot's OS
+    user is a strictly larger privilege than any slash command, and it should
+    never be granted on a name Discord lets people change at will. The two
+    gates agree while the flag is off (its shipped default); when it is on,
+    exec stays closed and that is the intended asymmetry, not an oversight.
     """
     if not EXEC_REQUIRE_ADMIN:
         return None
