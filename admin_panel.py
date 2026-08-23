@@ -481,6 +481,9 @@ if CHAT_CODE_HIGHLIGHT:
 
 # Fence languages, in document order: ```python -> "python".
 _FENCE_LANG_RE = re.compile(r"^[ \t]*(?:```|~~~)[ \t]*([A-Za-z0-9_+#.-]+)", re.M)
+# Fence OPENER with an optional language: group(1) is the marker, so the
+# matching close can be recognised; group(2) is the language or "".
+_FENCE_OPEN_RE = re.compile(r"(```+|~~~+)[ 	]*([A-Za-z0-9_+#.-]*)")
 _CODEHILITE_DIV_RE = re.compile(r'<div class="codehilite">')
 
 
@@ -497,19 +500,53 @@ def _label_code_languages(html: str, source: str) -> str:
     "code" chip, so a mismatch degrades to the design's zero-cost fallback
     rather than mislabelling anything.
     """
-    langs = _FENCE_LANG_RE.findall(source or "")
-    if not langs:
+    langs = _fence_languages(source)
+    blocks = _CODEHILITE_DIV_RE.findall(html)
+    # Zipping by position is only safe if the two lists describe the SAME
+    # blocks. They diverged in two ways, and both shifted every label one block
+    # along rather than failing:
+    #   - an UNLABELLED fence renders a block but contributed no entry, so a
+    #     later ```python landed on the earlier block;
+    #   - an INDENTED code block renders a block with no fence at all.
+    # A wrong language is worse than none, so a mismatch labels nothing and the
+    # client falls back to its plain "code" chip — which is what this
+    # function's docstring always claimed happened.
+    if not langs or len(blocks) != len(langs):
         return html
     counter = {"i": 0}
 
     def _sub(match):
         i = counter["i"]
         counter["i"] += 1
-        if i >= len(langs):
+        lang = langs[i] if i < len(langs) else None
+        if not lang:
             return match.group(0)
-        return f'<div class="codehilite" data-lang="{langs[i].lower()}">'
+        return f'<div class="codehilite" data-lang="{lang}">'
 
     return _CODEHILITE_DIV_RE.sub(_sub, html)
+
+
+def _fence_languages(source: str) -> list:
+    """Every fence OPENER in document order, as a language or None.
+
+    Tracks open/close state so a closing fence is never counted as another
+    block, and records unlabelled fences as None so the list stays aligned with
+    what actually renders.
+    """
+    langs = []
+    in_fence = False
+    marker = ""
+    for line in (source or "").splitlines():
+        stripped = line.lstrip()
+        if not in_fence:
+            m = _FENCE_OPEN_RE.match(stripped)
+            if m:
+                in_fence = True
+                marker = m.group(1)[:3]
+                langs.append((m.group(2) or "").lower() or None)
+        elif stripped.startswith(marker):
+            in_fence = False
+    return langs
 
 # Attribute allowlist for _sanitise_html.
 #

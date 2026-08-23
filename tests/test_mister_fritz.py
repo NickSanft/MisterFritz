@@ -841,7 +841,7 @@ class TestProfileSignalsSchema(unittest.TestCase):
             thinking.invoke.return_value = MagicMock(content="a summary")
             fast.with_structured_output = fake_structured
             mister_fritz._summarize_and_profile(
-                [HumanMessage(content="hi", id="h")], "alice", {})
+                [HumanMessage(content="hi", id="h")], "alice")
         self.assertIs(captured["schema"], mister_fritz.ProfileSignals)
         upd.assert_called_once()
         self.assertEqual(upd.call_args.args[1]["interests"], ["tea"])
@@ -954,6 +954,67 @@ class TestAskStuffIdentity(unittest.TestCase):
         self.assertEqual(config["metadata"]["user_id"], "discord-1")
         self.assertEqual(config["configurable"]["thread_id"], "discord-1")
 
+
+
+
+class TestAgentCache(unittest.TestCase):
+    """Discord passes channel_id AND schedule_manager on every message, so the
+    tool-carrying branch always ran and the cached fast path was dead on the
+    primary surface — every turn rebuilt the tool registry (including the
+    skills/ importlib walk) and recompiled a ReAct agent before the model saw
+    a token.
+
+    The cache key is the tool-set identity. Getting it wrong is worse than not
+    caching: schedule_message / list_my_schedules / cancel_reminder are
+    closures bound to channel_id and user_id, so a key missing either would
+    hand one person another's schedule tools.
+    """
+
+    def setUp(self):
+        mister_fritz._AGENT_CACHE.clear()
+
+    tearDown = setUp
+
+    def _state(self):
+        return {"messages": [HumanMessage(content="hi", id="h1")],
+                "image_paths": [], "user_image_paths": []}
+
+    def _run(self, user_id, channel_id, manager, builds):
+        def _fake_create_agent(model, tools=None):
+            builds.append(user_id)
+            return _RecordingAgent()
+        cfg = {"metadata": {"user_id": user_id, "channel_id": channel_id,
+                            "schedule_manager": manager}}
+        with patch.object(mister_fritz, "create_agent", _fake_create_agent),              patch.object(mister_fritz, "search_memories_internal",
+                          side_effect=lambda *a, **k: "{}"),              patch.object(mister_fritz, "get_user_profile",
+                          side_effect=lambda *a, **k: {}):
+            executor(self._state(), config=cfg)
+
+    def test_repeat_turns_reuse_one_agent(self):
+        manager, builds = MagicMock(), []
+        for _ in range(3):
+            self._run("discord-1", 100, manager, builds)
+        self.assertEqual(len(builds), 1, "the agent was rebuilt on every turn")
+
+    def test_a_different_user_gets_its_own_agent(self):
+        manager, builds = MagicMock(), []
+        self._run("discord-1", 100, manager, builds)
+        self._run("discord-2", 100, manager, builds)
+        self.assertEqual(builds, ["discord-1", "discord-2"])
+
+    def test_a_different_channel_gets_its_own_agent(self):
+        manager, builds = MagicMock(), []
+        self._run("discord-1", 100, manager, builds)
+        self._run("discord-1", 200, manager, builds)
+        self.assertEqual(len(builds), 2,
+                         "schedule_message is bound to the channel it posts in")
+
+    def test_the_cache_is_bounded(self):
+        manager, builds = MagicMock(), []
+        for i in range(mister_fritz._AGENT_CACHE_MAX + 5):
+            self._run(f"discord-{i}", 100, manager, builds)
+        self.assertLessEqual(len(mister_fritz._AGENT_CACHE),
+                             mister_fritz._AGENT_CACHE_MAX)
 
 if __name__ == "__main__":
     unittest.main()

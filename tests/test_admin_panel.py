@@ -2009,5 +2009,49 @@ class TestWebThreadBranchesLikeAnyChannel(unittest.TestCase):
         self.assertEqual(admin_panel._chat_thread_id(""), "")
 
 
+
+
+class TestCodeBlockLabelsStayAligned(unittest.TestCase):
+    """Languages were zipped onto rendered blocks by position, but only
+    LABELLED fences were collected — so an unlabelled fence (or an indented
+    code block) shifted every label one block along and the wrong language
+    was announced."""
+
+    # Built with join() rather than escapes: a literal newline in a fixture
+    # is easier to read and impossible to mangle.
+    UNLABELLED_THEN_PYTHON = chr(10).join(
+        ['```', 'SELECT 1;', '```', '', '```python', 'x = 1', '```', ''])
+    INDENTED_THEN_PYTHON = chr(10).join(
+        ['    indented = 1', '', '```python', 'x = 1', '```', ''])
+    TWO_LABELLED = chr(10).join(
+        ['```python', 'x = 1', '```', '', '```js', 'let y = 2', '```', ''])
+
+    def _tags(self, src):
+        html = admin_panel._render_markdown(src)
+        return re.findall(r'<div class="codehilite"[^>]*>', html)
+
+    def test_unlabelled_fence_does_not_steal_the_next_label(self):
+        tags = self._tags(self.UNLABELLED_THEN_PYTHON)
+        self.assertEqual(len(tags), 2)
+        self.assertNotIn('data-lang', tags[0])
+        self.assertIn('data-lang="python"', tags[1])
+
+    def test_indented_block_makes_it_label_nothing_rather_than_guess(self):
+        """An indented block renders with no fence at all, so the lists
+        cannot be aligned. A wrong language is worse than none."""
+        tags = self._tags(self.INDENTED_THEN_PYTHON)
+        self.assertEqual(len(tags), 2)
+        for tag in tags:
+            self.assertNotIn('data-lang', tag)
+
+    def test_consecutive_labelled_fences_keep_their_own_languages(self):
+        tags = self._tags(self.TWO_LABELLED)
+        self.assertIn('data-lang="python"', tags[0])
+        self.assertIn('data-lang="js"', tags[1])
+
+    def test_fence_languages_records_openers_only(self):
+        langs = admin_panel._fence_languages(self.UNLABELLED_THEN_PYTHON)
+        self.assertEqual(langs, [None, 'python'])
+
 if __name__ == "__main__":
     unittest.main()

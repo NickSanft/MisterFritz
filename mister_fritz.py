@@ -264,8 +264,7 @@ def _make_memory_key(summary: str) -> str:
     return f"memory_of_{slug}"[:_MEMORY_KEY_MAX]
 
 
-def _summarize_and_profile(messages: list, user_id: str | None,
-                           config_values: dict) -> None:
+def _summarize_and_profile(messages: list, user_id: str | None) -> None:
     """The expensive half of summarisation: two LLM calls and a Chroma write.
 
     Runs off the graph thread when SUMMARIZE_ASYNC is on. Nothing downstream
@@ -279,11 +278,10 @@ def _summarize_and_profile(messages: list, user_id: str | None,
     true if someone is still watching the cost.
     """
     with METRICS.time_block("summarize_background"):
-        _summarize_and_profile_inner(messages, user_id, config_values)
+        _summarize_and_profile_inner(messages, user_id)
 
 
-def _summarize_and_profile_inner(messages: list, user_id: str | None,
-                                 config_values: dict) -> None:
+def _summarize_and_profile_inner(messages: list, user_id: str | None) -> None:
     try:
         prompt = messages + [HumanMessage(content="Please summarize the conversation above:")]
         summary_response = ollama_instance.invoke(prompt)
@@ -332,7 +330,6 @@ def summarize_conversation(state: EnhancedState, config: RunnableConfig):
     user_id = metadata.get("user_id")
     # Snapshot before the trim — the worker must not race the state update.
     snapshot = list(state["messages"])
-    config_values = get_config_values(config)
 
     if SUMMARIZE_ASYNC:
         key = user_id or "(anonymous)"
@@ -346,7 +343,7 @@ def summarize_conversation(state: EnhancedState, config: RunnableConfig):
         else:
             def _worker():
                 try:
-                    _summarize_and_profile(snapshot, user_id, config_values)
+                    _summarize_and_profile(snapshot, user_id)
                 finally:
                     with _summarize_lock:
                         _summarize_inflight.discard(key)
@@ -355,7 +352,7 @@ def summarize_conversation(state: EnhancedState, config: RunnableConfig):
             ).start()
             METRICS.increment("summarize_backgrounded")
     else:
-        _summarize_and_profile(snapshot, user_id, config_values)
+        _summarize_and_profile(snapshot, user_id)
 
     # Keep the last TWO, not the last one. The trim runs after the executor has
     # appended its reply, so [:-1] left only Fritz's own AIMessage — and the
@@ -588,13 +585,39 @@ def executor(state: EnhancedState, config: RunnableConfig):
         )
 
     if include_file_tools or extra_tools:
-        tools_desc = get_conversation_tools_description(
-            include_file_tools=include_file_tools,
-            extra_tools=extra_tools or None,
-        )
-        system_prompt = get_system_description(tools_desc)
-        active_tools = [tool_info[0] for tool_info in tools_desc.values()]
-        agent = create_agent(ollama_instance, tools=active_tools)
+        # Memoised on the tool-set identity. Discord passes channel_id AND
+        # schedule_manager on EVERY message, so this branch always ran and the
+        # cached-agent fast path below was dead on the primary surface — each
+        # turn rebuilt the whole tool registry (including the skills/
+        # importlib walk) and recompiled a ReAct agent before the model saw a
+        # token.
+        #
+        # The key is exactly what the closure tools capture. schedule_message,
+        # list_my_schedules and cancel_reminder are bound to channel_id and
+        # user_id, so those MUST be in the key or one person would inherit
+        # another's schedule tools. schedule_manager is keyed by identity
+        # because it is a process singleton; the cached closures hold a strong
+        # reference to it, so its id cannot be recycled underneath us.
+        cache_key = (include_file_tools, channel_id, user_id, id(schedule_manager))
+        with _AGENT_CACHE_LOCK:
+            cached = _AGENT_CACHE.get(cache_key)
+        if cached is None:
+            tools_desc = get_conversation_tools_description(
+                include_file_tools=include_file_tools,
+                extra_tools=extra_tools or None,
+            )
+            active_tools = [tool_info[0] for tool_info in tools_desc.values()]
+            cached = (get_system_description(tools_desc),
+                      create_agent(ollama_instance, tools=active_tools))
+            with _AGENT_CACHE_LOCK:
+                # Bounded: one entry per (user, channel) pair would otherwise
+                # grow without limit on a busy guild. Oldest out first; a
+                # re-miss costs one rebuild, which is what every turn paid
+                # before this cache existed.
+                if len(_AGENT_CACHE) >= _AGENT_CACHE_MAX:
+                    _AGENT_CACHE.pop(next(iter(_AGENT_CACHE)))
+                _AGENT_CACHE[cache_key] = cached
+        system_prompt, agent = cached
     else:
         system_prompt = CACHED_SYSTEM_PROMPT
         agent = _get_conversation_agent()
@@ -906,6 +929,13 @@ fast_ollama_instance = ChatOllama(
 )
 
 _conversation_react_agent = None
+
+
+# Per-(user, channel) agents, keyed by the tool set they were built from.
+# Insertion-ordered, so popping the first item evicts the oldest.
+_AGENT_CACHE: dict = {}
+_AGENT_CACHE_MAX = 64
+_AGENT_CACHE_LOCK = threading.Lock()
 
 
 def _get_conversation_agent():
