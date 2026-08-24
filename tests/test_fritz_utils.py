@@ -207,6 +207,69 @@ class TestMessageSource(unittest.TestCase):
         self.assertEqual(len(values), len(set(str(v) for v in values)))
 
 
+
+
+class TestIsAdminCanonical(unittest.TestCase):
+    """Admin follows the immutable id, not the name.
+
+    ADMIN_LEGACY_NAME_MATCH exists so a pre-migration config keeps working for
+    one release; it ships FALSE (DECISIONS #6) so there is no impersonation
+    window. These pin both halves — the plan named this class and it was never
+    written.
+    """
+
+    def test_canonical_root_is_admin(self):
+        with patch.object(fu, "ROOT_USER", "discord-1"),              patch.object(fu, "ADMIN_USERS", frozenset()):
+            self.assertTrue(fu.is_admin("discord-1"))
+
+    def test_someone_else_is_not(self):
+        with patch.object(fu, "ROOT_USER", "discord-1"),              patch.object(fu, "ADMIN_USERS", frozenset()):
+            self.assertFalse(fu.is_admin("discord-2"))
+
+    def test_admin_users_membership_counts(self):
+        with patch.object(fu, "ROOT_USER", None),              patch.object(fu, "ADMIN_USERS", frozenset({"discord-7"})):
+            self.assertTrue(fu.is_admin("discord-7"))
+
+    def test_a_display_name_is_ignored_when_the_flag_is_off(self):
+        """The whole point: renaming yourself to the owner's handle grants
+        nothing."""
+        with patch.object(fu, "ROOT_USER", "divora"),              patch.object(fu, "ADMIN_LEGACY_NAME_MATCH", False):
+            self.assertFalse(fu.is_admin("discord-99", display_name="divora"))
+
+    def test_a_display_name_is_honoured_when_the_flag_is_on(self):
+        with patch.object(fu, "ROOT_USER", "divora"),              patch.object(fu, "ADMIN_LEGACY_NAME_MATCH", True):
+            self.assertTrue(fu.is_admin("discord-99", display_name="divora"))
+
+    def test_a_canonical_root_cannot_be_matched_by_name_even_with_the_flag_on(self):
+        """Once ROOT_USER is canonical the legacy shim grants nothing — no
+        display name equals "discord-1". Migrating the config is what actually
+        closes the rename hole, not flipping the flag."""
+        with patch.object(fu, "ROOT_USER", "discord-1"),              patch.object(fu, "ADMIN_LEGACY_NAME_MATCH", True):
+            self.assertFalse(fu.is_admin("discord-99", display_name="discord-1"))
+
+    def test_none_is_never_admin(self):
+        with patch.object(fu, "ROOT_USER", "discord-1"):
+            self.assertFalse(fu.is_admin(None))
+
+
+class TestValidateConfigWarnsOnLegacyAdminNames(unittest.TestCase):
+    """A config still using display names is a live impersonation risk with the
+    flag on, and silently broken admin commands with it off. Either way the
+    operator should be told at startup, by name."""
+
+    def test_it_names_every_non_canonical_entry(self):
+        with patch.object(fu, "DISCORD_BOT_TOKEN", "x"),              patch.object(fu, "ROOT_USER", "divora"),              patch.object(fu, "ADMIN_USERS", frozenset({"someone_else"})),              patch.object(fu, "ADMIN_LEGACY_NAME_MATCH", False):
+            with self.assertLogs("fritz_utils", level="WARNING") as logs:
+                fu.validate_config()
+        blob = " ".join(logs.output)
+        self.assertIn("divora", blob)
+        self.assertIn("someone_else", blob)
+
+    def test_a_fully_canonical_config_warns_about_nothing(self):
+        with patch.object(fu, "DISCORD_BOT_TOKEN", "x"),              patch.object(fu, "ROOT_USER", "discord-1"),              patch.object(fu, "ADMIN_USERS", frozenset({"discord-2"})),              patch.object(fu, "_CLAMPED_KNOBS", []):
+            with self.assertNoLogs("fritz_utils", level="WARNING"):
+                fu.validate_config()
+
 if __name__ == "__main__":
     unittest.main()
 

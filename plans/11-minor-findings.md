@@ -4,6 +4,13 @@
 
 The post-implementation audit produced 39 minor findings alongside the criticals and majors (all of which are now closed). None of these is load-bearing; collectively they are the difference between "works" and "maintained".
 
+> **ALL 37 ARE NOW CLOSED** (batches A–I, 2026-08). Suite went 705 → 811 passing.
+> Every behavioural fix carries a test verified to fail against the old code.
+> Two findings turned out to be bigger than described (the code-block mislabel had a
+> second cause; the memory cap's real defect was mixed-size entries, not uniform ones),
+> and one — a canonical `ROOT_USER` still being impersonable by display name while
+> `ADMIN_LEGACY_NAME_MATCH` is on — was found only while writing a test for something else.
+
 **2 are already done** — both were the `/chat/send` fallback (#12, #23), deleted in `cb5f119`. **37 remain**, grouped below into 9 commits.
 
 ## Grouping rules

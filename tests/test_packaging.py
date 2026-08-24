@@ -295,6 +295,59 @@ class TestHeavyImportsRunOffTheEventLoop(unittest.TestCase):
         self.assertIn("run_blocking(_load_tts)", on_ready)
 
 
+
+
+class TestSdxlPipelineIsGuarded(unittest.TestCase):
+    """The ~7 GB SDXL pipeline must load exactly once.
+
+    Two concurrent /gen calls that both found _pipeline is None would each
+    build one, and the second would OOM the GPU or silently double VRAM.
+    conftest.py installs a MagicMock for image_generator before any test module
+    imports, so this is the one place that has to reach the REAL module — and
+    it is why the guard had no coverage at all.
+    """
+
+    def _real_source(self):
+        return (REPO / "image_generator.py").read_text(encoding="utf-8")
+
+    def test_get_pipeline_holds_the_lock(self):
+        """Source-level: importing the real module needs torch + diffusers,
+        which core installs deliberately do not have."""
+        src = self._real_source()
+        self.assertIn("_PIPELINE_LOCK = threading.Lock()", src)
+        body = src.split("def get_pipeline(", 1)[1].split(chr(10) + "def ", 1)[0]
+        self.assertIn("with _PIPELINE_LOCK:", body)
+        # The None-check must be INSIDE the lock, or two callers can both pass
+        # it before either assigns.
+        lock_at = body.index("with _PIPELINE_LOCK:")
+        check_at = body.index("if _pipeline is None:")
+        self.assertLess(lock_at, check_at,
+                        "the _pipeline is None check sits OUTSIDE the lock, so "
+                        "two concurrent callers can both enter and build one")
+
+    def test_generation_also_serialises_on_the_lock(self):
+        """The render itself is single-GPU work; two at once thrash VRAM."""
+        src = self._real_source()
+        self.assertGreaterEqual(src.count("with _PIPELINE_LOCK:"), 2)
+
+    def test_the_real_module_is_importable_when_the_extra_is_present(self):
+        """Belt and braces: if [image] IS installed, prove the lock object is
+        real rather than trusting the source read. Skipped on a core install,
+        which is the normal case for CI."""
+        import importlib
+        import sys
+        diffusers = importlib.util.find_spec("diffusers")
+        if diffusers is None:
+            self.skipTest("[image] extra not installed — source check covers it")
+        stub = sys.modules.pop("image_generator", None)
+        try:
+            real = importlib.import_module("image_generator")
+            import threading
+            self.assertIsInstance(real._PIPELINE_LOCK, type(threading.Lock()))
+        finally:
+            if stub is not None:
+                sys.modules["image_generator"] = stub
+
 if __name__ == "__main__":
     unittest.main()
 

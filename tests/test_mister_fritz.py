@@ -482,15 +482,32 @@ class TestExecutorTokenStreaming(unittest.TestCase):
         agent, _c, _p, _r = self._run(script, with_callback=False)
         self.assertEqual(agent.stream_mode, ["values"])
 
-    def test_sub_threshold_tail_is_flushed(self):
+    def test_chunks_below_the_threshold_are_coalesced_then_flushed(self):
+        """STREAM_MIN_CHARS buffers small chunks so a 40-token/s stream does
+        not schedule 40 cross-thread hops per second.
+
+        The old version of this test asserted only that the tail arrived,
+        which is true at ANY threshold — so it passed even with the buffering
+        disabled entirely. Counting the CALLS is what distinguishes them.
+        """
         script = [
-            ("messages", (_chunk("tail", "t1"), {})),
-            ("values", {"messages": [AIMessage(content="tail")]}),
+            ("messages", (_chunk("a", "t1"), {})),
+            ("messages", (_chunk("b", "t1"), {})),
+            ("messages", (_chunk("c", "t1"), {})),
+            ("values", {"messages": [AIMessage(content="abc")]}),
         ]
         with patch.object(mister_fritz, "STREAM_MIN_CHARS", 999):
-            _agent, calls, _p, _r = self._run(script)
-        self.assertEqual([d for d, _, _ in calls], ["tail"])
+            _agent, buffered, _p, _r = self._run(script)
+        with patch.object(mister_fritz, "STREAM_MIN_CHARS", 1):
+            _agent, unbuffered, _p, _r = self._run(script)
 
+        # Buffered: one flush at the end. Unbuffered: one call per chunk.
+        self.assertEqual(len(buffered), 1,
+                         "chunks were not coalesced — the threshold is inert")
+        self.assertEqual(len(unbuffered), 3)
+        # Either way the full text arrives.
+        self.assertEqual("".join(d for d, _, _ in buffered), "abc")
+        self.assertEqual("".join(d for d, _, _ in unbuffered), "abc")
 
 class TestLangGraphMessagesContract(unittest.TestCase):
     """Third-party canary. Pins the exact upstream behaviour the executor

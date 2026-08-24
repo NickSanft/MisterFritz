@@ -1683,6 +1683,66 @@ class TestFacetedControlsKeepAFocusRing(unittest.TestCase):
         self.assertIn(".attach-chip button:focus-visible", src)
 
 
+
+    # ── The generic guard ────────────────────────────────────────────────
+    # The assertions above name specific controls, so they can only catch a
+    # regression in one someone already thought of — they did NOT catch the
+    # suggestion chips or the copy buttons, which is what this class was
+    # written for. This derives the set from the stylesheet and demands that
+    # every clip-path'd selector be CLASSIFIED, so a new faceted control fails
+    # here the day it is added rather than shipping with no focus ring.
+
+    # Focusable, and wrapped in an unclipped .facet that carries the ring.
+    WRAPPED = {
+        ".attach-btn", ".btn-danger", ".copy-btn", ".send-btn",
+        ".stop-btn", ".suggestion",
+    }
+    # Not focusable — decoration, bubbles and containers.
+    DECORATIVE = {
+        ".attach-chip", ".attach-chip .gem", ".avatar", ".code-bar .diamond",
+        ".confirm-badge", ".confirm-card", ".empty-seal", ".status-chip",
+        ".msg-row.fritz .bubble", ".msg-row.user .bubble",
+    }
+
+    def _clipped_selectors(self, src):
+        """Every selector in the <style> block that sets a clip-path."""
+        found = set()
+        for block in re.finditer(r"([^{}]+)\{([^{}]*)\}", src):
+            selector, body = block.group(1), block.group(2)
+            if "clip-path" not in body:
+                continue
+            for part in selector.split(","):
+                part = part.strip()
+                if part.startswith("."):
+                    found.add(part.split(":")[0].strip())
+        return found
+
+    def test_every_clipped_selector_is_classified(self):
+        """Fails on a NEW faceted control, which the named assertions cannot.
+
+        clip-path clips outline, so a focusable control that is neither wrapped
+        nor deliberately exempt ships with no visible focus ring and nothing
+        else in the suite notices.
+        """
+        clipped = self._clipped_selectors(_template("chat.html"))
+        unclassified = sorted(clipped - self.WRAPPED - self.DECORATIVE)
+        self.assertEqual(
+            unclassified, [],
+            "these selectors set clip-path but are not classified: "
+            f"{unclassified}. clip-path clips outline, so if any is focusable "
+            "it has NO focus ring. Wrap it in .facet and add it to WRAPPED, or "
+            "add it to DECORATIVE if it can never take focus.",
+        )
+
+    def test_the_wrapped_set_still_matches_the_stylesheet(self):
+        """Catches the opposite drift: a control that lost its clip-path, or
+        was renamed, leaving a stale entry that guards nothing."""
+        clipped = self._clipped_selectors(_template("chat.html"))
+        stale = sorted((self.WRAPPED | self.DECORATIVE) - clipped)
+        self.assertEqual(stale, [],
+                         f"these no longer set clip-path: {stale}")
+
+
 class TestConfirmDialogTrapsFocus(unittest.TestCase):
     """aria-modal tells assistive tech the rest of the page is inert; it does
     not change the browser's tab order. Without an explicit trap a keyboard

@@ -501,8 +501,7 @@ class _DeltaEmitter:
     accumulated — full text of the CURRENT answer segment.
     restart     — True on the first emission of a new segment. A new segment
                   starts whenever the model begins a fresh turn (it wrote a
-                  preamble, called a tool, then began the real answer) or the
-                  synthesizer takes over from the executor.
+                  preamble, called a tool, then began the real answer).
 
     Consumers that replace content wholesale (Discord message edits) read
     `accumulated` and can ignore `restart`. Consumers that append (the web SSE
@@ -514,9 +513,14 @@ class _DeltaEmitter:
     otherwise render "Let me look. I found it sir." as one reply.
     """
 
-    def __init__(self, callback, min_chars: int = STREAM_MIN_CHARS):
+    def __init__(self, callback, min_chars: int | None = None):
+        # Read at CALL time, not bound as a default. `min_chars=STREAM_MIN_CHARS`
+        # in the signature captured the module constant once, at class-definition
+        # time, so patching mister_fritz.STREAM_MIN_CHARS could never affect an
+        # emitter — which made test_sub_threshold_tail_is_flushed pass without
+        # exercising the threshold it names.
         self._callback = callback
-        self._min_chars = max(1, min_chars)
+        self._min_chars = max(1, STREAM_MIN_CHARS if min_chars is None else min_chars)
         self._segment = _SEGMENT_UNSET
         self._accumulated = ""
         self._buffer = ""

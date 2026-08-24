@@ -209,6 +209,38 @@ async def on_ready():
         print(f"Failed to sync commands: {e}")
 
 
+def make_streaming_callback(handler, loop, min_interval=None):
+    """Build the streaming callback ask_stuff invokes from a worker thread.
+
+    A module-level factory rather than a closure inside on_message purely so it
+    can be tested: the arity, the cross-thread rate limit, and the fact that a
+    restart bypasses that limit are all easy to break and were covered by
+    nothing, because reaching them meant standing up a live gateway.
+
+    A Discord edit replaces the entire message body, so this sends
+    `accumulated` (which resets by itself when `restart` fires), not the delta.
+
+    Called once per TOKEN. At ~40 tokens/s that would queue 40 coroutines/s
+    onto the gateway loop, so the cross-thread hop itself is rate-limited — the
+    handler's own throttle only paces the edits, not the scheduling.
+    final_update() always writes the complete text, so a dropped hop loses
+    nothing. A restart is never dropped: it marks a NEW answer segment, and
+    skipping it would leave the previous segment's text on screen.
+    """
+    if min_interval is None:
+        min_interval = DISCORD_STREAM_MIN_INTERVAL
+    state = {"last": 0.0}
+
+    def streaming_callback(delta: str, accumulated: str, restart: bool = False):
+        now = time.monotonic()
+        if not restart and now - state["last"] < min_interval:
+            return
+        state["last"] = now
+        asyncio.run_coroutine_threadsafe(handler.update_text(accumulated), loop)
+
+    return streaming_callback
+
+
 @client.event
 async def on_message(ctx):
     # THE IDENTITY BOUNDARY. Everything downstream keys off `user_id`, which is
@@ -281,24 +313,7 @@ async def on_message(ctx):
         status_msg = await ctx.channel.send("✍️ *Mister Fritz is thinking...*")
 
     streaming_handler = StreamingMessageHandler(status_msg, loop)
-    last_stream_schedule = 0.0
-
-    def streaming_callback(delta: str, accumulated: str, restart: bool = False):
-        # A Discord edit replaces the entire message body, so send
-        # `accumulated` (which resets by itself when `restart` fires), not the
-        # delta.
-        #
-        # This is now called once per TOKEN from a worker thread. At ~40
-        # tokens/s that would queue 40 coroutines/s onto the gateway loop, so
-        # rate-limit the cross-thread hop itself — the handler's own throttle
-        # only paces the edits, not the scheduling. final_update() always
-        # writes the complete text, so nothing is lost by dropping hops.
-        nonlocal last_stream_schedule
-        now = time.monotonic()
-        if not restart and now - last_stream_schedule < DISCORD_STREAM_MIN_INTERVAL:
-            return
-        last_stream_schedule = now
-        asyncio.run_coroutine_threadsafe(streaming_handler.update_text(accumulated), loop)
+    streaming_callback = make_streaming_callback(streaming_handler, loop)
 
     def progress_callback(message: str):
         # Was ctx.channel.send: a permanent, un-deleteable message per tool

@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 # tts (prevents a TTS model download), image_generator and document_engine are
 # stubbed in tests/conftest.py before any test module is collected.
 
+import main_discord  # noqa: E402
 from main_discord import split_into_chunks, StreamingMessageHandler  # noqa: E402
 
 
@@ -256,6 +257,62 @@ class TestIdentityRecordedOnlyForRealTurns(unittest.TestCase):
                            "identity_store.record runs before the mention "
                            "check — ambient chatter creates alias rows")
 
+
+
+
+class TestStreamingCallbackFactory(unittest.IsolatedAsyncioTestCase):
+    """The callback ask_stuff invokes from a worker thread.
+
+    It was a closure inside on_message, so reaching it meant standing up a live
+    gateway — and nothing covered its arity, its cross-thread rate limit, or
+    the fact that a restart must bypass that limit. Extracting the factory is
+    what made these three assertions possible at all.
+    """
+
+    def _handler(self):
+        h = MagicMock()
+        h.update_text = AsyncMock()
+        return h
+
+    async def test_rate_limit_drops_intermediate_hops(self):
+        """At ~40 tokens/s an unthrottled callback queues 40 coroutines a
+        second onto the gateway loop."""
+        h = self._handler()
+        cb = main_discord.make_streaming_callback(h, asyncio.get_event_loop(),
+                                                  min_interval=60.0)
+        cb("a", "a", True)      # first call always goes
+        cb("b", "ab", False)    # dropped
+        cb("c", "abc", False)   # dropped
+        await asyncio.sleep(0.05)   # let run_coroutine_threadsafe drain
+        self.assertEqual(h.update_text.await_count, 1)
+
+    async def test_restart_is_never_dropped(self):
+        """A restart marks a NEW answer segment. Skipping it would leave the
+        previous segment's text on screen."""
+        h = self._handler()
+        cb = main_discord.make_streaming_callback(h, asyncio.get_event_loop(),
+                                                  min_interval=60.0)
+        cb("a", "a", False)
+        cb("x", "x", True)      # must bypass the limit
+        await asyncio.sleep(0.05)   # let run_coroutine_threadsafe drain
+        self.assertEqual(h.update_text.await_count, 2)
+        self.assertEqual(h.update_text.await_args.args[0], "x")
+
+    async def test_it_sends_accumulated_not_the_delta(self):
+        """A Discord edit replaces the whole body, so the delta alone would
+        show only the newest token."""
+        h = self._handler()
+        cb = main_discord.make_streaming_callback(h, asyncio.get_event_loop(),
+                                                  min_interval=0.0)
+        cb("well", "Very well", False)
+        await asyncio.sleep(0.05)   # let run_coroutine_threadsafe drain
+        self.assertEqual(h.update_text.await_args.args[0], "Very well")
+
+    def test_it_accepts_the_three_argument_contract(self):
+        import inspect
+        cb = main_discord.make_streaming_callback(self._handler(), MagicMock())
+        params = list(inspect.signature(cb).parameters)
+        self.assertEqual(params, ["delta", "accumulated", "restart"])
 
 if __name__ == "__main__":
     unittest.main()

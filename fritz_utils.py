@@ -519,15 +519,22 @@ def is_admin(user_id: str | None, display_name: str | None = None) -> bool:
     Reads from the module's own scope at call time so tests can patch
     ROOT_USER / ADMIN_USERS without re-importing callers.
     """
-    candidates = [user_id]
-    if ADMIN_LEGACY_NAME_MATCH and display_name:
-        candidates.append(display_name)
-    for candidate in candidates:
-        if not candidate:
-            continue
-        if ROOT_USER and candidate == ROOT_USER:
+    if user_id:
+        if ROOT_USER and user_id == ROOT_USER:
             return True
-        if candidate in ADMIN_USERS:
+        if user_id in ADMIN_USERS:
+            return True
+
+    # The legacy shim, and ONLY against entries that are still display names.
+    # A canonical entry must never be matchable by display name: Discord lets
+    # anyone set theirs to the literal string "discord-1", so without this
+    # guard a migrated ROOT_USER was still impersonable while the flag was on —
+    # which quietly contradicts the migration guidance telling operators that
+    # moving to a canonical id is what closes the rename hole.
+    if ADMIN_LEGACY_NAME_MATCH and display_name:
+        if ROOT_USER and display_name == ROOT_USER and not is_canonical_user_id(ROOT_USER):
+            return True
+        if display_name in ADMIN_USERS and not is_canonical_user_id(display_name):
             return True
     return False
 
