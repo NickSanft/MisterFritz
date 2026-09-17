@@ -1,5 +1,6 @@
 import json
 import os
+import pathlib
 import unittest
 from unittest.mock import mock_open, patch
 
@@ -314,8 +315,39 @@ class TestConcurrencyKnobsCannotDeadlock(unittest.TestCase):
 
     def test_shipped_knobs_are_all_usable(self):
         for name in ("BLOCKING_POOL_SIZE", "IMAGE_GEN_MAX_CONCURRENCY",
-                     "TTS_MAX_CONCURRENCY"):
+                     "TTS_MAX_CONCURRENCY", "RELAY_MAX_BODY_CHARS",
+                     "RELAY_MAX_PER_SENDER_PER_HOUR",
+                     "RELAY_MAX_INBOUND_PER_RECIPIENT_PER_HOUR",
+                     "RELAY_REPLY_WINDOW_MIN", "RELAY_RETENTION_DAYS"):
             self.assertGreaterEqual(getattr(fu, name), 1, name)
+
+    def test_relay_counts_are_clamped_not_bare_ints(self):
+        """A relay cap of 0 rejects every message and reads as a real limit.
+
+        Checking the source rather than the values, because the values are
+        identical either way until someone sets the env var to 0 - which is
+        exactly the case a bare int() would sail straight through.
+        """
+        src = pathlib.Path(fu.__file__).read_text(encoding="utf-8")
+        for name in ("RELAY_MAX_BODY_CHARS", "RELAY_MAX_PER_SENDER_PER_HOUR",
+                     "RELAY_MAX_INBOUND_PER_RECIPIENT_PER_HOUR",
+                     "RELAY_REPLY_WINDOW_MIN", "RELAY_RETENTION_DAYS"):
+            line = next(ln for ln in src.splitlines()
+                        if ln.startswith(name + ":"))
+            self.assertIn("_at_least_one", line, name)
+
+    def test_validate_config_warns_when_agent_tool_on_but_relay_off(self):
+        with patch.object(fu, "DISCORD_BOT_TOKEN", "x"),              patch.object(fu, "ROOT_USER", "discord-1"),              patch.object(fu, "_CLAMPED_KNOBS", []),              patch.object(fu, "RELAY_ENABLED", False),              patch.object(fu, "RELAY_AGENT_TOOL_ENABLED", True):
+            with self.assertLogs("fritz_utils", level="WARNING") as logs:
+                fu.validate_config()
+        self.assertTrue(any("RELAY_AGENT_TOOL_ENABLED" in m for m in logs.output))
+
+    def test_validate_config_quiet_when_relay_knobs_are_coherent(self):
+        for enabled, tool in ((True, True), (True, False), (False, False)):
+            with self.subTest(relay=enabled, tool=tool):
+                with patch.object(fu, "DISCORD_BOT_TOKEN", "x"),                      patch.object(fu, "ROOT_USER", "discord-1"),                      patch.object(fu, "ADMIN_USERS", frozenset()),                      patch.object(fu, "_CLAMPED_KNOBS", []),                      patch.object(fu, "RELAY_ENABLED", enabled),                      patch.object(fu, "RELAY_AGENT_TOOL_ENABLED", tool):
+                    with self.assertNoLogs("fritz_utils", level="WARNING"):
+                        fu.validate_config()
 
     def test_validate_config_warns_about_a_clamped_knob(self):
         fu._CLAMPED_KNOBS.append(("IMAGE_GEN_MAX_CONCURRENCY", "0"))

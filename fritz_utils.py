@@ -205,6 +205,25 @@ IMAGE_GEN_MAX_CONCURRENCY: int = _at_least_one("IMAGE_GEN_MAX_CONCURRENCY", "1")
 # Concurrent XTTS syntheses permitted by the /voice semaphore.
 TTS_MAX_CONCURRENCY: int = _at_least_one("TTS_MAX_CONCURRENCY", "1")
 
+# ── Direct-message relay ────────────────────────────────────────────────────
+# /tell carries an attributed message from one guild member to another by DM;
+# the recipient's reply routes back. See plans/12-direct-message-relay.md.
+#
+# Counts go through _at_least_one, never a bare int(). "Off" is RELAY_ENABLED
+# =false, never a 0 count — see the note above IMAGE_GEN_MAX_CONCURRENCY for
+# what a legal-but-unusable 0 cost last time.
+RELAY_ENABLED: bool = os.environ.get("RELAY_ENABLED", "true").lower() in ("1", "true", "yes")
+# Phase 2. Ships FALSE so the agent tool can land in the tree, under test,
+# while the model provably cannot DM anyone until an operator flips it.
+RELAY_AGENT_TOOL_ENABLED: bool = os.environ.get("RELAY_AGENT_TOOL_ENABLED", "false").lower() in ("1", "true", "yes")
+RELAY_MAX_BODY_CHARS: int = _at_least_one("RELAY_MAX_BODY_CHARS", "1000")
+RELAY_MAX_PER_SENDER_PER_HOUR: int = _at_least_one("RELAY_MAX_PER_SENDER_PER_HOUR", "10")
+# The only limit that constrains a brigade — many senders, one recipient.
+RELAY_MAX_INBOUND_PER_RECIPIENT_PER_HOUR: int = _at_least_one("RELAY_MAX_INBOUND_PER_RECIPIENT_PER_HOUR", "10")
+# How long a delivered message stays answerable (DECISIONS #24).
+RELAY_REPLY_WINDOW_MIN: int = _at_least_one("RELAY_REPLY_WINDOW_MIN", "1440")
+RELAY_RETENTION_DAYS: int = _at_least_one("RELAY_RETENTION_DAYS", "30")
+
 # Admin panel: shared password gate + local-only port. If ADMIN_PANEL_PASSWORD
 # is unset the panel won't start at all.
 ADMIN_PANEL_PASSWORD: str | None = os.environ.get("ADMIN_PANEL_PASSWORD") or None
@@ -595,10 +614,23 @@ def validate_config() -> None:
 
     for knob, requested in _CLAMPED_KNOBS:
         logging.getLogger(__name__).warning(
-            "%s was set to %s, which is not a usable worker count; using 1. "
-            "Below 1 a semaphore never releases (the guarded command hangs "
-            "until Discord expires the interaction) and a thread pool refuses "
-            "to start.", knob, requested,
+            "%s was set to %s; using 1. Every knob read this way is a count, "
+            "size or window that must be at least 1, and 0 is never the way "
+            "to turn a feature off: below 1 a semaphore never releases (the "
+            "guarded command hangs until Discord expires the interaction), a "
+            "thread pool refuses to start, and a relay cap rejects every "
+            "message with no way to tell that from a real limit. To disable "
+            "the relay, set RELAY_ENABLED=false.", knob, requested,
+        )
+
+    # The agent tool is gated twice on purpose, so flipping the Phase 2 knob
+    # can't quietly hand the model a DM channel. Turning it on while the
+    # master switch is off is a no-op that looks like it worked.
+    if RELAY_AGENT_TOOL_ENABLED and not RELAY_ENABLED:
+        logging.getLogger(__name__).warning(
+            "RELAY_AGENT_TOOL_ENABLED=true has no effect while "
+            "RELAY_ENABLED=false — the relay is off, so the agent tool is "
+            "not registered. Set RELAY_ENABLED=true to use it."
         )
 
     legacy = [u for u in ([ROOT_USER] if ROOT_USER else []) + sorted(ADMIN_USERS)
