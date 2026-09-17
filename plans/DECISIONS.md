@@ -206,6 +206,57 @@ Never write `style-src 'nonce-x' 'unsafe-inline'` — the nonce makes `'unsafe-i
 
 ---
 
+# Direct-message relay decisions (2026-09-17)
+
+Answers to the six open questions in [plan 12](12-direct-message-relay.md). Five confirm the plan's stated defaults; **decision 26 does not**, and it changes what Phase 1 ships.
+
+## 22. `/forget all` does NOT clear the blocks you placed
+
+Both halves of the block table now survive a privacy wipe: blocks placed *against* you (anti-laundering, already settled) and blocks you placed yourself.
+
+The reasoning is that a privacy command must not be a safety regression. Someone who blocks a harasser and later runs `/forget all` — reasonably believing they are protecting themselves — would otherwise silently re-arm the person they blocked.
+
+**Follow-through:** `/forget all` no longer forgets literally everything, so its confirmation text must say so, and `/relay forget-blocks` must exist as an explicit, separately-invoked escape hatch. Name it unmissably in the confirmation rather than burying it in `/help`.
+
+## 23. First contact delivers the full message
+
+No gated "Bob has something waiting for you" notice. The stranger's message arrives complete, with the opt-out one press away.
+
+This is the direct consequence of the recipient rule (anyone in a shared guild) and it is the exposure the risk summary names most plainly: a stranger reaches you once, in full, before you have any opportunity to refuse. A gate would have been kinder to people who never asked to be reachable, at the cost of partially re-imposing the allowlist that rule ruled out.
+
+## 24. `RELAY_REPLY_WINDOW_MIN` = 24 hours
+
+Long enough that someone who opens Discord the next evening can still reply; short enough that a forgotten thread does not route surprising text weeks later. Tune from real usage — it is a config knob, not a structural choice.
+
+## 25. Phase-2 addressing uses the substring guard
+
+The recipient's name must appear in the user's **own** message before the agent tool may address them. Ships behind `RELAY_AGENT_TOOL_ENABLED=false`.
+
+Chosen over the `UserSelect` confirmation tap, which cannot work where the agent tool's value actually lives: in a DM, `UserSelect` can only offer the bot or the viewer themselves. Chosen over model-supplied names with no structural guard, because `scrape_web` output and unsupervised memory extraction both reach the system prompt verbatim — a poisoned page could otherwise redirect a DM.
+
+**Known limitation, accepted:** the guard fails on pronouns ("tell her I'll be late"). It is novel and untested, which is exactly why the tool ships dark and gets switched on deliberately.
+
+## 26. `/tell compose` does NOT ship in Phase 1 — this overrides the plan's default
+
+**Plan 12 recommended shipping it with a draft preview. It is deferred instead.**
+
+Phase 1 is therefore a **purely verbatim courier**. That narrows the original composition decision — "verbatim by default, composed on request" — to its first half for the initial release; the composed half arrives later, or not at all.
+
+Two consequences worth stating:
+
+- **The prompt-injection surface shrinks substantially.** Composed mode was the only path putting model-generated text under a human's name. Without it, nothing Fritz sends in Phase 1 is authored by a model, so a poisoned memory or scraped page cannot influence the words that reach a third party.
+- **PR 7 leaves the Phase 1 sequence**, taking the draft-preview view with it. Phase 1 is PRs 1-6. `relay_messages.composed` stays in the schema as a column that is always `0` — cheaper than a migration later, and it keeps the reply-routing shape stable.
+
+If composed mode is ever revived, the plan's condition still holds: **ship the preview or cut the feature.** A local model producing something tone-deaf, sent in your name with no preview, is worse than not having it.
+
+## 27. A relay survives the two parties ceasing to share a guild
+
+Authorisation is checked at `/tell` time and recorded in `guild_id`. A reply the recipient chose to send should not silently vanish because of a membership change she may not know about — she would have no way to tell whether her message was delivered or dropped.
+
+---
+
+---
+
 ## Still open — deliberately not decided
 
 These came up during planning and remain unresolved. None blocks tranche 1.

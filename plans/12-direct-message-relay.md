@@ -9,6 +9,14 @@ the reconciliation section says which won and why._
 
 [← back to index](README.md)
 
+> **DECIDED 2026-09-17 — see [DECISIONS.md](DECISIONS.md) §22-27, which override this document.**
+> Five of the six open questions below confirmed the defaults as written. **Decision 26 does not:**
+> `/tell compose` is deferred, so **Phase 1 is PRs 1-6 and is a purely verbatim courier**. PR 7
+> below is retained for whenever composed mode is revived, but it is no longer in scope.
+> Consequence worth noting: with composed mode out, nothing Fritz sends in Phase 1 is authored by
+> a model, so the prompt-injection surface of the shipped feature is substantially smaller than
+> this plan assumed.
+
 **Effort:** XL (>3 days, across two phases)
 **Depends on:** nothing, but touches `main_discord.on_message` — the single most load-bearing line in the bot's primary surface.
 
@@ -287,7 +295,7 @@ Two boot-time actions in `on_ready`, immediately after `schedule_manager.start()
 
 *Unblocks:* shipping. *Risk:* under-reporting a deletion that was performed is a trust bug, not a correctness one, and it is exactly what the existing `alias_dropped` gap already is.
 
-**PR 7 — `/tell compose`, with the draft preview.** (M)
+**PR 7 — `/tell compose`, with the draft preview.** (M) — **DEFERRED, not in Phase 1 (decision 26).**
 Composed mode is a **subcommand**, not a `compose: bool`. Discord collapses optional parameters, so the mode of an invocation would be legible only to someone who went looking, and the failure is asymmetric and expensive: a person pastes a carefully worded apology, a stale flag rewrites it, and Fritz's words go out under their name. Give the two subcommands different payload parameter names — `message` (a noun you are handing over) and `gist` (an instruction) — so the call site reads as a sentence describing what will happen.
 
 `ask_stuff` runs through `run_blocking` with an explicit `thread_id=f"relay-draft:{sender}"` so a draft never lands in the user's real conversation checkpoint. The draft goes to a review view with `[Send] [Rewrite] [Discard]` — mirroring `_ForgetConfirmView` including the canonical-id `interaction_check`, but **implementing `on_timeout`**, which that class does not: after 30s its buttons silently stop working, and that is a gap worth not repeating.
