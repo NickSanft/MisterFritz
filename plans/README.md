@@ -28,6 +28,8 @@ This file is the integration layer: what to build once, what collides with what,
 
 [11. The minor findings](11-minor-findings.md) — the post-implementation audit's long tail, batched into 9 low-risk commits. The criticals and majors it found are already closed.
 
+[12. Discord direct-message relay](12-direct-message-relay.md) — NEW FEATURE, not yet built. `/tell @user` carries an attributed, verbatim message by DM; the reply routes back to the sender. Two phases, 9 PRs. The riskiest piece is the reply router, because `main_discord.on_message` already treats every DM as a full agent conversation.
+
 
 ---
 
