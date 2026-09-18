@@ -111,6 +111,29 @@ async def handle_app_command_error(interaction: discord.Interaction,
     await _reply_error(interaction, f"app_command.{name}", original)
 
 
+async def handle_tree_error(interaction: discord.Interaction,
+                            error: app_commands.AppCommandError) -> None:
+    """tree.on_error backstop: only for failures no command handler owns.
+
+    discord.py runs a command's own error handlers and THEN tree.on_error,
+    unconditionally (app_commands/tree.py, `_call`: `_invoke_error_handlers`
+    followed by `self.on_error`). The library's default on_error copes by
+    returning early when the command has handlers of its own. Installing
+    handle_app_command_error directly as tree.on_error dropped that check, so
+    every failure in this cog was handled twice: two error replies to the
+    user, two refs in the log, and every error counted twice in METRICS.
+
+    Same test the default uses. `_has_any_error_handlers` is private, but it
+    is precisely the predicate the library's own on_error relies on, and a
+    public stand-in (`command.binding is not None`) would silently swallow
+    errors from any future cog that forgets to define cog_app_command_error.
+    """
+    command = interaction.command
+    if command is not None and command._has_any_error_handlers():
+        return
+    await handle_app_command_error(interaction, error)
+
+
 def _format_uptime(seconds: int) -> str:
     """Render a seconds count as e.g. '2d 3h 17m' or '4m 12s'."""
     if seconds < 60:

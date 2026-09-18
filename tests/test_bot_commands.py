@@ -12,7 +12,7 @@ import asyncio
 import threading
 import time
 import unittest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # bot_commands pulls in mister_fritz → agent_tools → ddgs, plus document_engine
 # / image_generator / tts. All are stubbed in tests/conftest.py.
@@ -474,6 +474,100 @@ class TestAppCommandErrorHandler(unittest.IsolatedAsyncioTestCase):
             interaction.command, RuntimeError("x"))
         await cog.cog_app_command_error(interaction, err)
         interaction.response.send_message.assert_awaited_once()
+
+
+class TestErrorsAreAnsweredOnce(unittest.IsolatedAsyncioTestCase):
+    """discord.py runs a command's own handlers AND THEN tree.on_error.
+
+    main_discord installed handle_app_command_error straight onto the tree, so
+    every failure in the cog was handled twice: two error replies, two refs,
+    two METRICS errors. These drive the real cog through the library's own
+    dispatch sequence rather than calling one handler in isolation, because
+    the bug only exists in the composition.
+    """
+
+    async def _bot_with_real_cog(self):
+        from discord.ext import commands
+        bot = commands.Bot(command_prefix="$", intents=discord.Intents.default())
+        await bot.add_cog(_make_cog())
+        bot.tree.on_error = bot_commands.handle_tree_error   # as main_discord does
+        return bot
+
+    def _interaction(self, command):
+        interaction = _fake_interaction("someone")
+        interaction.command = command
+        answered = {"done": False}
+
+        async def _answer(*a, **kw):
+            answered["done"] = True
+        interaction.response.is_done = MagicMock(side_effect=lambda: answered["done"])
+        interaction.response.send_message = AsyncMock(side_effect=_answer)
+        interaction.followup.send = AsyncMock()
+        return interaction
+
+    async def _dispatch_like_the_tree(self, bot, interaction, error):
+        # app_commands/tree.py `_call`, verbatim in effect. Pinned against the
+        # installed library by test_library_still_calls_both_in_this_order.
+        command = interaction.command
+        if command is not None:
+            await command._invoke_error_handlers(interaction, error)
+        await bot.tree.on_error(interaction, error)
+
+    def replies(self, interaction):
+        return (interaction.response.send_message.await_count
+                + interaction.followup.send.await_count)
+
+    async def test_a_cog_command_failure_is_answered_once(self):
+        bot = await self._bot_with_real_cog()
+        for path in (("health",), ("forget", "memories")):
+            with self.subTest(command=" ".join(path)):
+                command = bot.tree.get_command(path[0])
+                for part in path[1:]:
+                    command = command.get_command(part)
+                interaction = self._interaction(command)
+                err = discord.app_commands.CommandInvokeError(command, RuntimeError("x"))
+                with patch.object(bot_commands, "fritz_error", wraps=bot_commands.fritz_error) as fe:
+                    await self._dispatch_like_the_tree(bot, interaction, err)
+                self.assertEqual(self.replies(interaction), 1)
+                self.assertEqual(fe.call_count, 1, "the error was recorded twice")
+
+    async def test_a_failure_outside_any_command_still_gets_the_backstop(self):
+        """The case the tree handler exists for: a stale sync, no command."""
+        bot = await self._bot_with_real_cog()
+        interaction = self._interaction(None)
+        await self._dispatch_like_the_tree(
+            bot, interaction, discord.app_commands.CommandNotFound("gone", []))
+        self.assertEqual(self.replies(interaction), 1)
+
+    async def test_a_command_with_no_handler_of_its_own_gets_the_backstop(self):
+        bot = await self._bot_with_real_cog()
+
+        @discord.app_commands.command(name="bare", description="d")
+        async def bare(interaction: discord.Interaction):
+            pass
+        bot.tree.add_command(bare)
+        interaction = self._interaction(bare)
+        await self._dispatch_like_the_tree(
+            bot, interaction, discord.app_commands.CommandInvokeError(bare, RuntimeError("x")))
+        self.assertEqual(self.replies(interaction), 1)
+
+    def test_library_still_calls_both_in_this_order(self):
+        """If discord.py ever stops double-dispatching, the replay above is
+        stale and this is the test that should say so."""
+        import inspect
+        from discord.app_commands import tree
+        src = inspect.getsource(tree.CommandTree._call)
+        first = src.index("await command._invoke_error_handlers(interaction, e)")
+        second = src.index("await self.on_error(interaction, e)")
+        self.assertLess(first, second)
+
+    def test_main_discord_installs_the_guarded_backstop(self):
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parents[1] / "main_discord.py").read_text(encoding="utf-8")
+        self.assertTrue("client.tree.on_error = handle_tree_error" in src,
+                        "main_discord no longer installs the guarded backstop")
+        self.assertFalse("client.tree.on_error = handle_app_command_error" in src,
+                         "the unguarded handler is back on the tree")
 
 
 class TestEmbedsAndBounds(unittest.IsolatedAsyncioTestCase):

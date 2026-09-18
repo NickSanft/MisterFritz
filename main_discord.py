@@ -9,7 +9,7 @@ from discord.ext import commands
 
 from admin_panel import start_admin_panel
 from bot_adapters import fritz_error, run_blocking, split_into_chunks  # noqa: F401 — split_into_chunks re-exported for tests
-from bot_commands import FritzCommands, handle_app_command_error
+from bot_commands import FritzCommands, handle_tree_error
 from fritz_utils import (
     DISCORD_BOT_TOKEN,
     DISCORD_STREAM_MIN_INTERVAL,
@@ -199,8 +199,9 @@ async def on_ready():
     )
     await client.add_cog(FritzCommands(client, sayer, schedule_manager))
     # Backstop for app-command failures raised OUTSIDE the cog (e.g. a stale
-    # sync producing CommandNotFound), which the cog hook never sees.
-    client.tree.on_error = handle_app_command_error
+    # sync producing CommandNotFound), which the cog hook never sees. It
+    # must skip commands that have their own handler - discord.py calls both.
+    client.tree.on_error = handle_tree_error
     logger.info("Logged in as %s", client.user)
     try:
         synced = await client.tree.sync()
