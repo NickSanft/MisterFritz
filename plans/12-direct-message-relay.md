@@ -248,6 +248,17 @@ Catch order in the sender, because `Forbidden` and `NotFound` both subclass `HTT
 
 *Unblocks:* PR 3, PR 4. *Risk:* the interaction can be double-answered if a failure path forgets the defer/followup distinction; `_reply_error` (`bot_commands.py:70-88`) already solves this and should be used rather than reimplemented.
 
+> **SHIPPED 2026-09-18, with these departures — each found by verifying against discord.py 2.6.4 or by a 25-agent adversarial review, and each pinned by a test that fails without it:**
+> - **Ships dark.** `RELAY_ENABLED` defaults to `false` until Phase 1 is complete. Every commit lands on master, so every intermediate state is deployable, and `/tell` without PR 3 is the ship blocker this section names.
+> - **`guild_only=True` is not enough.** On a Group it serialises only the deprecated `dm_permission`. The group also sets `allowed_contexts` (→ `contexts: [0]`) and `allowed_installs` (→ `integration_types: [0]`). Without the latter, a copy of Fritz user-installed into someone's account could run `/tell` from a server Fritz was never invited to and DM that server's members. The command also checks `interaction.is_guild_integration()` in code.
+> - **Both refusals keep one schedule, not just one string.** A block and a 403 are held as `reserved`, settled as `refused` and answered at the same randomly drawn deadline (1–2 s from the start of the command). Two findings forced this. Answering each as soon as it was known was a timing oracle, and padding only the block path merely moved it. And a 403-bound send sat `reserved`, counting toward the recipient's inbox, while a block went straight to `refused`, so a second account racing the first saw "their inbox is full" only when there was no block. `relay_store.reserve_send` therefore returns a block with its reservation still open (`Denial.relay_id`).
+> - **The author line is `@username · Display`,** with handle syntax, control characters and format characters stripped from the display name. `Display (@username)` let a nickname of `Alice (@alice)` render as `Alice (@alice) (@mallory)`.
+> - **A 400 is `rejected`, and the sender is charged for it.** Discord's harmful-link filter reliably returns one, and free 400s were an unlimited supply of DM-channel opens on the bot's token.
+> - **The audit log carries a keyed HMAC digest, not `sha256(body)[:16]`.** Unkeyed, a hash of "ok" *is* "ok" to anyone with a dictionary.
+> - Also: the recipient-cap denial no longer says "try again after HH:MM", because that time is a *third party's* message to the recipient. And the receipt DM to the sender is sent only after a delivery. The old wording "as delivered" would have been a lie on any other path.
+>
+> One known limit, not fixed: a 403 that takes longer than its deadline is answered late, and is then distinguishable by timing. It needs a Discord round trip of over a second.
+
 **PR 3 — `/relay block|unblock|status`, and the one indistinguishable refusal.** (S)
 `relay` as a Group deliberately **not** `guild_only` — the recipient is standing in a DM when they want to block, and making them walk back into the server that caused the problem is exactly the wrong shape. Global commands are available in DMs with the bot by default, so this needs no decorator at all, just the absence of one.
 

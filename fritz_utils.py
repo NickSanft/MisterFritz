@@ -212,7 +212,14 @@ TTS_MAX_CONCURRENCY: int = _at_least_one("TTS_MAX_CONCURRENCY", "1")
 # Counts go through _at_least_one, never a bare int(). "Off" is RELAY_ENABLED
 # =false, never a 0 count — see the note above IMAGE_GEN_MAX_CONCURRENCY for
 # what a legal-but-unusable 0 cost last time.
-RELAY_ENABLED: bool = os.environ.get("RELAY_ENABLED", "true").lower() in ("1", "true", "yes")
+#
+# Ships FALSE while Phase 1 is being built, and flips to true in the commit that
+# completes it. Every PR lands straight on master, so every intermediate state
+# is deployable, and /tell alone - before /relay block exists - lets anyone in
+# a shared server DM anyone else with no way for the recipient to refuse. The
+# plan calls that a ship blocker. Setting RELAY_ENABLED=true early is possible
+# and deliberate; it is not the default.
+RELAY_ENABLED: bool = os.environ.get("RELAY_ENABLED", "false").lower() in ("1", "true", "yes")
 # Phase 2. Ships FALSE so the agent tool can land in the tree, under test,
 # while the model provably cannot DM anyone until an operator flips it.
 RELAY_AGENT_TOOL_ENABLED: bool = os.environ.get("RELAY_AGENT_TOOL_ENABLED", "false").lower() in ("1", "true", "yes")

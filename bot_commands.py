@@ -1,9 +1,13 @@
 import asyncio
+import hashlib
+import hmac
 import io
 import json
 import logging
 import os
+import random
 import time
+import unicodedata
 from typing import Optional
 
 import discord
@@ -35,6 +39,7 @@ import identity_store
 from mister_fritz import ask_stuff
 from observability import METRICS, audit_log, get_health_snapshot
 import privacy
+import relay_store
 import workspace_store
 
 logger = logging.getLogger(__name__)
@@ -83,8 +88,12 @@ async def _reply_error(interaction: discord.Interaction, operation: str,
             await interaction.followup.send(text, ephemeral=True)
         else:
             await interaction.response.send_message(text, ephemeral=True)
-    except discord.HTTPException:
-        logger.warning("Could not deliver error reply for %s", operation)
+    except Exception as e:
+        # Exception, not just HTTPException: a transport error here (aiohttp,
+        # a timeout) escaped to the cog error handler, which then answered a
+        # SECOND time. Not BaseException — cancellation must still propagate.
+        logger.warning("Could not deliver error reply for %s: %s",
+                       operation, type(e).__name__)
 
 
 async def handle_app_command_error(interaction: discord.Interaction,
@@ -99,6 +108,17 @@ async def handle_app_command_error(interaction: discord.Interaction,
     if isinstance(error, app_commands.CheckFailure):
         await _reply_error(interaction, f"app_command.{name}", None,
                            note="That command is not available to you. One does have standards.")
+        return
+    if (isinstance(error, app_commands.TransformerError)
+            and name.split(" ")[0] == "tell"
+            and error.type is discord.AppCommandOptionType.user):
+        # The Member annotation on /tell's recipient is what enforces "anyone in
+        # a shared server": Discord only resolves a Member for someone who is
+        # in this guild, and the library refuses anything else. The generic
+        # "permitted range" copy below is meaningless for that.
+        await _reply_error(interaction, f"app_command.{name}", None,
+                           note="I can only carry word to members of this server, "
+                                "and that person is not one. Nothing was sent.")
         return
     if isinstance(error, app_commands.TransformerError):
         await _reply_error(interaction, f"app_command.{name}", None,
@@ -220,6 +240,123 @@ async def _require_admin(interaction: discord.Interaction) -> bool:
         "You do not have permission to use this command.", ephemeral=True
     )
     return False
+
+
+# ── Direct-message relay helpers ──────────────────────────────────────────────
+
+# Discord's cap on an embed description, which is where a relayed body goes.
+# The library does not check it (an over-length embed is a 400 at send time),
+# so the slash option itself is capped and the client will not let a longer
+# message be submitted, whatever RELAY_MAX_BODY_CHARS says.
+_EMBED_DESCRIPTION_MAX = 4096
+
+
+def _tell_max_chars(configured: int) -> int:
+    return max(1, min(configured, _EMBED_DESCRIPTION_MAX))
+
+
+TELL_MAX_CHARS = _tell_max_chars(fritz_utils.RELAY_MAX_BODY_CHARS)
+
+# Every failure copy on the send path says this, in words. "Never
+# optimistic-ack": the sender hears a message went only once Discord has
+# returned it, and hears plainly when it did not.
+_NOTHING_SENT = "Nothing was sent."
+
+# Recipient-side refusals — a block, and Discord's 403 for closed DMs — are
+# answered, settled and released on ONE schedule: a deadline drawn from this
+# window at the start of the command. A block is decided in a millisecond and
+# a 403 after a Discord round trip; answering each as soon as it is known was
+# a timing oracle for the question REFUSED exists to leave unanswered, and a
+# pad on the block path alone only moved that oracle. Both now wait for the
+# same randomly drawn moment, which comfortably outlasts a normal round trip.
+# A 403 that arrives after its deadline is answered late and is
+# distinguishable; that is the residual, and it needs a slow Discord. Tests
+# set this to (0, 0).
+_REFUSAL_WINDOW_SEC = (1.0, 2.0)
+
+
+def _refusal_deadline() -> float:
+    lo, hi = _REFUSAL_WINDOW_SEC
+    return asyncio.get_running_loop().time() + random.uniform(lo, hi)
+
+
+async def _sleep_until(deadline: float) -> None:
+    delay = deadline - asyncio.get_running_loop().time()
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+
+def _plain(text: str) -> str:
+    """Drop control and format characters: bidi overrides, zero-width joiners
+    and the like, which can reorder or hide text in the recipient's client."""
+    return "".join(ch for ch in text if unicodedata.category(ch) not in ("Cc", "Cf"))
+
+
+def _relay_author_line(user) -> str:
+    """Who a relayed message says it is from: "@username · Display".
+
+    The @username leads because it is the one part nobody can borrow: unique
+    across Discord, from a character set with no room for tricks. The display
+    name is sender-controlled twice over — a guild nickname can be set to
+    anyone's name, and it can carry a "(@alice)" of its own, which made
+    "Display (@username)" read as "Alice (@alice) (@mallory)". So it comes
+    second, stripped of handle syntax ('@' and parentheses) and of anything
+    that can reorder or hide text.
+    """
+    handle = "@" + _plain(user.name)
+    display = _plain(getattr(user, "display_name", None) or "")
+    display = " ".join(display.replace("@", "").replace("(", "").replace(")", "").split())[:64]
+    if not display or display == user.name:
+        return handle[:256]
+    return f"{handle} \u00b7 {display}"[:256]
+
+
+def _audit_digest(body: str) -> str:
+    """A keyed fingerprint of a relay body for audit.log — never the body.
+
+    The plan specified sha256(body)[:16]. Unkeyed, that IS the message for
+    anything short or guessable: "ok", "yes", "running late" fall to a
+    dictionary in microseconds. Keyed with the host's persisted secret, the
+    same body still yields the same token — one message sprayed at thirty
+    people is still visibly one message — but the log alone cannot be reversed.
+    The subkey is derived under its own label so this never shares key
+    material with the chat cookie it is borrowed from.
+    """
+    key = hmac.new(fritz_utils.CHAT_COOKIE_SECRET.encode("utf-8"),
+                   b"relay-audit-digest-v1", hashlib.sha256).digest()
+    return hmac.new(key, body.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+
+
+async def _settle(fn, relay_id: str, *args) -> None:
+    """Record how a relay ended without letting a store error eat the reply.
+
+    On the failure paths the sender must still be told nothing was sent; a
+    bookkeeping error there is logged, and the reservation it leaves behind
+    stops holding quota by itself after RESERVATION_GRACE_SEC.
+    """
+    try:
+        await run_blocking(fn, relay_id, *args)
+    except Exception as e:
+        # getattr: this handler must not be able to raise. A partial or a
+        # wrapped callable has no __name__, and an AttributeError here would
+        # take down exactly the reply this function exists to protect.
+        logger.error("relay %s: %s failed: %s", relay_id,
+                     getattr(fn, "__name__", repr(fn)), e)
+
+
+async def _answer(interaction: discord.Interaction, text: str, **kwargs) -> None:
+    """Send a /tell reply, and never let a failure to send it escape.
+
+    Once the relay's outcome is decided, a failure to REPORT it must not reach
+    the cog error handler. Its copy ("Discord declined to carry that message")
+    would tell a sender whose message WAS delivered that it was not, and a
+    sender who believes that sends it again. Exception, not BaseException:
+    cancellation still propagates.
+    """
+    try:
+        await interaction.followup.send(text, ephemeral=True, **kwargs)
+    except Exception as e:
+        logger.warning("could not deliver a /tell reply: %s", type(e).__name__)
 
 
 class FritzCommands(commands.Cog):
@@ -796,3 +933,233 @@ class FritzCommands(commands.Cog):
             f"✅ Workspace set to `{expanded}`. File tools active in conversations.",
             ephemeral=True,
         )
+
+    # ── Direct-message relay ──────────────────────────────────────────────────
+    # plans/12-direct-message-relay.md. The admission rules — caps, blocks, and
+    # the order that keeps a block unprobeable — live in relay_store, not here,
+    # so the phase-2 agent tool cannot route around them.
+
+    # guild_only alone serialises only the deprecated dm_permission field;
+    # allowed_contexts sends the current one. allowed_installs pins HOW Fritz
+    # is present: without it, a copy of Fritz user-installed into someone's
+    # account can run /tell from a server Fritz was never invited to, and DM
+    # its members. All three on the Group, because on a subcommand they are
+    # silently dropped; and all three are enforced by Discord, not by the
+    # library, so tell_message checks both conditions itself as well.
+    tell = app_commands.Group(
+        name="tell",
+        description="Carry a message to someone in this server, by DM",
+        guild_only=True,
+        allowed_contexts=app_commands.AppCommandContext(guild=True),
+        allowed_installs=app_commands.AppInstallationType(guild=True),
+    )
+
+    @tell.command(name="message",
+                  description="Deliver your exact words to someone in this server, by DM")
+    @app_commands.describe(
+        recipient="Who to tell. They must be a member of this server.",
+        message="Your words. They are delivered exactly as written, under your name.",
+    )
+    async def tell_message(self, interaction: discord.Interaction,
+                           recipient: discord.Member,
+                           message: app_commands.Range[str, 1, TELL_MAX_CHARS]):
+        # `recipient: discord.Member`, not User: Discord resolves a Member only
+        # for someone actually in this guild, with no member cache and no HTTP
+        # call, and the library rejects anything else before this runs. That IS
+        # the "anyone in a shared server" rule. User.mutual_guilds would be the
+        # obvious alternative and is a trap: it scans the member cache, and the
+        # members intent is off, so it would silently say no.
+        METRICS.increment("discord_commands.tell.message")
+        # First, always. Opening the DM and sending is two round trips against
+        # a three-second acknowledgement deadline, and either can sleep on a 429.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        # Drawn now, before anything is decided, so that a block and a 403 are
+        # measured from the same start. See _REFUSAL_WINDOW_SEC.
+        deadline = _refusal_deadline()
+
+        if interaction.guild_id is None or not interaction.is_guild_integration():
+            await _answer(interaction,
+                          "I carry messages between members of a server I have been "
+                          "invited to. Do ask me from inside one. " + _NOTHING_SENT)
+            return
+        if not message.strip():
+            # An embed with a blank description does not error; it simply
+            # arrives empty. Discord's min_length does not stop whitespace.
+            await _answer(interaction, "There is nothing there to carry. " + _NOTHING_SENT)
+            return
+
+        sender_id = _identity(interaction)
+        recipient_id = canonical_user_id("discord", recipient.id)
+        fritz = getattr(self.bot, "user", None)
+        try:
+            outcome = await run_blocking(
+                relay_store.reserve_send, sender_id, recipient_id, message,
+                guild_id=interaction.guild_id,
+                recipient_is_bot=bool(recipient.bot),
+                recipient_is_fritz=fritz is not None and recipient.id == fritz.id,
+            )
+        except Exception as e:
+            await _reply_error(interaction, "relay.reserve", e,
+                               note="I could not arrange that. " + _NOTHING_SENT)
+            return
+
+        if not outcome.ok:
+            METRICS.increment(f"relay.denied.{outcome.reason}")
+            audit_log("relay_denied", sender=sender_id, recipient=recipient_id,
+                      guild_id=interaction.guild_id, reason=outcome.reason,
+                      chars=len(message), body_digest=_audit_digest(message))
+            if outcome.relay_id is not None:
+                # A block. It left a reservation open, exactly as a send
+                # heading for a 403 does, and is settled the same way.
+                await self._refuse(interaction, outcome.relay_id, deadline)
+                return
+            await _answer(interaction, outcome.message)
+            return
+
+        await self._deliver_relay(interaction, outcome, recipient, message, deadline)
+
+    async def _refuse(self, interaction: discord.Interaction, relay_id: str,
+                      deadline: float) -> None:
+        """Settle and answer a recipient-side refusal, on the shared schedule.
+
+        Both kinds come through here — a block, and Discord's 403 — so that
+        they match in what the sender reads (REFUSED), in the row left behind
+        (refused, charged to the sender), in when the answer arrives, and in
+        when the reservation stops counting toward the recipient's inbox.
+        Review found each of those, in turn, telling them apart.
+        """
+        await _sleep_until(deadline)
+        await _settle(relay_store.mark_refused, relay_id)
+        METRICS.increment("relay.refused")
+        await _answer(interaction, relay_store.REFUSED)
+
+    async def _deliver_relay(self, interaction: discord.Interaction,
+                             reservation: "relay_store.Reservation",
+                             recipient: discord.Member, message: str,
+                             deadline: float) -> None:
+        guild = interaction.guild
+        where = _plain(guild.name) if guild is not None and guild.name else ""
+        where = where or "a server you share"
+        embed = discord.Embed(description=message, colour=FRITZ_COLOUR,
+                              timestamp=discord.utils.utcnow())
+        embed.set_author(name=_relay_author_line(interaction.user),
+                         icon_url=interaction.user.display_avatar.url)
+        embed.set_footer(text=f"Sent with /tell from {where}. "
+                              "The words are theirs; I merely carry them.")
+
+        # One try covers both round trips: Member.send opens the DM channel
+        # itself, and either request can be the one that fails. Forbidden and
+        # NotFound are HTTPException subclasses, so they come first; RateLimited
+        # is NOT one, so it must precede the HTTPException clause or it would
+        # fall through to the generic handler.
+        audit = dict(sender=reservation.sender_id, recipient=reservation.recipient_id,
+                     relay_id=reservation.id, guild_id=interaction.guild_id,
+                     chars=len(message), body_digest=_audit_digest(message))
+        try:
+            sent = await recipient.send(embed=embed,
+                                        allowed_mentions=discord.AllowedMentions.none())
+        except discord.Forbidden as e:
+            # The recipient's side refused: DMs closed, or Fritz blocked.
+            # Terminal — never retried, because repeated 403s to a closed inbox
+            # are what Discord's anti-spam reads as abuse, and enforcement
+            # lands on the bot's token.
+            logger.info("relay %s refused by Discord: status=%s code=%s",
+                        reservation.id, e.status, e.code)
+            audit_log("relay_refused", discord_code=e.code, **audit)
+            await self._refuse(interaction, reservation.id, deadline)
+            return
+        except discord.NotFound as e:
+            await self._relay_failed(interaction, reservation, audit, e,
+                                     "Discord could not find that account. " + _NOTHING_SENT)
+            return
+        except discord.RateLimited as e:
+            await self._relay_failed(
+                interaction, reservation, audit, e,
+                f"Discord has asked me to wait {e.retry_after:.0f} seconds before "
+                f"sending more. {_NOTHING_SENT} Do try again shortly.")
+            return
+        except discord.DiscordServerError as e:
+            await self._relay_failed(
+                interaction, reservation, audit, e,
+                f"Discord is having difficulties of its own. {_NOTHING_SENT} "
+                "Do try again shortly.")
+            return
+        except discord.HTTPException as e:
+            if e.status == 400:
+                # The content itself: Discord's harmful-link filter, or a body
+                # it will not accept. The sender's doing, so the sender's
+                # charge — see relay_store.STATUS_REJECTED.
+                await self._relay_failed(
+                    interaction, reservation, audit, e,
+                    f"Discord declined the message as written. {_NOTHING_SENT}",
+                    mark=relay_store.mark_rejected)
+                return
+            if e.status == 429:
+                note = f"Discord is rate-limiting me. {_NOTHING_SENT} Try again in a minute."
+            else:
+                note = f"Discord would not take that message. {_NOTHING_SENT}"
+            await self._relay_failed(interaction, reservation, audit, e, note)
+            return
+        except Exception as e:
+            await self._relay_failed(interaction, reservation, audit, e,
+                                     f"Something went wrong on my side. {_NOTHING_SENT}")
+            return
+
+        recorded = True
+        try:
+            await run_blocking(relay_store.mark_sent, reservation.id,
+                               sent.id, sent.channel.id)
+        except Exception as e:
+            # Delivered, and it cannot be un-delivered. Say so, rather than
+            # reporting a failure that did not happen.
+            recorded = False
+            logger.error("relay %s delivered but not recorded: %s", reservation.id, e)
+        METRICS.increment("relay.delivered")
+        audit_log("relay_sent", **audit)
+
+        receipt = await self._relay_receipt(interaction, recipient, message, where)
+        confirm = f"Delivered to {recipient.mention}."
+        if not receipt:
+            confirm += (" I could not leave you a copy in your own DMs; if you "
+                        "have them closed, you will have no record of what you sent.")
+        if not recorded:
+            confirm += " I failed to note it down, however, so I cannot vouch for what happens next."
+        await _answer(interaction, confirm,
+                      allowed_mentions=discord.AllowedMentions.none())
+
+    async def _relay_failed(self, interaction: discord.Interaction,
+                            reservation: "relay_store.Reservation", audit: dict,
+                            exc: BaseException, note: str, *,
+                            mark=relay_store.mark_failed) -> None:
+        """The send failed. Always answered, with a ref for the log.
+
+        mark_failed (the default) is free to the sender: an outage, a 429,
+        a bug of ours. mark_rejected is charged: Discord refused the content.
+        """
+        status = getattr(exc, "status", None)
+        reason = type(exc).__name__ + (f" {status}" if status else "")
+        await _settle(mark, reservation.id, reason)
+        METRICS.increment("relay.failed")
+        audit_log("relay_failed", error=reason, **audit)
+        await _reply_error(interaction, "relay.send", exc, note=note)
+
+    async def _relay_receipt(self, interaction: discord.Interaction,
+                             recipient: discord.Member, message: str,
+                             where: str) -> bool:
+        """Leave the sender a copy of what went, in their own DMs.
+
+        Only ever called after a delivery. Best-effort: the relay already
+        stands. Mentions are suppressed on this leg too.
+        """
+        embed = discord.Embed(description=message, colour=FRITZ_COLOUR,
+                              timestamp=discord.utils.utcnow())
+        embed.set_author(name=f"To {_relay_author_line(recipient)}"[:256],
+                         icon_url=recipient.display_avatar.url)
+        embed.set_footer(text=f"Your /tell from {where}, as delivered.")
+        try:
+            await interaction.user.send(embed=embed,
+                                        allowed_mentions=discord.AllowedMentions.none())
+        except Exception as e:
+            logger.info("relay receipt not delivered to sender: %s", type(e).__name__)
+            return False
+        return True
