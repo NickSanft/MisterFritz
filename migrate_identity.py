@@ -64,12 +64,32 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 
 
 # (table, key column). Order is cosmetic — each is rewritten independently.
+#
+# A table may appear more than once, one entry per identity column. That is
+# why every result below is keyed "table.column": keyed on the table alone,
+# the second relay_messages entry silently replaced the first, so a legacy id
+# present only in sender_id was neither shown nor demanded, --apply went
+# ahead, nothing was rewritten, and the tool reported success.
 _SQLITE_TARGETS = (
     ("schedules", "user_id"),
     ("workspaces", "user_id"),
     ("user_aliases", "user_id"),
     ("store", "namespace"),
+    ("relay_messages", "sender_id"),
+    ("relay_messages", "recipient_id"),
+    ("relay_optouts", "user_id"),
+    ("relay_optouts", "blocked_id"),
 )
+# Values in an identity column that are NOT identities, and so must be neither
+# surveyed nor rewritten. relay_optouts.blocked_id = "*" means "blocked
+# everyone" (relay_store.BLOCK_EVERYONE). It is not canonical, so without this
+# the survey reported it as an unmapped legacy key and --apply refused to run
+# for as long as anyone anywhere had a blanket block. Duplicated as a literal
+# rather than imported, to keep this tool's imports to fritz_utils alone; a
+# test pins the two together.
+_NOT_IDENTITIES: dict[tuple[str, str], frozenset[str]] = {
+    ("relay_optouts", "blocked_id"): frozenset({"*"}),
+}
 # thread_id needs the channel-suffix treatment, so it is handled separately.
 _THREAD_TARGETS = (
     ("checkpoints", "thread_id"),
@@ -88,7 +108,8 @@ def _distinct_keys(conn: sqlite3.Connection, table: str, column: str) -> dict[st
     rows = conn.execute(
         f"SELECT {column}, COUNT(*) FROM {table} GROUP BY {column}"  # noqa: S608 — names are module constants
     ).fetchall()
-    return {r[0]: r[1] for r in rows if r[0]}
+    skip = _NOT_IDENTITIES.get((table, column), frozenset())
+    return {r[0]: r[1] for r in rows if r[0] and r[0] not in skip}
 
 
 def _thread_identity(thread_id: str) -> str:
@@ -103,7 +124,7 @@ def survey(db_path: str) -> dict:
         for table, column in _SQLITE_TARGETS:
             keys = _distinct_keys(conn, table, column)
             if keys or _table_exists(conn, table):
-                found[table] = keys
+                found[f"{table}.{column}"] = keys
         for table, column in _THREAD_TARGETS:
             raw = _distinct_keys(conn, table, column)
             # Collapse `discord-1#999` down to `discord-1` so the operator maps
@@ -114,7 +135,7 @@ def survey(db_path: str) -> dict:
                     collapsed.get(_thread_identity(thread_id), 0) + count
                 )
             if collapsed or _table_exists(conn, table):
-                found[table] = collapsed
+                found[f"{table}.{column}"] = collapsed
     return found
 
 
@@ -155,9 +176,10 @@ def _rewrite_column(conn: sqlite3.Connection, table: str, column: str,
     """
     if not _table_exists(conn, table):
         return 0
+    skip = _NOT_IDENTITIES.get((table, column), frozenset())
     changed = 0
     for old, new in mapping.items():
-        if old == new:
+        if old == new or old in skip:
             continue
         cur = conn.execute(
             f"UPDATE {table} SET {column} = ? WHERE {column} = ?",  # noqa: S608
@@ -199,9 +221,9 @@ def rewrite_sqlite(db_path: str, mapping: dict[str, str]) -> dict[str, int]:
     counts: dict[str, int] = {}
     with sqlite3.connect(db_path) as conn:
         for table, column in _SQLITE_TARGETS:
-            counts[table] = _rewrite_column(conn, table, column, mapping)
+            counts[f"{table}.{column}"] = _rewrite_column(conn, table, column, mapping)
         for table, column in _THREAD_TARGETS:
-            counts[table] = _rewrite_threads(conn, table, column, mapping)
+            counts[f"{table}.{column}"] = _rewrite_threads(conn, table, column, mapping)
         conn.commit()
     return counts
 

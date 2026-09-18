@@ -86,8 +86,8 @@ class TestDryRun(_MigrationTestCase):
     def test_survey_collapses_channel_suffixes(self):
         # The operator maps identities, not one entry per channel.
         found = migrate_identity.survey(self.db)
-        self.assertIn("divora", found["checkpoints"])
-        self.assertNotIn("divora#999", found["checkpoints"])
+        self.assertIn("divora", found["checkpoints.thread_id"])
+        self.assertNotIn("divora#999", found["checkpoints.thread_id"])
 
 
 class TestApply(_MigrationTestCase):
@@ -320,6 +320,88 @@ class TestReverseIsHonest(_MigrationTestCase):
         path = self._write_mapping({"discord-1": "discord-1"})
         rc = self._run("--apply", "--reverse", path)
         self.assertEqual(rc, 0)
+
+
+class TestRelayTables(_MigrationTestCase):
+    """relay_messages has TWO identity columns, and relay_optouts stores a
+    sentinel in one of its identity columns. Both broke assumptions the tool
+    had never had to make."""
+
+    def setUp(self):
+        super().setUp()
+        with sqlite3.connect(self.db) as c:
+            c.execute("CREATE TABLE relay_messages (id TEXT PRIMARY KEY, "
+                      "sender_id TEXT, recipient_id TEXT)")
+            c.execute("CREATE TABLE relay_optouts (user_id TEXT, blocked_id TEXT, "
+                      "PRIMARY KEY (user_id, blocked_id))")
+            c.commit()
+
+    def _insert(self, sql, *rows):
+        with sqlite3.connect(self.db) as c:
+            c.executemany(sql, rows)
+            c.commit()
+
+    def test_survey_reports_both_identity_columns_of_one_table(self):
+        """Keyed on the table alone, the second column replaced the first."""
+        self._insert("INSERT INTO relay_messages VALUES (?,?,?)",
+                     ("r1", "divora", "discord-2"))
+        found = migrate_identity.survey(self.db)
+        self.assertIn("divora", found["relay_messages.sender_id"])
+        self.assertIn("discord-2", found["relay_messages.recipient_id"])
+
+    def test_apply_refuses_when_only_a_sender_id_is_unmapped(self):
+        """The half-migrated outcome the tool's own error text exists to prevent:
+        the legacy key hid behind the recipient column, --apply went ahead,
+        rewrote nothing, and reported success."""
+        self._insert("INSERT INTO relay_messages VALUES (?,?,?)",
+                     ("r1", "stranger", "discord-2"))
+        rc = self._run("--apply", "--map", "divora=discord-1",
+                       "--map", "someone_else=discord-2")
+        self.assertEqual(rc, 2)
+        self.assertEqual(self._keys("relay_messages", "sender_id"), ["stranger"])
+
+    def test_both_columns_are_rewritten(self):
+        self._insert("INSERT INTO relay_messages VALUES (?,?,?)",
+                     ("r1", "divora", "someone_else"),
+                     ("r2", "someone_else", "divora"))
+        rc = self._run("--apply", "--map", "divora=discord-1",
+                       "--map", "someone_else=discord-2")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._keys("relay_messages", "sender_id"), ["discord-1", "discord-2"])
+        self.assertEqual(self._keys("relay_messages", "recipient_id"), ["discord-1", "discord-2"])
+
+    def test_a_blanket_block_does_not_block_the_migration(self):
+        """"*" is not canonical. Treated as an identity, it made every --apply
+        refuse for as long as anyone had a blanket block in place."""
+        self._insert("INSERT INTO relay_optouts VALUES (?,?)",
+                     ("divora", "*"), ("discord-5", "divora"))
+        found = migrate_identity.survey(self.db)
+        self.assertNotIn("*", found["relay_optouts.blocked_id"])
+        rc = self._run("--apply", "--map", "divora=discord-1",
+                       "--map", "someone_else=discord-2")
+        self.assertEqual(rc, 0)
+        with sqlite3.connect(self.db) as c:
+            rows = sorted(c.execute("SELECT user_id, blocked_id FROM relay_optouts"))
+        self.assertEqual(rows, [("discord-1", "*"), ("discord-5", "discord-1")])
+
+    def test_the_sentinel_is_never_rewritten_even_if_mapped(self):
+        self._insert("INSERT INTO relay_optouts VALUES (?,?)", ("discord-5", "*"))
+        with sqlite3.connect(self.db) as c:
+            migrate_identity._rewrite_column(c, "relay_optouts", "blocked_id",
+                                             {"*": "discord-9"})
+            c.commit()
+        self.assertEqual(self._keys("relay_optouts", "blocked_id"), ["*"])
+
+    def test_sentinel_matches_the_store(self):
+        import relay_store
+        self.assertIn(relay_store.BLOCK_EVERYONE,
+                      migrate_identity._NOT_IDENTITIES[("relay_optouts", "blocked_id")])
+
+    def test_every_relay_identity_column_is_registered(self):
+        targets = set(migrate_identity._SQLITE_TARGETS)
+        for column in (("relay_messages", "sender_id"), ("relay_messages", "recipient_id"),
+                       ("relay_optouts", "user_id"), ("relay_optouts", "blocked_id")):
+            self.assertIn(column, targets)
 
 
 if __name__ == "__main__":
