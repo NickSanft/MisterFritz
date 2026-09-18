@@ -268,6 +268,64 @@ AUDIT_LOG_PATH = os.environ.get("AUDIT_LOG_PATH", "audit.log")
 _AUDIT_LOCK = threading.Lock()
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    """Read a size/count knob, falling back to the default when unusable.
+
+    Falls back rather than clamping to 1 (which is what fritz_utils'
+    _at_least_one does for worker counts): a 1-byte cap would rotate on every
+    write and a 0-backup policy would delete audit history, and neither is a
+    plausible thing to have meant. Someone setting 0 hoping to switch rotation
+    off gets rotation — the safe reading for a log of who deleted what.
+    Parsed here rather than in fritz_utils because this module imports nothing
+    from the repo, and that is worth keeping.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        logger.warning("%s=%r is not usable; using %d.", name, raw, default)
+        return default
+    return value
+
+
+# Size-based rotation. audit_log used to be a bare append with no cap, and the
+# relay feature puts a line in it per message relayed — an unbounded file of
+# who-messaged-whom that deliberately survives /forget all. Worst case on disk
+# is (BACKUPS + 1) * MAX_BYTES; 30 MiB at the defaults.
+AUDIT_LOG_MAX_BYTES = _positive_int_env("AUDIT_LOG_MAX_BYTES", 5 * 1024 * 1024)
+AUDIT_LOG_BACKUPS = _positive_int_env("AUDIT_LOG_BACKUPS", 5)
+
+
+def _rotate_audit_log(path: str, incoming: int) -> None:
+    """Shift audit.log -> .1 -> .2 ... if the next write would cross the cap.
+
+    The caller holds _AUDIT_LOCK, which covers writers in this process only; a
+    second process appending to the same file could race a rotation. Nothing
+    does that today.
+
+    Raises OSError on failure. The caller treats that as "write to the
+    oversized file anyway": an audit event outranks the size cap.
+    """
+    try:
+        size = os.path.getsize(path)
+    except FileNotFoundError:
+        return
+    # size == 0: one line bigger than the whole cap should land in a fresh
+    # file, not shuffle an empty one into the backups.
+    if size == 0 or size + incoming <= AUDIT_LOG_MAX_BYTES:
+        return
+    # os.replace overwrites, so the oldest backup falls off the end.
+    for n in range(AUDIT_LOG_BACKUPS - 1, 0, -1):
+        older = f"{path}.{n}"
+        if os.path.exists(older):
+            os.replace(older, f"{path}.{n + 1}")
+    os.replace(path, f"{path}.1")
+
+
 def audit_log(event: str, **fields) -> None:
     """Append a single JSON event to AUDIT_LOG_PATH.
 
@@ -284,11 +342,19 @@ def audit_log(event: str, **fields) -> None:
     except Exception as e:
         logger.warning("audit_log JSON encode failed (%s); event=%s", e, event)
         return
-    try:
-        with _AUDIT_LOCK, open(AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except OSError as e:
-        logger.warning("audit_log write failed: %s", e)
+    line += "\n"
+    with _AUDIT_LOCK:
+        try:
+            _rotate_audit_log(AUDIT_LOG_PATH, len(line.encode("utf-8")))
+        except OSError as e:
+            # Typically Windows refusing to rename a file another process has
+            # open. Keep the event; the next write will try again.
+            logger.warning("audit_log rotation failed, appending anyway: %s", e)
+        try:
+            with open(AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(line)
+        except OSError as e:
+            logger.warning("audit_log write failed: %s", e)
 
 
 def get_health_snapshot() -> dict:

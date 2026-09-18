@@ -1,5 +1,10 @@
+import json
+import os
+import tempfile
 import time
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from observability import (
     Metrics, _format_duration,
@@ -208,6 +213,98 @@ class TestFormatHealthText(unittest.TestCase):
             self.assertIn("ask_stuff", text)
         finally:
             observability.METRICS = original
+
+
+class TestAuditLogRotation(unittest.TestCase):
+    """audit_log was a bare append with no cap. Relay traffic makes that a
+    disk-fill bug whose contents are who-messaged-whom."""
+
+    def setUp(self):
+        import observability
+        self.obs = observability
+        self.dir = Path(tempfile.mkdtemp())
+        self.path = self.dir / "audit.log"
+        self._patch = patch.multiple(observability, AUDIT_LOG_PATH=str(self.path),
+                                     AUDIT_LOG_MAX_BYTES=400, AUDIT_LOG_BACKUPS=2)
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+
+    def events(self, path):
+        return [json.loads(ln)["n"] for ln in Path(path).read_text(encoding="utf-8").splitlines()]
+
+    def test_writes_under_the_cap_do_not_rotate(self):
+        self.obs.audit_log("e", n=1)
+        self.obs.audit_log("e", n=2)
+        self.assertEqual(self.events(self.path), [1, 2])
+        self.assertFalse(Path(f"{self.path}.1").exists())
+
+    def test_crossing_the_cap_moves_the_old_file_aside(self):
+        for n in range(20):
+            self.obs.audit_log("e", n=n, pad="x" * 40)
+        self.assertTrue(Path(f"{self.path}.1").exists())
+        self.assertLessEqual(self.path.stat().st_size, 400 + 100)
+        # Nothing lost across the boundary: the newest file continues exactly
+        # where the backup stops.
+        self.assertEqual(self.events(f"{self.path}.1")[-1] + 1, self.events(self.path)[0])
+
+    def test_oldest_backup_falls_off_the_end(self):
+        for n in range(200):
+            self.obs.audit_log("e", n=n, pad="x" * 40)
+        self.assertTrue(Path(f"{self.path}.2").exists())
+        self.assertFalse(Path(f"{self.path}.3").exists())
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()),
+                         ["audit.log", "audit.log.1", "audit.log.2"])
+
+    def test_one_line_bigger_than_the_cap_is_still_written(self):
+        # The file must EXIST and be empty: a missing file returns before the
+        # size check, so a test that skips this line cannot tell the guard is
+        # there at all.
+        self.path.touch()
+        self.obs.audit_log("e", n=1, pad="x" * 1000)
+        self.assertEqual(self.events(self.path), [1])
+        self.assertFalse(Path(f"{self.path}.1").exists(), "rotated an empty file")
+
+    def test_a_failed_rotation_keeps_the_event_and_does_not_raise(self):
+        """Windows refuses to rename a file another process has open."""
+        for n in range(8):
+            self.obs.audit_log("e", n=n, pad="x" * 40)
+        with patch.object(self.obs.os, "replace", side_effect=PermissionError("locked")),              self.assertLogs("observability", level="WARNING"):
+            self.obs.audit_log("e", n=99, pad="x" * 400)
+        self.assertEqual(self.events(self.path)[-1], 99)
+
+
+class TestAuditKnobParsing(unittest.TestCase):
+    def parse(self, raw):
+        import observability
+        env = {} if raw is None else {"_KNOB": raw}
+        with patch.dict(os.environ, env, clear=False):
+            if raw is None:
+                os.environ.pop("_KNOB", None)
+            return observability._positive_int_env("_KNOB", 7)
+
+    def test_unset_uses_the_default(self):
+        self.assertEqual(self.parse(None), 7)
+
+    def test_a_real_value_is_used(self):
+        self.assertEqual(self.parse("123"), 123)
+
+    def test_zero_is_not_a_way_to_switch_rotation_off(self):
+        """A 0-byte cap would rotate every write; 0 backups deletes history."""
+        for raw in ("0", "-5", "lots"):
+            with self.subTest(raw=raw), self.assertLogs("observability", level="WARNING"):
+                self.assertEqual(self.parse(raw), 7)
+
+
+class TestTestsDoNotWriteTheRealAuditLog(unittest.TestCase):
+    def test_audit_log_path_is_sandboxed(self):
+        """Every test run used to append to the working tree's audit.log."""
+        import observability
+        repo = Path(__file__).resolve().parents[1]
+        target = Path(observability.AUDIT_LOG_PATH).resolve()
+        self.assertNotEqual(target.parent, repo)
+        self.assertFalse(str(target).startswith(str(repo) + os.sep))
 
 
 if __name__ == "__main__":

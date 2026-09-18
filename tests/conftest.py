@@ -32,6 +32,11 @@ os.environ.setdefault("SCHEDULE_DB", os.path.join(_SANDBOX, "schedule.db"))
 os.environ.setdefault("CHROMA_DB_PATH", os.path.join(_SANDBOX, "chroma_store"))
 os.environ.setdefault("WORKSPACES_ROOT", os.path.join(_SANDBOX, "workspaces"))
 os.environ.setdefault("DOC_FOLDER", os.path.join(_SANDBOX, "input"))
+# observability reads this at import and appends to it from /forget, /export,
+# the file tools and the chat login path. Unset, every test run wrote into the
+# REAL ./audit.log — which is how that file reached 600 KB of "_test_root_user_"
+# exec events and test logins, and why its size said nothing about real use.
+os.environ.setdefault("AUDIT_LOG_PATH", os.path.join(_SANDBOX, "audit.log"))
 # Stops fritz_utils writing .chat_cookie_secret into the CWD at import time.
 os.environ.setdefault("CHAT_COOKIE_SECRET", "conftest-test-cookie-secret")
 # mister_fritz and document_engine write graph-diagram PNGs to the CWD at
