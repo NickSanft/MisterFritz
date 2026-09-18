@@ -13,9 +13,54 @@ Hence everything below is a TOP-LEVEL STATEMENT, not a fixture. A fixture
 would run far too late and the artifacts would land in the working tree.
 """
 import os
+import re
 import sys
 import tempfile
+import tomllib
+from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
+
+# ---------------------------------------------------------------------------
+# 0. Refuse to run under a discord.py older than the one the project declares.
+#
+#    This machine's global Python has discord.py 2.4.0 AND pytest, so
+#    `python -m pytest` from the wrong shell runs the whole suite against a
+#    library that lacks MessageReferenceType — and mostly passes, because the
+#    tests mock Discord. A green run that exercised the wrong library is worse
+#    than a red one. The floor is read from pyproject.toml so the two cannot
+#    drift apart.
+# ---------------------------------------------------------------------------
+
+
+def _declared_discord_floor() -> tuple[int, int]:
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    deps = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["dependencies"]
+    for dep in deps:
+        m = re.fullmatch(r"\s*discord\.py\s*>=\s*(\d+)\.(\d+).*", dep)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    raise RuntimeError("pyproject.toml no longer declares discord.py>=X.Y; update conftest.py")
+
+
+def pytest_configure(config):
+    # A hook rather than a top-level statement purely for the message: an
+    # exit raised while conftest is importing is reported as "ImportError
+    # while loading conftest", which sends people looking for a missing module.
+    # It still runs before collection, i.e. before any test module is imported.
+    import discord
+
+    floor = _declared_discord_floor()
+    if tuple(discord.version_info[:2]) < floor:
+        pytest.exit(
+            f"discord.py {discord.__version__} is older than the {floor[0]}.{floor[1]} "
+            f"that pyproject.toml requires. This interpreter is {sys.executable}; "
+            f"run the suite with the project venv instead: "
+            f".venv/Scripts/python.exe -m pytest",
+            returncode=4,
+        )
+
 
 # ---------------------------------------------------------------------------
 # 1. Point every CWD-relative artifact at a per-session temp directory.
