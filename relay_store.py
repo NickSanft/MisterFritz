@@ -53,7 +53,20 @@ RESERVATION_GRACE_SEC = 60
 # but no code path relies on it: every INSERT names its status explicitly.
 STATUS_RESERVED = "reserved"
 STATUS_DELIVERED = "delivered"
+# Our side could not deliver: a Discord outage, a network error, a bug. Not the
+# sender's doing, so it costs them nothing.
 STATUS_FAILED = "failed"
+# The recipient's side would not take it: they blocked the sender, blocked
+# everyone, or have their Discord DMs closed. One status for all three, written
+# identically by both paths — see _REFUSED_ERROR.
+STATUS_REFUSED = "refused"
+
+# The `error` stored on every refused row, whichever path refused it. The
+# Discord error code for a closed-DM refusal goes to the log line, never here:
+# PR 6's /export shows a sender their own rows, and a row that said "50007"
+# where another said nothing would tell them which of their refusals was a
+# block.
+_REFUSED_ERROR = "recipient_refused"
 
 # The one string every recipient-side refusal returns, verbatim.
 #
@@ -244,27 +257,40 @@ def list_blocks(user_id: str) -> list[str]:
 # The admission gate
 # ---------------------------------------------------------------------------
 
-def _count_and_oldest(conn, column: str, user_id: str,
-                      window_start: str, stale_before: str) -> tuple[int, str | None]:
+def _count_and_oldest(conn, column: str, user_id: str, window_start: str,
+                      stale_before: str, *, include_refused: bool) -> tuple[int, str | None]:
     """Messages charged to `user_id` in the window, and the oldest one's time.
 
     Charged means delivered, or reserved recently enough to still be in
-    flight. Deliberately excludes:
+    flight — plus, on the SENDER's side only, refused. Deliberately excludes:
 
-    - `failed` rows: nothing reached the recipient, so charging the sender for
-      Discord being down would be a penalty for someone else's outage;
+    - `failed` rows: nothing reached the recipient for reasons on our side, so
+      charging the sender would be a penalty for someone else's outage;
     - `reserved` rows older than the grace window: those are crashes, and a
       crash that permanently consumed quota would be unrecoverable without
-      manual DB surgery.
+      manual DB surgery;
+    - `refused` rows on the RECIPIENT's side: nothing reached them, and
+      counting it would let a blocked harasser exhaust their inbound cap and
+      lock out everyone else trying to reach them.
+
+    Why refused rows charge the sender at all: a refusal from a block costs
+    nothing to discover, but a refusal from closed DMs costs a real Discord
+    call that ends in a 403 — the pattern Discord's anti-spam reads as abuse,
+    with enforcement landing on the bot's token. And the two must be charged
+    identically, or the rate limit itself becomes the block detector: ten
+    free attempts at one person and ten charged attempts at another would
+    tell the sender which of them had blocked them.
 
     The oldest charged row is what the retry time is computed from — it is the
     first one that will fall out of the window.
     """
+    settled = [STATUS_DELIVERED] + ([STATUS_REFUSED] if include_refused else [])
+    marks = ", ".join("?" * len(settled))
     row = conn.execute(
         f"""SELECT COUNT(*), MIN(created_at) FROM relay_messages
             WHERE {column} = ? AND created_at >= ?
-              AND (status = ? OR (status = ? AND created_at >= ?))""",
-        (user_id, window_start, STATUS_DELIVERED, STATUS_RESERVED, stale_before),
+              AND (status IN ({marks}) OR (status = ? AND created_at >= ?))""",
+        (user_id, window_start, *settled, STATUS_RESERVED, stale_before),
     ).fetchone()
     return (row[0] or 0), row[1]
 
@@ -285,6 +311,9 @@ def _rate_denial(reason: str, oldest: str | None, who: str) -> Denial:
     return Denial(reason=reason, message=f"{who}{when}", retry_at=retry_at)
 
 
+_RECIPIENT_REFUSALS = frozenset({"blocked_sender", "blocked_everyone"})
+
+
 def _gate(conn, sender_id: str, recipient_id: str, body: str,
           window_start: str, stale_before: str) -> Denial | None:
     """The checks that need the database, in order. None means "allowed".
@@ -292,7 +321,51 @@ def _gate(conn, sender_id: str, recipient_id: str, body: str,
     Runs inside the caller's BEGIN IMMEDIATE, which is why it takes a
     connection rather than opening its own: counting in one transaction and
     inserting in another is what makes the caps advisory.
+
+    THE ORDER IS THE PRIVACY PROPERTY. Every check that does not depend on
+    the recipient's choices comes first; the blocks come LAST, immediately
+    before the send. Then REFUSED always means "everything else was fine and
+    the recipient's side declined" — exactly what Discord's own 403 for
+    closed DMs means, since that can only be discovered at send time.
+
+    The plan specified the opposite ("most recipient-protective first") and
+    PR 1 shipped it. It was a free block detector: a 5,000-character message
+    came back REFUSED if the recipient had blocked you and "too long" if not
+    — definitive, because closed DMs are never reached for an oversized body,
+    and costing nothing, because a denial writes no row and spends no quota.
+    Being over your own hourly cap did the same. Do not move the blocks up.
     """
+    if len(body) > fritz_utils.RELAY_MAX_BODY_CHARS:
+        return Denial(
+            "body_too_long",
+            f"That message is {len(body)} characters; the limit is "
+            f"{fritz_utils.RELAY_MAX_BODY_CHARS}.",
+        )
+
+    sent, oldest = _count_and_oldest(
+        conn, "sender_id", sender_id, window_start, stale_before,
+        include_refused=True)
+    if sent >= fritz_utils.RELAY_MAX_PER_SENDER_PER_HOUR:
+        return _rate_denial(
+            "sender_rate_limited", oldest,
+            f"You have tried to relay {sent} messages in the past hour, which "
+            f"is the limit.")
+
+    # The only cap that constrains a brigade: many senders, one recipient.
+    # Before the blocks, for the same reason as everything else here: after
+    # them, "they have had enough messages" would only ever reach senders
+    # who were NOT blocked. It does tell a blocked sender roughly how busy
+    # their target's inbox is — a smaller leak than the block itself, and one
+    # any unblocked sender can already see.
+    received, oldest = _count_and_oldest(
+        conn, "recipient_id", recipient_id, window_start, stale_before,
+        include_refused=False)
+    if received >= fritz_utils.RELAY_MAX_INBOUND_PER_RECIPIENT_PER_HOUR:
+        return _rate_denial(
+            "recipient_rate_limited", oldest,
+            "They have received as many relayed messages this hour as I will "
+            "pass on.")
+
     blocks = {r[0] for r in conn.execute(
         "SELECT blocked_id FROM relay_optouts WHERE user_id = ? "
         "AND blocked_id IN (?, ?)",
@@ -302,32 +375,6 @@ def _gate(conn, sender_id: str, recipient_id: str, body: str,
         return Denial("blocked_sender", REFUSED)
     if BLOCK_EVERYONE in blocks:
         return Denial("blocked_everyone", REFUSED)
-
-    if len(body) > fritz_utils.RELAY_MAX_BODY_CHARS:
-        return Denial(
-            "body_too_long",
-            f"That message is {len(body)} characters; the limit is "
-            f"{fritz_utils.RELAY_MAX_BODY_CHARS}.",
-        )
-
-    sent, oldest = _count_and_oldest(
-        conn, "sender_id", sender_id, window_start, stale_before)
-    if sent >= fritz_utils.RELAY_MAX_PER_SENDER_PER_HOUR:
-        return _rate_denial(
-            "sender_rate_limited", oldest,
-            f"You have relayed {sent} messages in the past hour, which is "
-            f"the limit.")
-
-    # The only cap that constrains a brigade: many senders, one recipient.
-    # Last because its denial names no one — it is the least informative
-    # refusal, and the one it is safest to be explicit about.
-    received, oldest = _count_and_oldest(
-        conn, "recipient_id", recipient_id, window_start, stale_before)
-    if received >= fritz_utils.RELAY_MAX_INBOUND_PER_RECIPIENT_PER_HOUR:
-        return _rate_denial(
-            "recipient_rate_limited", oldest,
-            "They have received as many relayed messages this hour as I will "
-            "pass on.")
 
     return None
 
@@ -375,8 +422,9 @@ def reserve_send(
     if not fritz_utils.RELAY_ENABLED:
         return Denial("disabled", "The message relay is switched off.")
 
-    # Order is most recipient-protective first, and the recipient-side
-    # refusals all return the same string. See REFUSED.
+    # These three are facts about the recipient that anyone can see — it is a
+    # bot, it is you — so they leak nothing and can go first. Everything that
+    # depends on the recipient's CHOICES goes last; see _gate.
     #
     # Fritz is checked before the generic bot branch, which inverts the two as
     # the plan writes them. Deliberate, and please don't put it back: Fritz IS
@@ -416,6 +464,22 @@ def reserve_send(
         try:
             denial = _gate(conn, sender_id, recipient_id, body,
                            window_start, stale_before)
+            if denial is not None and denial.reason in _RECIPIENT_REFUSALS:
+                # Written, and charged to the sender, exactly as mark_refused
+                # records a closed-DM refusal — same status, same error, same
+                # closed_at == created_at. See _count_and_oldest for why the
+                # charge matters and _REFUSED_ERROR for why the row does.
+                conn.execute(
+                    """INSERT INTO relay_messages
+                       (id, sender_id, recipient_id, origin_id, body, composed,
+                        guild_id, status, error, created_at, expires_at, closed_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (rid, sender_id, recipient_id, origin_id, body, int(composed),
+                     guild_id, STATUS_REFUSED, _REFUSED_ERROR, created_at,
+                     expires_at, created_at),
+                )
+                conn.execute("COMMIT")
+                return denial
             if denial is not None:
                 conn.execute("ROLLBACK")
                 return denial
@@ -477,8 +541,38 @@ def mark_sent(relay_id: str, dm_message_id: int, dm_channel_id: int | None = Non
         raise RelayStoreError(f"no relay message with id {relay_id}")
 
 
+def mark_refused(relay_id: str) -> None:
+    """Record that the recipient's side refused the DM (Discord 403).
+
+    Leaves the row byte-for-byte as reserve_send leaves one refused by a
+    block: status, error and closed_at == created_at. Takes no reason on
+    purpose — the Discord code belongs in the caller's log line, and anything
+    written here would distinguish the two refusals on a later /export.
+    Still charged to the sender, like a block; see _count_and_oldest.
+    """
+    if not relay_id:
+        raise ValueError("relay_id is required")
+    _init_db()
+    try:
+        with sqlite3.connect(SCHEDULE_DB) as conn:
+            cur = conn.execute(
+                "UPDATE relay_messages SET status = ?, error = ?, "
+                "closed_at = created_at WHERE id = ?",
+                (STATUS_REFUSED, _REFUSED_ERROR, relay_id),
+            )
+            conn.commit()
+    except sqlite3.Error as e:
+        raise RelayStoreError(f"could not mark relay {relay_id} refused: {e}") from e
+    if cur.rowcount == 0:
+        raise RelayStoreError(f"no relay message with id {relay_id}")
+
+
 def mark_failed(relay_id: str, reason: str) -> None:
-    """Record that the DM did not go out. Releases the quota it held."""
+    """Record that the DM did not go out for reasons on OUR side.
+
+    Releases the quota it held. For a recipient-side refusal use mark_refused
+    instead — the difference is who is charged, and what /export can reveal.
+    """
     if not relay_id:
         raise ValueError("relay_id is required")
     _init_db()

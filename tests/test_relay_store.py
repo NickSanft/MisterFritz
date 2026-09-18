@@ -116,7 +116,8 @@ class TestCheckOrder(RelayStoreTestCase):
     """The whole order, pinned by peeling one condition off at a time.
 
     Every condition below is true at the start. Each assertion says which one
-    wins, so swapping any adjacent pair turns this red.
+    wins, so swapping any adjacent pair turns this red. The blocks are LAST:
+    see TestBlockStateIsNotProbeable for why that is the property, not taste.
     """
 
     def test_order_is_exactly_as_specified(self):
@@ -127,34 +128,129 @@ class TestCheckOrder(RelayStoreTestCase):
         self.store.block(recipient)                        # blocked everyone
         long_body = "x" * 5000                             # over the cap
 
-        def reason(**kw):
-            return self.send(sender, recipient, long_body, **kw).reason
+        def reason(body=long_body, **kw):
+            return self.send(sender, recipient, body, **kw).reason
 
-        # A bot recipient outranks everything, and Fritz outranks the bot copy.
+        # Facts anyone can see about the recipient come first, and Fritz
+        # outranks the generic bot copy.
         self.assertEqual(reason(recipient_is_bot=True, recipient_is_fritz=True),
                          "recipient_is_fritz")
         self.assertEqual(reason(recipient_is_bot=True), "recipient_is_bot")
         self.assertEqual(self.send(sender, sender, long_body).reason,
                          "recipient_is_sender")
 
-        self.assertEqual(reason(), "blocked_sender")
-        self.store.unblock(recipient, sender)
-        self.assertEqual(reason(), "blocked_everyone")
-        self.store.unblock(recipient)
+        # Then everything about the sender and the traffic...
         self.assertEqual(reason(), "body_too_long")
-
-        # Body now legal; the sender's own cap is next.
-        self.assertEqual(self.send(sender, recipient, "short").reason,
-                         "sender_rate_limited")
+        self.assertEqual(reason("short"), "sender_rate_limited")
         with patch.object(self.fu, "RELAY_MAX_PER_SENDER_PER_HOUR", 999):
-            self.assertEqual(self.send(sender, recipient, "short").reason,
-                             "recipient_rate_limited")
+            self.assertEqual(reason("short"), "recipient_rate_limited")
             with patch.object(self.fu, "RELAY_MAX_INBOUND_PER_RECIPIENT_PER_HOUR", 999):
+                # ...and the recipient's choices last of all.
+                self.assertEqual(reason("short"), "blocked_sender")
+                self.store.unblock(recipient, sender)
+                self.assertEqual(reason("short"), "blocked_everyone")
+                self.store.unblock(recipient)
                 self.assertTrue(self.send(sender, recipient, "short").ok)
 
     def test_disabled_relay_refuses_before_anything_else(self):
         with patch.object(self.fu, "RELAY_ENABLED", False):
             self.assertEqual(self.send().reason, "disabled")
+
+
+class TestBlockStateIsNotProbeable(RelayStoreTestCase):
+    """REFUSED must mean exactly what Discord's closed-DM 403 means.
+
+    A 403 can only be discovered by sending, so it only ever arrives after
+    every other check has passed. A block that is checked any earlier than
+    that becomes a detector: the plan's original order returned REFUSED for
+    an oversized message to someone who had blocked you and "too long" to
+    someone who had not, which answers "has X blocked me" for free.
+    """
+
+    BLOCK_STATES = (None, "sender", "everyone")
+
+    def _block(self, state, recipient, sender):
+        if state == "sender":
+            self.store.block(recipient, sender)
+        elif state == "everyone":
+            self.store.block(recipient)
+
+    def test_an_oversized_message_reads_the_same_whether_or_not_you_are_blocked(self):
+        seen = {}
+        for n, state in enumerate(self.BLOCK_STATES):
+            sender, recipient = f"discord-1{n}", f"discord-2{n}"
+            self._block(state, recipient, sender)
+            seen[state] = self.send(sender, recipient, "x" * 5000).reason
+        self.assertEqual(len(set(seen.values())), 1, seen)
+
+    def test_being_over_your_own_cap_reads_the_same_whether_or_not_you_are_blocked(self):
+        seen = {}
+        with patch.object(self.fu, "RELAY_MAX_PER_SENDER_PER_HOUR", 1):
+            for n, state in enumerate(self.BLOCK_STATES):
+                sender, recipient = f"discord-1{n}", f"discord-2{n}"
+                self.deliver(sender, "discord-999")           # spend the cap elsewhere
+                self._block(state, recipient, sender)
+                seen[state] = self.send(sender, recipient).reason
+        self.assertEqual(len(set(seen.values())), 1, seen)
+
+    def test_a_full_inbox_reads_the_same_whether_or_not_you_are_blocked(self):
+        seen = {}
+        with patch.object(self.fu, "RELAY_MAX_INBOUND_PER_RECIPIENT_PER_HOUR", 1):
+            for n, state in enumerate(self.BLOCK_STATES):
+                sender, recipient = f"discord-1{n}", f"discord-2{n}"
+                self.deliver("discord-888", recipient)        # someone else fills it
+                self._block(state, recipient, sender)
+                seen[state] = self.send(sender, recipient).reason
+        self.assertEqual(len(set(seen.values())), 1, seen)
+
+    def _refused_row(self, sender, recipient):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM relay_messages WHERE sender_id = ? AND recipient_id = ?",
+                (sender, recipient)).fetchone()
+        return dict(row)
+
+    def test_a_block_and_a_closed_dm_leave_identical_rows(self):
+        """PR 6's /export shows senders their own rows."""
+        self.store.block("discord-2", "discord-1")
+        self.assertEqual(self.send("discord-1", "discord-2").reason, "blocked_sender")
+        blocked = self._refused_row("discord-1", "discord-2")
+
+        res = self.send("discord-3", "discord-4")               # Discord says 403
+        self.store.mark_refused(res.id)
+        closed = self._refused_row("discord-3", "discord-4")
+
+        varying = {"id", "sender_id", "recipient_id", "created_at", "expires_at", "closed_at"}
+        self.assertEqual({k: v for k, v in blocked.items() if k not in varying},
+                         {k: v for k, v in closed.items() if k not in varying})
+        for row in (blocked, closed):
+            self.assertEqual(row["closed_at"], row["created_at"])
+            self.assertEqual(row["status"], "refused")
+
+    def test_a_block_and_a_closed_dm_cost_the_sender_the_same(self):
+        """Otherwise the rate limit itself tells you which one blocked you."""
+        with patch.object(self.fu, "RELAY_MAX_PER_SENDER_PER_HOUR", 2):
+            self.store.block("discord-2", "discord-1")
+            for _ in range(2):
+                self.send("discord-1", "discord-2")
+            by_block = self.send("discord-1", "discord-2").reason
+
+            for _ in range(2):
+                self.store.mark_refused(self.send("discord-3", "discord-4").id)
+            by_closed_dm = self.send("discord-3", "discord-4").reason
+
+        self.assertEqual(by_block, "sender_rate_limited")
+        self.assertEqual(by_closed_dm, by_block)
+
+    def test_refusals_never_fill_the_recipients_inbox(self):
+        """Or a blocked harasser could lock out everyone else trying to reach them."""
+        with patch.object(self.fu, "RELAY_MAX_INBOUND_PER_RECIPIENT_PER_HOUR", 1):
+            self.store.block("discord-2", "discord-1")
+            for _ in range(5):
+                self.send("discord-1", "discord-2")
+            self.store.mark_refused(self.send("discord-3", "discord-2").id)
+            self.assertTrue(self.send("discord-5", "discord-2").ok)
 
 
 class TestRefusalsAreIndistinguishable(RelayStoreTestCase):
