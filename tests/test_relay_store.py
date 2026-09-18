@@ -214,7 +214,9 @@ class TestBlockStateIsNotProbeable(RelayStoreTestCase):
     def test_a_block_and_a_closed_dm_leave_identical_rows(self):
         """PR 6's /export shows senders their own rows."""
         self.store.block("discord-2", "discord-1")
-        self.assertEqual(self.send("discord-1", "discord-2").reason, "blocked_sender")
+        denial = self.send("discord-1", "discord-2")
+        self.assertEqual(denial.reason, "blocked_sender")
+        self.store.mark_refused(denial.relay_id)                 # the caller's half
         blocked = self._refused_row("discord-1", "discord-2")
 
         res = self.send("discord-3", "discord-4")               # Discord says 403
@@ -243,14 +245,43 @@ class TestBlockStateIsNotProbeable(RelayStoreTestCase):
         self.assertEqual(by_block, "sender_rate_limited")
         self.assertEqual(by_closed_dm, by_block)
 
-    def test_refusals_never_fill_the_recipients_inbox(self):
-        """Or a blocked harasser could lock out everyone else trying to reach them."""
+    def test_settled_refusals_never_fill_the_recipients_inbox(self):
+        """Or a blocked harasser could lock out everyone else trying to reach them.
+
+        Only once settled: until then a refusal is an in-flight reservation,
+        on purpose — see the next test."""
         with patch.object(self.fu, "RELAY_MAX_INBOUND_PER_RECIPIENT_PER_HOUR", 1):
             self.store.block("discord-2", "discord-1")
             for _ in range(5):
-                self.send("discord-1", "discord-2")
+                self.store.mark_refused(self.send("discord-1", "discord-2").relay_id)
             self.store.mark_refused(self.send("discord-3", "discord-2").id)
             self.assertTrue(self.send("discord-5", "discord-2").ok)
+
+    def test_a_block_and_a_closed_dm_look_the_same_to_a_second_account_mid_flight(self):
+        """The race the review found. A send heading for Discord's 403 sits
+        `reserved` for its round trip and counts toward the recipient's inbox;
+        a block used to go straight to `refused` and never did. Account B,
+        sending while account A's attempt was in flight, saw "their inbox is
+        full" only when A was NOT blocked."""
+        seen = {}
+        with patch.object(self.fu, "RELAY_MAX_INBOUND_PER_RECIPIENT_PER_HOUR", 1):
+            for n, blocked in enumerate((False, True)):
+                a, b, alice = f"discord-1{n}", f"discord-3{n}", f"discord-2{n}"
+                if blocked:
+                    self.store.block(alice, a)
+                first = self.send(a, alice)                     # in flight, unsettled
+                self.assertIsNotNone(first.id if first.ok else first.relay_id)
+                seen[blocked] = getattr(self.send(b, alice), "reason", "allowed")  # B, mid-flight
+        self.assertEqual(seen[False], seen[True])
+        self.assertEqual(seen[False], "recipient_rate_limited")
+
+    def test_only_a_recipient_refusal_leaves_a_reservation_open(self):
+        with patch.object(self.fu, "RELAY_MAX_PER_SENDER_PER_HOUR", 1):
+            self.deliver("discord-1", "discord-9")
+            self.assertIsNone(self.send("discord-1", "discord-2").relay_id)   # rate
+        self.assertIsNone(self.send(body="x" * 5000).relay_id)               # size
+        self.store.block("discord-2", "discord-1")
+        self.assertIsNotNone(self.send().relay_id)                            # block
 
 
 class TestRefusalsAreIndistinguishable(RelayStoreTestCase):
@@ -363,6 +394,24 @@ class TestQuotaAccounting(RelayStoreTestCase):
             res = self.deliver()
             self.backdate(res.id, hours=1, minutes=1)
             self.assertTrue(self.send().ok)
+
+    def test_content_discord_rejects_is_charged_to_the_sender_only(self):
+        """A body Discord reliably blocks (its harmful-link filter) must not be a
+        free, unlimited supply of DM-channel opens."""
+        with patch.object(self.fu, "RELAY_MAX_PER_SENDER_PER_HOUR", 1), \
+             patch.object(self.fu, "RELAY_MAX_INBOUND_PER_RECIPIENT_PER_HOUR", 1):
+            self.store.mark_rejected(self.send("discord-1", "discord-2").id, "HTTPException 400")
+            self.assertEqual(self.send("discord-1", "discord-3").reason, "sender_rate_limited")
+            self.assertTrue(self.send("discord-4", "discord-2").ok)   # recipient untouched
+
+    def test_a_full_inbox_does_not_date_someone_elses_message(self):
+        """"Try again after 15:05" says a third party relayed to them at 14:05."""
+        with patch.object(self.fu, "RELAY_MAX_INBOUND_PER_RECIPIENT_PER_HOUR", 1):
+            self.deliver("discord-8", "discord-2")
+            denial = self.send("discord-1", "discord-2")
+        self.assertEqual(denial.reason, "recipient_rate_limited")
+        self.assertIsNone(denial.retry_at)
+        self.assertNotIn("UTC", denial.message)
 
     def test_rate_denial_says_when_to_come_back(self):
         with patch.object(self.fu, "RELAY_MAX_PER_SENDER_PER_HOUR", 1):
