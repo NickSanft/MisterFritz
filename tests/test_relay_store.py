@@ -223,7 +223,8 @@ class TestBlockStateIsNotProbeable(RelayStoreTestCase):
         self.store.mark_refused(res.id)
         closed = self._refused_row("discord-3", "discord-4")
 
-        varying = {"id", "sender_id", "recipient_id", "created_at", "expires_at", "closed_at"}
+        varying = {"id", "sender_id", "sender_account", "recipient_id", "created_at",
+                   "expires_at", "closed_at"}
         self.assertEqual({k: v for k, v in blocked.items() if k not in varying},
                          {k: v for k, v in closed.items() if k not in varying})
         for row in (blocked, closed):
@@ -520,6 +521,284 @@ class TestBlocks(RelayStoreTestCase):
 
     def test_list_blocks_is_empty_for_an_unknown_user(self):
         self.assertEqual(self.store.list_blocks("discord-404"), [])
+
+
+class TestRecipientTools(RelayStoreTestCase):
+    """What a recipient needs to act on a relay from inside a DM."""
+
+    def set_delivered_at(self, relay_id, minutes_ago):
+        when = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE relay_messages SET delivered_at = ? WHERE id = ?",
+                         (when.isoformat(), relay_id))
+            conn.commit()
+
+    def test_a_delivered_dm_leads_back_to_its_relay(self):
+        res = self.deliver("discord-1", "discord-2", dm_message_id=424242)
+        row = self.store.get_by_dm_message(424242)
+        self.assertEqual(row["id"], res.id)
+        self.assertEqual(row["sender_id"], "discord-1")
+        self.assertIsNone(self.store.get_by_dm_message(1))
+        self.assertIsNone(self.store.get_by_dm_message(0))
+
+    def senders(self, recipient, **kw):
+        return [r["account"] for r in self.store.recent_senders(recipient, **kw)]
+
+    def test_recent_senders_are_distinct_and_most_recent_first(self):
+        self.set_delivered_at(self.deliver("discord-1", "discord-2").id, 30)
+        self.set_delivered_at(self.deliver("discord-3", "discord-2").id, 20)
+        latest = self.deliver("discord-1", "discord-2")
+        self.set_delivered_at(latest.id, 10)
+        rows = self.store.recent_senders("discord-2")
+        self.assertEqual([r["account"] for r in rows], ["discord-1", "discord-3"])
+        self.assertEqual(rows[0]["relay_id"], latest.id)      # the LATEST relay
+
+    def test_recent_senders_lists_only_what_actually_arrived(self):
+        """A refused attempt never reached them. Listing it would tell them
+        that someone they blocked keeps trying."""
+        self.deliver("discord-1", "discord-2")
+        self.store.block("discord-2", "discord-5")
+        self.store.mark_refused(self.send("discord-5", "discord-2").relay_id)     # blocked
+        self.store.mark_failed(self.send("discord-6", "discord-2").id, "outage")  # failed
+        self.send("discord-7", "discord-2")                                       # in flight
+        self.assertEqual(self.senders("discord-2"), ["discord-1"])
+
+    def test_recent_senders_is_per_recipient(self):
+        self.deliver("discord-1", "discord-2")
+        self.assertEqual(self.store.recent_senders("discord-9"), [])
+
+    def test_recent_senders_follows_the_recipient_across_aliases(self):
+        self.deliver("discord-1", "discord-2")
+        with patch.object(self.fu, "IDENTITY_LINKS", {"web-bob": "discord-2"}):
+            self.assertEqual(self.senders("web-bob"), ["discord-1"])
+
+    def test_recent_senders_respects_the_limit(self):
+        for n in range(5):
+            self.deliver(f"discord-1{n}", "discord-2")
+        self.assertEqual(len(self.store.recent_senders("discord-2", limit=3)), 3)
+
+    def test_a_relay_remembers_how_its_sender_was_shown(self):
+        """Autocomplete names a sender by what the recipient SAW, never by a
+        name looked up afresh — which could be one they were never shown."""
+        res = self.send("discord-1", "discord-2")
+        self.store.mark_sent(res.id, 5150, shown_as="@mallory \u00b7 Mal")
+        [row] = self.store.recent_senders("discord-2")
+        self.assertEqual(row["shown_as"], "@mallory \u00b7 Mal")
+
+    def test_forget_blocks_drops_mine_and_never_theirs(self):
+        """Blocks other people placed against me are THEIR data. If /relay
+        forget-blocks touched them, anyone could launder away every block on
+        themselves."""
+        self.store.block("discord-2", "discord-1")
+        self.store.block("discord-2")
+        self.store.block("discord-9", "discord-2")          # someone blocked me
+        self.assertEqual(self.store.forget_blocks("discord-2"), 2)
+        self.assertEqual(self.store.list_blocks("discord-2"), [])
+        self.assertEqual(self.store.list_blocks("discord-9"), ["discord-2"])
+        self.assertEqual(self.store.forget_blocks("discord-2"), 0)
+
+    def test_forget_blocks_follows_the_blocker_across_aliases(self):
+        self.store.block("discord-2", "discord-1")
+        with patch.object(self.fu, "IDENTITY_LINKS", {"web-bob": "discord-2"}):
+            self.assertEqual(self.store.forget_blocks("web-bob"), 1)
+
+
+class TestBlocksAreStoredAsSupplied(RelayStoreTestCase):
+    """A block holds what its owner typed or saw, and is resolved only at the
+    gate. Resolved at store time, every place that showed a block back to its
+    owner disclosed which account an alias belongs to."""
+
+    LINKS = {"web-alice": "discord-1", "discord-77": "discord-1"}
+
+    def links(self):
+        return patch.object(self.fu, "IDENTITY_LINKS", dict(self.LINKS))
+
+    def test_the_stored_id_is_the_one_supplied(self):
+        with self.links():
+            self.store.block("discord-2", "web-alice", label="web-alice")
+            self.assertEqual(self.store.list_blocks("discord-2"), ["web-alice"])
+
+    def test_it_still_binds_the_linked_account_at_the_gate(self):
+        with self.links():
+            self.store.block("discord-2", "discord-77")          # an alt
+            self.assertEqual(self.send("discord-1", "discord-2").reason, "blocked_sender")
+
+    def test_already_blocked_does_not_reveal_a_link(self):
+        """Blocking MAIN then its alt must look like two new blocks."""
+        with self.links():
+            self.assertTrue(self.store.block("discord-2", "discord-1"))
+            self.assertTrue(self.store.block("discord-2", "discord-77"))
+
+    def test_unblock_is_matched_as_supplied(self):
+        """"You had no block on X" must not answer "is X linked to Y"."""
+        with self.links():
+            self.store.block("discord-2", "discord-1")
+            self.assertFalse(self.store.unblock("discord-2", "discord-77"))
+            self.assertEqual(self.store.list_blocks("discord-2"), ["discord-1"])
+
+    def test_you_cannot_block_yourself_by_an_alias_either(self):
+        with self.links():
+            with self.assertRaises(ValueError):
+                self.store.block("discord-1", "web-alice")
+
+    def test_entries_carry_their_label_and_no_row_key(self):
+        """Rowids are one global sequence: handed out as tokens, the gap between
+        two of your own said someone else had blocked in between."""
+        self.store.block("discord-2", "discord-1", label="@mallory \u00b7 Mal")
+        [mine] = self.store.list_block_entries("discord-2")
+        self.assertEqual(mine, {"blocked_id": "discord-1", "label": "@mallory \u00b7 Mal"})
+
+
+class TestTheSendingAccount(RelayStoreTestCase):
+    """sender_id is the RESOLVED identity (what the caps count). What a
+    recipient blocks from a message is the account that actually sent it."""
+
+    def test_the_account_is_kept_before_resolution(self):
+        with patch.object(self.fu, "IDENTITY_LINKS", {"web-alice": "discord-1"}):
+            res = self.send(sender="web-alice")
+        row = self.store.get(res.id)
+        self.assertEqual(row["sender_id"], "discord-1")
+        self.assertEqual(row["sender_account"], "web-alice")
+
+    def test_a_blocks_open_reservation_keeps_it_too(self):
+        self.store.block("discord-2", "discord-1")
+        denial = self.send("discord-1", "discord-2")
+        self.assertEqual(self.store.get(denial.relay_id)["sender_account"], "discord-1")
+
+    def test_linked_accounts_stay_separate_in_the_recipients_list(self):
+        """Merged, the list itself said they were one person."""
+        with patch.object(self.fu, "IDENTITY_LINKS", {"discord-77": "discord-1"}):
+            self.deliver("discord-1", "discord-2")
+            self.deliver("discord-77", "discord-2")
+            self.assertEqual(sorted(self.senders("discord-2")), ["discord-1", "discord-77"])
+
+    def test_blocking_the_account_binds_it_once_even_with_chained_links(self):
+        """Blocking the RESOLVED id resolved it twice at the gate: under
+        A->B, B->C the block landed on C, and A kept getting through."""
+        with patch.object(self.fu, "IDENTITY_LINKS",
+                          {"discord-10": "discord-20", "discord-20": "discord-30"}):
+            self.deliver("discord-10", "discord-2")
+            [row] = self.store.recent_senders("discord-2")
+            self.store.block("discord-2", row["account"])
+            self.assertEqual(self.send("discord-10", "discord-2").reason, "blocked_sender")
+            self.assertTrue(self.send("discord-20", "discord-2").ok)   # a different identity
+
+    def senders(self, recipient):
+        return [r["account"] for r in self.store.recent_senders(recipient)]
+
+
+class TestRecentSendersStaysLinear(RelayStoreTestCase):
+    """It runs on the event loop at every autocomplete keystroke. The query it
+    replaced was a correlated subquery, quadratic in the recipient's relays."""
+
+    def vm_steps(self, relays):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM relay_messages")
+            now = datetime.now(timezone.utc)
+            conn.executemany(
+                "INSERT INTO relay_messages (id, sender_id, sender_account, recipient_id, body, "
+                "status, created_at, delivered_at, expires_at, dm_message_id) "
+                "VALUES (?, ?, ?, 'discord-2', 'x', 'delivered', ?, ?, ?, ?)",
+                [(f"{n:08x}", f"discord-{n % 20 + 100}", f"discord-{n % 20 + 100}",
+                  now.isoformat(), (now - timedelta(seconds=n)).isoformat(),
+                  now.isoformat(), 10_000 + n) for n in range(relays)])
+            conn.commit()
+        steps = [0]
+        real_db = self.store._db
+
+        import contextlib
+
+        @contextlib.contextmanager
+        def counting():
+            with real_db() as conn:
+                def tick():
+                    steps[0] += 1
+                conn.set_progress_handler(tick, 100)
+                yield conn
+        with patch.object(self.store, "_db", counting):
+            self.store.recent_senders("discord-2", limit=500)
+        return steps[0]
+
+    def test_work_grows_linearly_with_the_recipients_relays(self):
+        self.store._init_db()
+        small, large = self.vm_steps(300), self.vm_steps(1200)
+        # 4x the rows: roughly 4x the work if linear, 16x if quadratic.
+        self.assertLess(large, small * 8, f"{small} -> {large} VM steps (x100)")
+
+
+class TestDisplayColumnsAreAddedInPlace(RelayStoreTestCase):
+    def test_an_existing_table_gains_the_new_columns(self):
+        """CREATE TABLE IF NOT EXISTS never alters a table that already exists."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("CREATE TABLE relay_messages (id TEXT PRIMARY KEY, sender_id TEXT NOT NULL, "
+                         "recipient_id TEXT NOT NULL, origin_id TEXT, body TEXT NOT NULL, "
+                         "composed INTEGER NOT NULL DEFAULT 0, guild_id INTEGER, dm_channel_id INTEGER, "
+                         "dm_message_id INTEGER, status TEXT NOT NULL DEFAULT 'pending', error TEXT, "
+                         "created_at TEXT NOT NULL, delivered_at TEXT, expires_at TEXT NOT NULL, closed_at TEXT)")
+            conn.execute("CREATE TABLE relay_optouts (user_id TEXT NOT NULL, blocked_id TEXT NOT NULL, "
+                         "created_at TEXT NOT NULL, PRIMARY KEY (user_id, blocked_id))")
+            conn.commit()
+        self.store._INITIALISED = False
+        self.store._init_db()
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertIn("shown_as", {r[1] for r in conn.execute("PRAGMA table_info(relay_messages)")})
+            self.assertIn("sender_account",
+                          {r[1] for r in conn.execute("PRAGMA table_info(relay_messages)")})
+            self.assertIn("label", {r[1] for r in conn.execute("PRAGMA table_info(relay_optouts)")})
+        self.store._INITIALISED = False
+        self.store._init_db()                                     # and again: idempotent
+
+
+class TestConnectionsAreClosed(RelayStoreTestCase):
+    """`with sqlite3.connect(...)` commits but never closes. Every connection
+    the store opens must be closed by the time the call returns."""
+
+    def test_every_store_call_closes_what_it_opens(self):
+        import sqlite3 as real_sqlite3
+        opened = []
+        real_connect = real_sqlite3.connect
+
+        class Tracked:
+            def __init__(self, *a, **kw):
+                self._conn = real_connect(*a, **kw)
+                self.closed = False
+                opened.append(self)
+
+            def close(self):
+                self.closed = True
+                self._conn.close()
+
+            def __enter__(self):
+                self._conn.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self._conn.__exit__(*exc)
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def __setattr__(self, name, value):
+                # row_factory and friends belong on the real connection.
+                if name in ("_conn", "closed"):
+                    object.__setattr__(self, name, value)
+                else:
+                    setattr(self._conn, name, value)
+
+        self.store._init_db()
+        with patch.object(self.store.sqlite3, "connect", Tracked):
+            res = self.send()
+            self.store.mark_sent(res.id, 31337, shown_as="@a")
+            self.store.block("discord-2", "discord-9", label="x")
+            self.store.list_blocks("discord-2")
+            self.store.list_block_entries("discord-2")
+            self.store.recent_senders("discord-2")
+            self.store.get_by_dm_message(31337)
+            self.store.get(res.id)
+            self.store.unblock("discord-2", "discord-9")
+            self.store.forget_blocks("discord-2")
+        self.assertGreaterEqual(len(opened), 10)
+        self.assertEqual([c for c in opened if not c.closed], [])
 
 
 class TestNoDiscordImport(unittest.TestCase):

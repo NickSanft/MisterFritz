@@ -397,9 +397,28 @@ class TestRelayTables(_MigrationTestCase):
         self.assertIn(relay_store.BLOCK_EVERYONE,
                       migrate_identity._NOT_IDENTITIES[("relay_optouts", "blocked_id")])
 
+    def test_a_registered_column_the_table_lacks_is_skipped_not_fatal(self):
+        """relay_messages gained sender_account after it first shipped. An
+        older table without it made the survey raise "no such column"."""
+        self._insert("INSERT INTO relay_messages VALUES (?,?,?)", ("r1", "divora", "discord-2"))
+        found = migrate_identity.survey(self.db)
+        self.assertNotIn("relay_messages.sender_account", found)
+        rc = self._run("--apply", "--map", "divora=discord-1", "--map", "someone_else=discord-2")
+        self.assertEqual(rc, 0)
+
+    def test_the_sending_account_is_rewritten_when_present(self):
+        with sqlite3.connect(self.db) as c:
+            c.execute("ALTER TABLE relay_messages ADD COLUMN sender_account TEXT")
+            c.execute("INSERT INTO relay_messages VALUES ('r1', 'discord-1', 'discord-2', 'divora')")
+            c.commit()
+        rc = self._run("--apply", "--map", "divora=discord-1", "--map", "someone_else=discord-2")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._keys("relay_messages", "sender_account"), ["discord-1"])
+
     def test_every_relay_identity_column_is_registered(self):
         targets = set(migrate_identity._SQLITE_TARGETS)
         for column in (("relay_messages", "sender_id"), ("relay_messages", "recipient_id"),
+                       ("relay_messages", "sender_account"),
                        ("relay_optouts", "user_id"), ("relay_optouts", "blocked_id")):
             self.assertIn(column, targets)
 

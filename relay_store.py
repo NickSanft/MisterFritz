@@ -16,6 +16,7 @@ just the unified DB path), following workspace_store.py.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import sqlite3
 import threading
@@ -128,6 +129,23 @@ class Denial:
     relay_id: str | None = None
 
 
+@contextlib.contextmanager
+def _db():
+    """One connection per operation, as elsewhere in the repo — but closed.
+
+    `with sqlite3.connect(...) as conn` only commits or rolls back; it never
+    closes, and the connection lingers until garbage collection. Harmless on
+    CPython, noisy under warnings, and a real leak anywhere refcounting is
+    not immediate.
+    """
+    conn = sqlite3.connect(SCHEDULE_DB)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -146,7 +164,7 @@ def _init_db() -> None:
     with _INIT_LOCK:
         if _INITIALISED:
             return
-        with sqlite3.connect(SCHEDULE_DB) as conn:
+        with _db() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS relay_messages (
@@ -196,6 +214,22 @@ def _init_db() -> None:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_relay_optouts_blocked "
                 "ON relay_optouts(blocked_id)")
+            # Display columns, added after the tables first shipped. CREATE
+            # TABLE IF NOT EXISTS never alters an existing table, so they are
+            # added in place. Neither is an identity: both hold only what a
+            # person was shown or typed, which is the whole point of them.
+            #   relay_messages.shown_as — the author line the recipient saw.
+            #   relay_optouts.label     — how a block is named back to its owner.
+            #   relay_messages.sender_account — the account that actually sent
+            #     it, BEFORE IDENTITY_LINKS. sender_id holds the resolved
+            #     identity, which is what the caps count; this is what a
+            #     recipient blocks when they block "the sender of that message".
+            for table, column in (("relay_messages", "shown_as"),
+                                  ("relay_optouts", "label"),
+                                  ("relay_messages", "sender_account")):
+                existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
             conn.commit()
         _INITIALISED = True
 
@@ -204,44 +238,52 @@ def _init_db() -> None:
 # Opt-outs
 # ---------------------------------------------------------------------------
 
-def block(user_id: str, blocked_id: str = BLOCK_EVERYONE) -> bool:
+def block(user_id: str, blocked_id: str = BLOCK_EVERYONE, *,
+          label: str | None = None) -> bool:
     """Refuse relayed messages from `blocked_id` (default: from everyone).
 
     Returns True if this added a block, False if it was already in place.
     Idempotent, because the button that calls it can be pressed twice.
+
+    `blocked_id` is stored AS SUPPLIED, not resolved through IDENTITY_LINKS;
+    _gate resolves both sides when it checks. Resolving here stored the
+    linked account, and everything that later showed a block back to its
+    owner — /relay status, the "already blocked" reply — then disclosed which
+    Discord account a web or Telegram identity, or an alt, belongs to. The
+    blocker's own id is still resolved: it is theirs.
+
+    `label` is how the block is named back to its owner: the author line
+    they were shown on the relay they blocked from, or the ID they typed.
     """
     if not user_id:
         raise ValueError("user_id is required")
-    # Both ends resolved, for the same reason reserve_send resolves both: a
-    # block placed as discord-123 must bind when the sender arrives as
-    # web-alice, and vice versa.
-    user_id = resolve_identity(user_id)
-    blocked_id = (blocked_id if blocked_id == BLOCK_EVERYONE
-                  else resolve_identity(blocked_id))
     if not blocked_id:
         raise ValueError("blocked_id is required")
-    if user_id == blocked_id:
+    user_id = resolve_identity(user_id)
+    if blocked_id != BLOCK_EVERYONE and resolve_identity(blocked_id) == user_id:
         raise ValueError("cannot block yourself")
     _init_db()
-    with sqlite3.connect(SCHEDULE_DB) as conn:
+    with _db() as conn:
         cur = conn.execute(
-            "INSERT OR IGNORE INTO relay_optouts (user_id, blocked_id, created_at) "
-            "VALUES (?, ?, ?)",
-            (user_id, blocked_id, _iso(_now())),
+            "INSERT OR IGNORE INTO relay_optouts (user_id, blocked_id, created_at, label) "
+            "VALUES (?, ?, ?, ?)",
+            (user_id, blocked_id, _iso(_now()), label),
         )
         conn.commit()
     return cur.rowcount > 0
 
 
 def unblock(user_id: str, blocked_id: str = BLOCK_EVERYONE) -> bool:
-    """Drop a block. Returns True if one was actually removed."""
+    """Drop a block, exactly as it was placed. True if one was removed.
+
+    Matched as supplied, like block(): resolving here would let "You had no
+    block on X" answer whether X is linked to someone you did block.
+    """
     if not user_id:
         raise ValueError("user_id is required")
     user_id = resolve_identity(user_id)
-    blocked_id = (blocked_id if blocked_id == BLOCK_EVERYONE
-                  else resolve_identity(blocked_id))
     _init_db()
-    with sqlite3.connect(SCHEDULE_DB) as conn:
+    with _db() as conn:
         cur = conn.execute(
             "DELETE FROM relay_optouts WHERE user_id = ? AND blocked_id = ?",
             (user_id, blocked_id),
@@ -256,13 +298,94 @@ def list_blocks(user_id: str) -> list[str]:
         return []
     user_id = resolve_identity(user_id)
     _init_db()
-    with sqlite3.connect(SCHEDULE_DB) as conn:
+    with _db() as conn:
         rows = conn.execute(
             "SELECT blocked_id FROM relay_optouts WHERE user_id = ? "
             "ORDER BY created_at, blocked_id",
             (user_id,),
         ).fetchall()
     return [r[0] for r in rows]
+
+
+def list_block_entries(user_id: str) -> list[dict]:
+    """This user's blocks as {blocked_id, label}, oldest first.
+
+    No row key. SQLite rowids are one global sequence, so handing them out as
+    tokens told a user, by the gap between two of their own, that someone
+    else had placed a block in between — and a rowid is reused after a
+    delete, so a stale token could remove a different, newer block. The
+    command layer names each entry by a keyed hash of (owner, blocked_id).
+    """
+    if not user_id:
+        return []
+    user_id = resolve_identity(user_id)
+    _init_db()
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT blocked_id, label FROM relay_optouts WHERE user_id = ? "
+            "ORDER BY created_at, blocked_id",
+            (user_id,),
+        ).fetchall()
+    return [{"blocked_id": r[0], "label": r[1]} for r in rows]
+
+
+def forget_blocks(user_id: str) -> int:
+    """Drop every block this user has placed. Returns how many went.
+
+    The explicit escape hatch DECISIONS #22 requires: /forget all deliberately
+    leaves your blocks in place, because a privacy command that silently
+    re-arms a harasser is a safety regression. This is the separately invoked
+    way to drop them. Blocks OTHER people placed against you are theirs, and
+    nothing here can touch them.
+    """
+    if not user_id:
+        return 0
+    user_id = resolve_identity(user_id)
+    _init_db()
+    with _db() as conn:
+        cur = conn.execute("DELETE FROM relay_optouts WHERE user_id = ?", (user_id,))
+        conn.commit()
+    return cur.rowcount
+
+
+def recent_senders(recipient_id: str, limit: int = 25) -> list[dict]:
+    """Each ACCOUNT that has relayed to this recipient, most recent first, as
+    {relay_id, account, shown_as} for the latest relay it delivered.
+
+    Feeds /relay block's autocomplete, which is how a recipient standing in
+    a DM with the bot names someone to block: a slash command's user picker
+    cannot reach them from there. The autocomplete shows `shown_as` — the
+    author line exactly as this recipient saw it — and hands the client only
+    `relay_id`.
+
+    Grouped by the sending account, not the resolved identity: two accounts
+    linked in IDENTITY_LINKS are two entries, as the recipient saw them.
+    Merged into one, the list itself said they were the same person.
+
+    DELIVERED messages only. A refused attempt never reached the recipient,
+    and listing it would tell them that someone they blocked keeps trying —
+    a fact about the sender's behaviour, which the recipient never received.
+
+    One grouped read. It runs on the event loop at every autocomplete
+    keystroke, where the correlated subquery it replaced was quadratic in the
+    recipient's relays. SQLite takes the bare columns from the row holding
+    the MAX; the unary + keeps the planner on the recipient index rather than
+    scanning every delivered relay through idx_relay_open.
+    """
+    if not recipient_id:
+        return []
+    recipient_id = resolve_identity(recipient_id)
+    _init_db()
+    with _db() as conn:
+        rows = conn.execute(
+            """SELECT id, COALESCE(sender_account, sender_id) AS account, shown_as,
+                      MAX(delivered_at) AS last
+               FROM relay_messages
+               WHERE recipient_id = ? AND +status = ? AND sender_id != ?
+               GROUP BY account ORDER BY last DESC LIMIT ?""",
+            (recipient_id, STATUS_DELIVERED, recipient_id, max(1, int(limit))),
+        ).fetchall()
+    return [{"relay_id": r[0], "account": r[1], "shown_as": r[2]} for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -385,17 +508,24 @@ def _gate(conn, sender_id: str, recipient_id: str, body: str,
             "They have received as many relayed messages this hour as I will "
             "pass on.", reveal_time=False)
 
-    blocks = {r[0] for r in conn.execute(
-        "SELECT blocked_id FROM relay_optouts WHERE user_id = ? "
-        "AND blocked_id IN (?, ?)",
-        (recipient_id, sender_id, BLOCK_EVERYONE),
-    ).fetchall()}
-    if sender_id in blocks:
+    # Blocks are stored as their owner supplied them (see block()), so each
+    # is resolved here, at the moment it has to bind. Both ends, still: the
+    # sender arrived resolved, and a block typed as an alias must catch them.
+    blocks = [r[0] for r in conn.execute(
+        "SELECT blocked_id FROM relay_optouts WHERE user_id = ?", (recipient_id,),
+    ).fetchall()]
+    if any(b != BLOCK_EVERYONE and resolve_identity(b) == sender_id for b in blocks):
         return Denial("blocked_sender", REFUSED)
     if BLOCK_EVERYONE in blocks:
         return Denial("blocked_everyone", REFUSED)
 
     return None
+
+
+_INSERT_RESERVATION = """INSERT INTO relay_messages
+    (id, sender_id, sender_account, recipient_id, origin_id, body, composed,
+     guild_id, status, created_at, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
 
 def reserve_send(
@@ -441,6 +571,9 @@ def reserve_send(
     # discord-123 must be honoured when the sender arrives as web-alice.
     # Resolving only the sender leaves a live bypass — the same write-path /
     # delete-path divergence the comment in privacy.py:44-49 documents.
+    # The account itself, kept before resolution: see sender_account in
+    # _init_db. Everything the gate counts and checks uses the resolved id.
+    sender_account = sender_id
     sender_id = resolve_identity(sender_id)
     recipient_id = resolve_identity(recipient_id)
 
@@ -483,6 +616,11 @@ def reserve_send(
     created_at = _iso(now)
     expires_at = _iso(now + timedelta(minutes=fritz_utils.RELAY_REPLY_WINDOW_MIN))
 
+    # One statement for both paths — the block's open reservation and the
+    # ordinary one — so the two rows cannot drift apart.
+    reservation = (rid, sender_id, sender_account, recipient_id, origin_id, body,
+                   int(composed), guild_id, STATUS_RESERVED, created_at, expires_at)
+
     conn = sqlite3.connect(SCHEDULE_DB, isolation_level=None)
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -501,27 +639,13 @@ def reserve_send(
                 # "their inbox is full" only when there was no block — which
                 # answered the question for free. Same lifecycle, same state,
                 # at every moment another sender can observe.
-                conn.execute(
-                    """INSERT INTO relay_messages
-                       (id, sender_id, recipient_id, origin_id, body, composed,
-                        guild_id, status, created_at, expires_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (rid, sender_id, recipient_id, origin_id, body, int(composed),
-                     guild_id, STATUS_RESERVED, created_at, expires_at),
-                )
+                conn.execute(_INSERT_RESERVATION, reservation)
                 conn.execute("COMMIT")
                 return Denial(denial.reason, denial.message, relay_id=rid)
             if denial is not None:
                 conn.execute("ROLLBACK")
                 return denial
-            conn.execute(
-                """INSERT INTO relay_messages
-                   (id, sender_id, recipient_id, origin_id, body, composed,
-                    guild_id, status, created_at, expires_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (rid, sender_id, recipient_id, origin_id, body, int(composed),
-                 guild_id, STATUS_RESERVED, created_at, expires_at),
-            )
+            conn.execute(_INSERT_RESERVATION, reservation)
             conn.execute("COMMIT")
         except BaseException:
             # Explicit, rather than relying on close() to roll back: an open
@@ -541,8 +665,13 @@ def reserve_send(
                        created_at=created_at, expires_at=expires_at)
 
 
-def mark_sent(relay_id: str, dm_message_id: int, dm_channel_id: int | None = None) -> None:
+def mark_sent(relay_id: str, dm_message_id: int, dm_channel_id: int | None = None,
+              shown_as: str | None = None) -> None:
     """Record that the DM went out, and bind the id a reply will arrive on.
+
+    `shown_as` is the author line exactly as the recipient saw it. Whatever
+    later names this sender back to them uses it, never a name looked up
+    afresh — that could be one they were never shown.
 
     `dm_message_id` is the reply-routing key, so a collision here would route
     someone's reply to the wrong person. The partial unique index turns that
@@ -554,12 +683,12 @@ def mark_sent(relay_id: str, dm_message_id: int, dm_channel_id: int | None = Non
         raise ValueError("dm_message_id is required")
     _init_db()
     try:
-        with sqlite3.connect(SCHEDULE_DB) as conn:
+        with _db() as conn:
             cur = conn.execute(
                 "UPDATE relay_messages SET status = ?, dm_message_id = ?, "
-                "dm_channel_id = ?, delivered_at = ? WHERE id = ?",
+                "dm_channel_id = ?, delivered_at = ?, shown_as = ? WHERE id = ?",
                 (STATUS_DELIVERED, dm_message_id, dm_channel_id,
-                 _iso(_now()), relay_id),
+                 _iso(_now()), shown_as, relay_id),
             )
             conn.commit()
     except sqlite3.IntegrityError as e:
@@ -585,7 +714,7 @@ def mark_refused(relay_id: str) -> None:
         raise ValueError("relay_id is required")
     _init_db()
     try:
-        with sqlite3.connect(SCHEDULE_DB) as conn:
+        with _db() as conn:
             cur = conn.execute(
                 "UPDATE relay_messages SET status = ?, error = ?, "
                 "closed_at = created_at WHERE id = ?",
@@ -607,7 +736,7 @@ def mark_rejected(relay_id: str, reason: str) -> None:
         raise ValueError("relay_id is required")
     _init_db()
     try:
-        with sqlite3.connect(SCHEDULE_DB) as conn:
+        with _db() as conn:
             cur = conn.execute(
                 "UPDATE relay_messages SET status = ?, error = ?, closed_at = ? "
                 "WHERE id = ?",
@@ -630,7 +759,7 @@ def mark_failed(relay_id: str, reason: str) -> None:
         raise ValueError("relay_id is required")
     _init_db()
     try:
-        with sqlite3.connect(SCHEDULE_DB) as conn:
+        with _db() as conn:
             cur = conn.execute(
                 "UPDATE relay_messages SET status = ?, error = ?, closed_at = ? "
                 "WHERE id = ?",
@@ -643,12 +772,31 @@ def mark_failed(relay_id: str, reason: str) -> None:
         raise RelayStoreError(f"no relay message with id {relay_id}")
 
 
+def get_by_dm_message(dm_message_id: int) -> dict | None:
+    """The relay a delivered DM belongs to, or None if it is not one of ours.
+
+    The lookup every message-anchored action goes through: the "Block this
+    sender" context menu now, and reply routing in PR 4. Anchored on the
+    message rather than on "whoever last relayed to you", because a recipient
+    holding relays from two people must never have one mistaken for the other.
+    """
+    if not dm_message_id:
+        return None
+    _init_db()
+    with _db() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM relay_messages WHERE dm_message_id = ?",
+            (int(dm_message_id),)).fetchone()
+    return dict(row) if row else None
+
+
 def get(relay_id: str) -> dict | None:
     """One relay row as a dict, or None. Read-only; used by tests and PR 4."""
     if not relay_id:
         return None
     _init_db()
-    with sqlite3.connect(SCHEDULE_DB) as conn:
+    with _db() as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT * FROM relay_messages WHERE id = ?", (relay_id,)).fetchone()

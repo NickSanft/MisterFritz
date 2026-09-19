@@ -63,6 +63,20 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     ).fetchone() is not None
 
 
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """True if the table exists AND has the column.
+
+    A registered column can be newer than the table holding it: the relay
+    tables gained relay_messages.sender_account after they first shipped,
+    and a database created before then has the table without the column.
+    Checking only the table made the survey raise "no such column" and took
+    the whole migration down with it.
+    """
+    if not _table_exists(conn, table):
+        return False
+    return any(r[1] == column for r in conn.execute(f"PRAGMA table_info({table})"))  # noqa: S608
+
+
 # (table, key column). Order is cosmetic — each is rewritten independently.
 #
 # A table may appear more than once, one entry per identity column. That is
@@ -77,6 +91,7 @@ _SQLITE_TARGETS = (
     ("store", "namespace"),
     ("relay_messages", "sender_id"),
     ("relay_messages", "recipient_id"),
+    ("relay_messages", "sender_account"),
     ("relay_optouts", "user_id"),
     ("relay_optouts", "blocked_id"),
 )
@@ -103,7 +118,7 @@ def _distinct_keys(conn: sqlite3.Connection, table: str, column: str) -> dict[st
     The live fritz.db has never had a `workspaces` table — _init_db creates it
     lazily on first /workspace use — so a missing table is normal, not an error.
     """
-    if not _table_exists(conn, table):
+    if not _column_exists(conn, table, column):
         return {}
     rows = conn.execute(
         f"SELECT {column}, COUNT(*) FROM {table} GROUP BY {column}"  # noqa: S608 — names are module constants
@@ -123,7 +138,7 @@ def survey(db_path: str) -> dict:
     with sqlite3.connect(db_path) as conn:
         for table, column in _SQLITE_TARGETS:
             keys = _distinct_keys(conn, table, column)
-            if keys or _table_exists(conn, table):
+            if keys or _column_exists(conn, table, column):
                 found[f"{table}.{column}"] = keys
         for table, column in _THREAD_TARGETS:
             raw = _distinct_keys(conn, table, column)
@@ -174,7 +189,7 @@ def _rewrite_column(conn: sqlite3.Connection, table: str, column: str,
 
     Idempotent: a second run matches nothing because the old value is gone.
     """
-    if not _table_exists(conn, table):
+    if not _column_exists(conn, table, column):
         return 0
     skip = _NOT_IDENTITIES.get((table, column), frozenset())
     changed = 0
@@ -197,7 +212,7 @@ def _rewrite_threads(conn: sqlite3.Connection, table: str, column: str,
     without a LIKE that could catch a sibling: the rows are read first and
     matched in Python on the exact identity half.
     """
-    if not _table_exists(conn, table):
+    if not _column_exists(conn, table, column):
         return 0
     rows = conn.execute(f"SELECT DISTINCT {column} FROM {table}").fetchall()  # noqa: S608
     changed = 0
