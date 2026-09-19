@@ -10,6 +10,7 @@ whatever the command assumed.
 import asyncio
 import hashlib
 import inspect
+import itertools
 import json
 import sqlite3
 import tempfile
@@ -27,11 +28,14 @@ import relay_store
 from bot_commands import FritzCommands
 from test_bot_commands import _fake_interaction, _make_cog
 
-SENDER_SNOWFLAKE = 111
-RECIPIENT_SNOWFLAKE = 555
+SENDER_SNOWFLAKE = 111111111111111111
+RECIPIENT_SNOWFLAKE = 555555555555555555
 SENDER = f"discord-{SENDER_SNOWFLAKE}"
 RECIPIENT = f"discord-{RECIPIENT_SNOWFLAKE}"
 GUILD_ID = 67890
+# Every DM Discord "sends" gets its own id, as real ones do. A shared one made
+# the second relay to the same person collide on the routing index.
+_SENT_IDS = itertools.count(900_000_000_000_000_001)
 
 
 def _http_error(cls, status, code=0):
@@ -51,7 +55,7 @@ def _member(uid=RECIPIENT_SNOWFLAKE, name="bob", display="Bob", bot=False):
     member.display_avatar = MagicMock()
     member.display_avatar.url = f"https://cdn.example/{uid}.png"
     sent = MagicMock()
-    sent.id = 900_000_000_000_000_001 + uid
+    sent.id = next(_SENT_IDS)
     sent.channel.id = 700_000_000_000_000_001
     member.send = AsyncMock(return_value=sent)
     return member
@@ -149,10 +153,10 @@ class TestDelivery(TellTestCase):
         self.assert_no_mentions(recipient.send.await_args.kwargs["allowed_mentions"])
 
     async def test_the_row_records_the_routing_key_and_the_server(self):
-        await self.tell()
+        _, recipient = await self.tell()
         [row] = self.rows()
         self.assertEqual(row["status"], "delivered")
-        self.assertEqual(row["dm_message_id"], 900_000_000_000_000_001 + RECIPIENT_SNOWFLAKE)
+        self.assertEqual(row["dm_message_id"], recipient.send.return_value.id)
         self.assertEqual(row["guild_id"], GUILD_ID)
         with sqlite3.connect(self.db) as conn:
             kind = conn.execute("SELECT typeof(dm_message_id) FROM relay_messages").fetchone()[0]
@@ -519,8 +523,10 @@ class TestAuditLog(TellTestCase):
     async def test_no_body_reaches_the_audit_log_on_any_path(self):
         await self.tell(message=self.BODY)                          # delivered
         relay_store.block(RECIPIENT)
-        await self.tell(message=self.BODY)                          # denied
+        await self.tell(message=self.BODY)                          # refused by a block
         relay_store.unblock(RECIPIENT)
+        with patch.object(fritz_utils, "RELAY_MAX_PER_SENDER_PER_HOUR", 1):
+            await self.tell(message=self.BODY)                      # denied by a cap
         refused = _member(uid=556)
         refused.send.side_effect = _http_error(discord.Forbidden, 403, 50007)
         await self.tell(recipient=refused, message=self.BODY)       # refused
