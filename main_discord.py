@@ -27,6 +27,7 @@ import identity_store
 from mister_fritz import ask_stuff
 from observability import METRICS, init_logging, start_metrics_server
 from prewarm import prewarm_models
+import relay_router
 from scheduler import ScheduleManager
 # stt is safe at module level: it imports pydub (core) and defers the Whisper
 # model itself. tts is NOT — see the deferred import in on_ready.
@@ -254,10 +255,29 @@ async def on_message(ctx):
     message_clean = ctx.clean_content
     if ctx.author == client.user:
         return
-    elif ctx.content.startswith(command_prefix):
+    if ctx.content.startswith(command_prefix):
         await client.process_commands(ctx)
         return
-    elif not isinstance(channel, discord.DMChannel) and not client.user.mentioned_in(ctx):
+
+    # A reply to a message Fritz carried for someone goes back to them, and
+    # never becomes a conversation turn. This sits where it does deliberately:
+    # AFTER the self-check, so Fritz's own relay DM cannot route itself, and
+    # after the $ prefix check, so a command in a DM stays a command — but
+    # BEFORE the guard below, which is the collision. Because the DM case
+    # short-circuits that guard, every DM otherwise falls through to a full
+    # agent turn, and that turn binds the file tools whenever the user has a
+    # workspace. Relayed text is someone else's words; it must never become
+    # input to a tool-using agent with read/write/exec on this user's disk.
+    #
+    # Returning here is what keeps a routed reply out of the identity roster,
+    # the message counter, the thinking placeholder and the agent. The order
+    # is pinned by a source-level test, because every one of those still
+    # "works" when it is wrong.
+    if isinstance(channel, discord.DMChannel):
+        if await relay_router.try_route_reply(client, ctx):
+            METRICS.increment("relay.replies_routed")
+            return
+    elif not client.user.mentioned_in(ctx):
         return
 
     # Recorded AFTER the early returns, not before. Above the self-check this
