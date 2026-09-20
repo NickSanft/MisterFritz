@@ -256,8 +256,17 @@ async def on_message(ctx):
     if ctx.author == client.user:
         return
     if ctx.content.startswith(command_prefix):
-        await client.process_commands(ctx)
-        return
+        # Only when it really is one. process_commands swallowed anything
+        # starting with "$" — and this bot registers no prefix commands at
+        # all, so `$20 plus tip` was dispatched to nothing, logged as
+        # CommandNotFound, and dropped. As a reply to a relayed DM that meant
+        # the answer was never carried, never given to the agent, and never
+        # mentioned to anyone: the one path where someone could be left
+        # believing they had answered.
+        invoked = ctx.content[len(command_prefix):].split(" ", 1)[0]
+        if client.get_command(invoked):
+            await client.process_commands(ctx)
+            return
 
     # A reply to a message Fritz carried for someone goes back to them, and
     # never becomes a conversation turn. This sits where it does deliberately:

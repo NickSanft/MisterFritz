@@ -24,6 +24,7 @@ from discord import app_commands
 import bot_commands
 import fritz_utils
 import observability
+import relay_format
 import relay_store
 from bot_commands import FritzCommands
 from test_bot_commands import _fake_interaction, _make_cog
@@ -73,7 +74,7 @@ class TellTestCase(unittest.IsolatedAsyncioTestCase):
                            RELAY_MAX_PER_SENDER_PER_HOUR=10,
                            RELAY_MAX_INBOUND_PER_RECIPIENT_PER_HOUR=10,
                            RELAY_REPLY_WINDOW_MIN=1440),
-            patch.object(bot_commands, "_REFUSAL_WINDOW_SEC", (0, 0)),
+            patch.object(relay_format, "REFUSAL_WINDOW_SEC", (0, 0)),
             patch.object(observability, "AUDIT_LOG_PATH", str(self.audit_path)),
         ]
         for p in self._patches:
@@ -305,9 +306,9 @@ class TestRefusals(TellTestCase):
     async def test_the_deadline_is_real_in_production(self):
         """Every other test zeroes the window. The shipped one must outlast a
         normal Discord round trip — read from source, because setUp patches it."""
-        src = Path(bot_commands.__file__).read_text(encoding="utf-8")
-        self.assertIn("_REFUSAL_WINDOW_SEC = (1.0, 2.0)", src)
-        with patch.object(bot_commands, "_REFUSAL_WINDOW_SEC", (1.0, 2.0)):
+        src = Path(relay_format.__file__).read_text(encoding="utf-8")
+        self.assertIn("REFUSAL_WINDOW_SEC = (1.0, 2.0)", src)
+        with patch.object(relay_format, "REFUSAL_WINDOW_SEC", (1.0, 2.0)):
             loop = asyncio.get_running_loop()
             self.assertGreaterEqual(bot_commands._refusal_deadline() - loop.time(), 0.99)
 

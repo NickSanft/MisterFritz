@@ -5,10 +5,8 @@ import io
 import json
 import logging
 import os
-import random
 import re
 import time
-import unicodedata
 from typing import Optional
 
 import discord
@@ -42,6 +40,7 @@ import identity_store
 from mister_fritz import ask_stuff
 from observability import METRICS, audit_log, get_health_snapshot
 import privacy
+import relay_format
 import relay_store
 import workspace_store
 
@@ -247,116 +246,22 @@ async def _require_admin(interaction: discord.Interaction) -> bool:
 
 # ── Direct-message relay helpers ──────────────────────────────────────────────
 
-# Discord's cap on an embed description, which is where a relayed body goes.
-# The library does not check it (an over-length embed is a 400 at send time),
-# so the slash option itself is capped and the client will not let a longer
-# message be submitted, whatever RELAY_MAX_BODY_CHARS says.
-_EMBED_DESCRIPTION_MAX = 4096
-
-
-def _tell_max_chars(configured: int) -> int:
-    return max(1, min(configured, _EMBED_DESCRIPTION_MAX))
-
-
-TELL_MAX_CHARS = _tell_max_chars(fritz_utils.RELAY_MAX_BODY_CHARS)
-
-# Every failure copy on the send path says this, in words. "Never
-# optimistic-ack": the sender hears a message went only once Discord has
-# returned it, and hears plainly when it did not.
-_NOTHING_SENT = "Nothing was sent."
-
-# Recipient-side refusals — a block, and Discord's 403 for closed DMs — are
-# answered, settled and released on ONE schedule: a deadline drawn from this
-# window at the start of the command. A block is decided in a millisecond and
-# a 403 after a Discord round trip; answering each as soon as it is known was
-# a timing oracle for the question REFUSED exists to leave unanswered, and a
-# pad on the block path alone only moved that oracle. Both now wait for the
-# same randomly drawn moment, which comfortably outlasts a normal round trip.
-# A 403 that arrives after its deadline is answered late and is
-# distinguishable; that is the residual, and it needs a slow Discord. Tests
-# set this to (0, 0).
-_REFUSAL_WINDOW_SEC = (1.0, 2.0)
-
-
-def _refusal_deadline() -> float:
-    lo, hi = _REFUSAL_WINDOW_SEC
-    return asyncio.get_running_loop().time() + random.uniform(lo, hi)
-
-
-async def _sleep_until(deadline: float) -> None:
-    delay = deadline - asyncio.get_running_loop().time()
-    if delay > 0:
-        await asyncio.sleep(delay)
-
-
-def _plain(text: str) -> str:
-    """Drop control and format characters: bidi overrides, zero-width joiners
-    and the like, which can reorder or hide text in the recipient's client."""
-    return "".join(ch for ch in text if unicodedata.category(ch) not in ("Cc", "Cf"))
-
-
-def _relay_author_line(user) -> str:
-    """Who a relayed message says it is from: "@username · Display".
-
-    The @username leads because it is the one part nobody can borrow: unique
-    across Discord, from a character set with no room for tricks. The display
-    name is sender-controlled twice over — a guild nickname can be set to
-    anyone's name, and it can carry a "(@alice)" of its own, which made
-    "Display (@username)" read as "Alice (@alice) (@mallory)". So it comes
-    second, stripped of handle syntax ('@' and parentheses) and of anything
-    that can reorder or hide text.
-    """
-    handle = "@" + _plain(user.name)
-    display = _plain(getattr(user, "display_name", None) or "")
-    display = " ".join(display.replace("@", "").replace("(", "").replace(")", "").split())[:64]
-    if not display or display == user.name:
-        return handle[:256]
-    return f"{handle} \u00b7 {display}"[:256]
-
-
-def _audit_digest(body: str) -> str:
-    """A keyed fingerprint of a relay body for audit.log — never the body.
-
-    The plan specified sha256(body)[:16]. Unkeyed, that IS the message for
-    anything short or guessable: "ok", "yes", "running late" fall to a
-    dictionary in microseconds. Keyed with the host's persisted secret, the
-    same body still yields the same token — one message sprayed at thirty
-    people is still visibly one message — but the log alone cannot be reversed.
-    The subkey is derived under its own label so this never shares key
-    material with the chat cookie it is borrowed from.
-    """
-    key = hmac.new(fritz_utils.CHAT_COOKIE_SECRET.encode("utf-8"),
-                   b"relay-audit-digest-v1", hashlib.sha256).digest()
-    return hmac.new(key, body.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
-
-
-def _refusal_audit(sender: str, recipient: str, relay_id: str,
-                   guild_id: int | None, message: str) -> dict:
-    """The one audit record for a recipient-side refusal, block or 403 alike.
-
-    Built in one place so the two cannot drift apart: the audit log outlives
-    /relay forget-blocks, and a field that differed between them would be a
-    permanent record of who blocked whom.
-    """
-    return dict(sender=sender, recipient=recipient, relay_id=relay_id,
-                guild_id=guild_id, chars=len(message), body_digest=_audit_digest(message))
-
-
-async def _settle(fn, relay_id: str, *args) -> None:
-    """Record how a relay ended without letting a store error eat the reply.
-
-    On the failure paths the sender must still be told nothing was sent; a
-    bookkeeping error there is logged, and the reservation it leaves behind
-    stops holding quota by itself after RESERVATION_GRACE_SEC.
-    """
-    try:
-        await run_blocking(fn, relay_id, *args)
-    except Exception as e:
-        # getattr: this handler must not be able to raise. A partial or a
-        # wrapped callable has no __name__, and an AttributeError here would
-        # take down exactly the reply this function exists to protect.
-        logger.error("relay %s: %s failed: %s", relay_id,
-                     getattr(fn, "__name__", repr(fn)), e)
+# Shared with relay_router through relay_format, which exists so the router
+# can build the same embed, keep the same refusal schedule and write the same
+# audit line WITHOUT importing this module — bot_commands imports mister_fritz,
+# and the router must never be able to reach the agent. These aliases keep the
+# /tell call sites (and the tests that patch them) reading as they did.
+_EMBED_DESCRIPTION_MAX = relay_format.EMBED_DESCRIPTION_MAX
+_tell_max_chars = relay_format.max_body_chars
+TELL_MAX_CHARS = relay_format.max_body_chars(fritz_utils.RELAY_MAX_BODY_CHARS)
+_NOTHING_SENT = relay_format.NOTHING_SENT
+_refusal_deadline = relay_format.refusal_deadline
+_sleep_until = relay_format.sleep_until
+_plain = relay_format.plain
+_relay_author_line = relay_format.author_line
+_audit_digest = relay_format.audit_digest
+_refusal_audit = relay_format.refusal_audit
+_settle = relay_format.settle
 
 
 async def _answer(interaction: discord.Interaction, text: str, **kwargs) -> None:
@@ -1256,16 +1161,16 @@ class FritzCommands(commands.Cog):
         guild = interaction.guild
         where = _plain(guild.name) if guild is not None and guild.name else ""
         where = where or "a server you share"
-        embed = discord.Embed(description=message, colour=FRITZ_COLOUR,
-                              timestamp=discord.utils.utcnow())
         shown_as = _relay_author_line(interaction.user)
-        embed.set_author(name=shown_as, icon_url=interaction.user.display_avatar.url)
         # The way out is named in the message itself: whoever this is from,
         # the recipient never asked for it, and should not have to go looking.
-        embed.set_footer(text=f"Sent with /tell from {where}. "
-                              "The words are theirs; I merely carry them.\n"
-                              "Not welcome? Apps \u2192 Block this sender, on this "
-                              "message \u2014 or /relay block.")
+        embed = relay_format.relay_embed(
+            message, shown_as=shown_as,
+            icon_url=interaction.user.display_avatar.url,
+            footer=(f"Sent with /tell from {where}. "
+                    "The words are theirs; I merely carry them.\n"
+                    "Not welcome? Apps \u2192 Block this sender, on this "
+                    "message \u2014 or /relay block."))
 
         # One try covers both round trips: Member.send opens the DM channel
         # itself, and either request can be the one that fails. Forbidden and
@@ -1354,12 +1259,16 @@ class FritzCommands(commands.Cog):
     async def _relay_failed(self, interaction: discord.Interaction,
                             reservation: "relay_store.Reservation", audit: dict,
                             exc: BaseException, note: str, *,
-                            mark=relay_store.mark_failed) -> None:
+                            mark=None) -> None:
         """The send failed. Always answered, with a ref for the log.
 
         mark_failed (the default) is free to the sender: an outage, a 429,
         a bug of ours. mark_rejected is charged: Discord refused the content.
         """
+        # Resolved here, not in the signature: a default argument binds at
+        # definition time, so patching relay_store.mark_failed in a test had
+        # no effect and the bookkeeping assertions passed vacuously.
+        mark = mark or relay_store.mark_failed
         status = getattr(exc, "status", None)
         reason = type(exc).__name__ + (f" {status}" if status else "")
         await _settle(mark, reservation.id, reason)
@@ -1375,11 +1284,10 @@ class FritzCommands(commands.Cog):
         Only ever called after a delivery. Best-effort: the relay already
         stands. Mentions are suppressed on this leg too.
         """
-        embed = discord.Embed(description=message, colour=FRITZ_COLOUR,
-                              timestamp=discord.utils.utcnow())
-        embed.set_author(name=f"To {_relay_author_line(recipient)}"[:256],
-                         icon_url=recipient.display_avatar.url)
-        embed.set_footer(text=f"Your /tell from {where}, as delivered.")
+        embed = relay_format.relay_embed(
+            message, shown_as=f"To {_relay_author_line(recipient)}",
+            icon_url=recipient.display_avatar.url,
+            footer=f"Your /tell from {where}, as delivered.")
         try:
             await interaction.user.send(embed=embed,
                                         allowed_mentions=discord.AllowedMentions.none())

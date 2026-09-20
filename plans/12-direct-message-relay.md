@@ -141,6 +141,8 @@ Placed **after** the self-check at `:254` (so Fritz's own relay DM cannot route 
 
 In P0, `relay_router.try_route_reply` is a stub that returns `False` unconditionally. Ship it with the regression test that a plain DM still reaches `ask_stuff`, and with a source-level ordering test in the style of `tests/test_discord_commands.py:232-259`, which reads `main_discord.py` as text and asserts statement order. That source-level test is the guard against a future refactor silently reordering the block — the failure is invisible at runtime because everything still appears to work.
 
+> **SHIPPED 2026-09-20.** One departure: the snippet above cannot be pasted where it belongs, because `on_message`'s early returns were an `if/elif/elif` chain and nothing can go *between* two arms of one chain. The first two arms are now separate `if`s (each returns, so the flow is identical), and the DM branch carries the `elif not client.user.mentioned_in(ctx)` guard — keep that `elif` attached to the `isinstance` `if`, or a non-DM message stops being checked for a mention. Anyone reverting P0 must restore the chain, not just delete the hook.
+
 ### P1 — `pyproject.toml` `py-modules`. (XS)
 
 `tests/test_packaging.py:183` cross-checks `[tool.setuptools] py-modules` against top-level modules on disk **in both directions**. Adding `relay_store.py` and `relay_router.py` turns it red until `pyproject.toml:127-152` lists them. Free regression guard; expect it rather than be surprised by it.
@@ -297,6 +299,17 @@ A reply to a **closed or expired** relay does not route and does not fall throug
 A reply whose anchor resolves to **nothing** (row purged, or a reply to some other Fritz message) falls through to the normal agent path unchanged. Graceful degradation, no error.
 
 If the reply-back send fails, the failure copy goes to **the person who just replied** — they are the only one in the room — not to the sender who cannot see it.
+
+> **SHIPPED 2026-09-20.** As specified — one direction-agnostic path, no session state, no `mister_fritz` import — with these notes:
+> - **`MessageReferenceType.reply` is a literal alias of `default`** in discord.py 2.6.4 (`enums.py:232-235`: both are `0`). Testing it would accept pins, crossposts, thread starters and poll results alike, so it is not a reply check at all. `Message.type is MessageType.reply` (19) is the only discriminator, which is what the plan said for a different reason. This also settles the forward case concretely: a forward carries `reference.message_id` for the very row we look up, with **empty content**, so without the type gate a forward would relay nothing to the original sender and burn the exchange.
+> - **The shared presentation moved to `relay_format.py`.** `bot_commands` imports `mister_fritz`, so the router could not reuse anything from it; the embed, the author line, the refusal schedule, the audit digest and the keyed-digest helper now live in a module that imports neither. `bot_commands` keeps its old names as aliases, so `/tell`'s call sites are unchanged. The relay embed itself was inline in `_deliver_relay` and became a real function used by both ends.
+> - **Addressing is `client.create_dm(discord.Object(id=...))`.** `get_user` can never hit for this bot (no member cache), and `fetch_user` would cost a second HTTP call for a name the router does not need: the reply-back embed names the *replier*, who is live in `ctx.author`.
+> - **A reply goes to the account that wrote**, `sender_account`, not the identity it resolves to — the same rule PR 3 established for blocks.
+> - **A reply with no words** (an attachment alone) is answered, not carried and not passed to the agent. Attachments never travel; both parties are told.
+> - **A reply beginning with `$` was being swallowed whole.** `on_message` handed anything starting with the prefix to `process_commands`, and this bot registers no prefix commands at all, so "$20 plus tip" was dispatched to nothing, logged as CommandNotFound, and dropped: not carried, not given to the agent, and nobody told — the one path where someone could be left believing they had answered. The branch now runs only when `client.get_command` finds a real command. Pre-existing and bot-wide; PR 4 is what made it cost something.
+> - Known gap, not fixed here: a sender replying to their own `/tell` **receipt** finds a dead end, because only the recipient's DM id is recorded. Their side of the conversation continues by replying to the reply. Recording the receipt's id too would fix it and is a small change.
+>
+> 25 mutations of the router each turn a test red, including every "must not route" case.
 
 *Unblocks:* the feature is two-way. *Risk:* **this is the riskiest PR, and it is not close.** It makes live a branch that sits directly above `main_discord.py:259`, the single most load-bearing line in the bot's main surface. A bug here does not degrade relay — it breaks every DM conversation with Fritz, and it does so silently, because a router that eats every DM still "works" from the code's point of view. The test that a plain DM with no reference still reaches `ask_stuff` is a release blocker, not a nice-to-have.
 
