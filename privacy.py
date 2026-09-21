@@ -255,15 +255,51 @@ def get_workspace_for_export(user_id: str) -> Optional[str]:
 
 # ── Aggregates ───────────────────────────────────────────────────────────────
 
+def forget_relay(user_id: str) -> int:
+    """Forget every relayed message this person sent or received.
+
+    Messages still inside the rate window are scrubbed rather than deleted,
+    so forgetting cannot reset a cap; see relay_store.forget_relay. Blocks are
+    left alone in both directions (DECISIONS #22): those placed
+    against this person are other people's, and those they placed are dropped
+    only by /relay forget-blocks, so /forget all never re-arms a harasser.
+    """
+    # NOT resolved here, unlike its siblings: relay_store resolves exactly
+    # once, as it did when the rows were written, and also matches the
+    # account as given. Resolving here as well followed a second hop under
+    # chained IDENTITY_LINKS (A->B, B->C) and acted on C's relays instead of
+    # B's — A's own messages untouched and someone else's gone.
+    if not user_id:
+        return 0
+    import relay_store
+    try:
+        return relay_store.forget_relay(user_id)
+    except Exception as e:
+        logger.warning("forget_relay failed for %s: %s", user_id, e)
+        return 0
+
+
+def export_relay(user_id: str) -> dict:
+    """This person's relayed messages, both ways, and the blocks they placed."""
+    # NOT resolved here: relay_store resolves once; see forget_relay.
+    empty = {"sent": [], "received": [], "blocks": []}
+    if not user_id:
+        return empty
+    import relay_store
+    try:
+        return relay_store.export_relay(user_id)
+    except Exception as e:
+        logger.warning("export_relay failed for %s: %s", user_id, e)
+        return empty
+
+
 def forget_all(user_id: str, schedule_manager: Any = None) -> dict:
     """Run every forget_* op and report counts back. Best-effort — partial
     failure in one store does not abort the others."""
-    # Resolved HERE, at the entry point. It used to happen inside two of
-    # these functions and nowhere else, so an IDENTITY_LINKS alias was
-    # honoured when forgetting memories but ignored when forgetting the
-    # conversation, schedules or workspace — a /forget that reported
-    # success while leaving most of the person behind.
-    user_id = resolve_identity(user_id) if user_id else user_id
+    # NOT resolved here. Every operation below resolves at its own entry
+    # point, so resolving here as well was a second hop through
+    # IDENTITY_LINKS: under chained links (A->B, B->C), /forget all from A
+    # deleted C's memories, conversation, schedules and workspace.
     return {
         "memories": forget_memories(user_id),
         "conversation_rows": forget_conversation(user_id),
@@ -272,6 +308,9 @@ def forget_all(user_id: str, schedule_manager: Any = None) -> dict:
         # The display-name alias is personal data too — leaving it behind would
         # mean "forget me" still knows what you are called.
         "alias_dropped": forget_alias(user_id),
+        # Messages this person sent or received through the relay. NOT their
+        # relay blocks: see forget_relay.
+        "relays": forget_relay(user_id),
     }
 
 
@@ -295,18 +334,18 @@ def forget_alias(user_id: str) -> bool:
 
 def export_user_data(user_id: str, schedule_manager: Any = None) -> dict:
     """Return a JSON-serialisable snapshot of everything we have on this user."""
-    # Resolved HERE, at the entry point. It used to happen inside two of
-    # these functions and nowhere else, so an IDENTITY_LINKS alias was
-    # honoured when forgetting memories but ignored when forgetting the
-    # conversation, schedules or workspace — a /forget that reported
-    # success while leaving most of the person behind.
-    user_id = resolve_identity(user_id) if user_id else user_id
+    # NOT resolved here. Every operation below resolves at its own entry
+    # point, so resolving here as well was a second hop through
+    # IDENTITY_LINKS: under chained links (A->B, B->C), /forget all from A
+    # deleted C's memories, conversation, schedules and workspace.
+    resolved = resolve_identity(user_id) if user_id else user_id
     import identity_store
     return {
-        "user_id": user_id,
-        "display_name": identity_store.display_name(user_id, default=""),
+        "user_id": resolved,
+        "display_name": identity_store.display_name(resolved, default=""),
         "memories": export_memories(user_id),
         "schedules": export_schedules(user_id, schedule_manager),
         "conversation_checkpoint_count": count_conversation_checkpoints(user_id),
         "workspace_path": get_workspace_for_export(user_id),
+        "relays": export_relay(user_id),
     }

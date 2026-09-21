@@ -640,6 +640,19 @@ def validate_config() -> None:
             "not registered. Set RELAY_ENABLED=true to use it."
         )
 
+    # purge_expired keeps a relay past retention while it can still be
+    # answered, so the reply window wins — and bodies are then held in
+    # plaintext for longer than RELAY_RETENTION_DAYS says. Say so rather than
+    # let the operator believe the shorter number.
+    if RELAY_REPLY_WINDOW_MIN > RELAY_RETENTION_DAYS * 24 * 60:
+        logging.getLogger(__name__).warning(
+            "RELAY_REPLY_WINDOW_MIN (%d minutes) is longer than "
+            "RELAY_RETENTION_DAYS (%d days). A relayed message is kept until "
+            "its reply window closes, so messages will be held for up to %.1f "
+            "days, not %d.", RELAY_REPLY_WINDOW_MIN, RELAY_RETENTION_DAYS,
+            RELAY_REPLY_WINDOW_MIN / 1440, RELAY_RETENTION_DAYS,
+        )
+
     legacy = [u for u in ([ROOT_USER] if ROOT_USER else []) + sorted(ADMIN_USERS)
               if not is_canonical_user_id(u)]
     if legacy:

@@ -5,6 +5,7 @@ import time
 import uuid
 
 import discord
+from apscheduler.triggers.cron import CronTrigger
 from discord.ext import commands
 
 from admin_panel import start_admin_panel
@@ -28,6 +29,7 @@ from mister_fritz import ask_stuff
 from observability import METRICS, init_logging, start_metrics_server
 from prewarm import prewarm_models
 import relay_router
+import relay_store
 from scheduler import ScheduleManager
 # stt is safe at module level: it imports pydub (core) and defers the Whisper
 # model itself. tts is NOT — see the deferred import in on_ready.
@@ -190,6 +192,7 @@ async def on_ready():
             logger.info("TTS engine ready")
     schedule_manager = ScheduleManager(client)
     schedule_manager.start()
+    await relay_housekeeping(schedule_manager)
     # Start the read-only admin panel (no-op if ADMIN_PANEL_PASSWORD is unset).
     start_admin_panel(schedule_manager=schedule_manager)
     # Pre-warm Ollama in a daemon thread so the first DM doesn't pay model-load lag.
@@ -209,6 +212,51 @@ async def on_ready():
         print(f"Synced {len(synced)} command(s)")
     except Exception as e:
         print(f"Failed to sync commands: {e}")
+
+
+async def relay_housekeeping(schedule_manager) -> None:
+    """Upkeep for the relay. Runs from on_ready, right after the scheduler
+    starts — and so again on every reconnect, which each step must tolerate.
+
+    1. Close what a previous process left open. A relay is reserved, sent,
+       then settled; dying between those steps leaves a row that will never
+       route a reply and never tell its sender anything. Only reservations
+       older than THIS process are touched (see reconcile_pending): on a
+       reconnect, the ones younger than it are live sends.
+    2. Purge now. A bot that restarts more often than the job fires would
+       otherwise never purge at all.
+    3. Register the purge hourly on the scheduler that already exists, as
+       _internal_wal_checkpoint is — not a second scheduler to start, stop
+       and reason about for one DELETE. Hourly, because forgotten rows are
+       kept only while they still count against a cap, and a nightly purge
+       left them for up to a day. misfire_grace_time=None: APScheduler's
+       default grace is ONE second, so a purge due while the loop was busy
+       was silently skipped. coalesce folds any backlog into one run. It
+       lives in APScheduler only, so list_all_schedules (which reads the
+       schedules table) never shows it to anyone.
+
+    None may stop the bot from coming up: each failure is logged and the
+    rest still run.
+    """
+    try:
+        await run_blocking(relay_store.reconcile_pending)
+    except Exception as e:
+        logger.error("relay: could not reconcile open reservations: %s", e)
+    try:
+        await run_blocking(relay_store.purge_expired)
+    except Exception as e:
+        logger.error("relay: could not purge expired messages: %s", e)
+    try:
+        schedule_manager.scheduler.add_job(
+            relay_store.purge_expired,
+            trigger=CronTrigger(minute=30),
+            id="_internal_relay_retention",
+            misfire_grace_time=None,
+            coalesce=True,
+            replace_existing=True,
+        )
+    except Exception as e:
+        logger.warning("relay: could not register the retention purge: %s", e)
 
 
 def make_streaming_callback(handler, loop, min_interval=None):

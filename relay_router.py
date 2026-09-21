@@ -29,8 +29,12 @@ What does NOT route, and why it matters:
   row we would look up, with empty content, so without the MessageType.reply
   gate a forward would relay nothing to the original sender and burn the
   exchange.
-- A reply to anything that is not a live relay: it falls through to the agent
-  exactly as before.
+- A reply to anything that is not a relay: it falls through to the agent
+  exactly as before. A reply to a relay that is no longer live — expired,
+  closed, or with no row left at all because someone forgot it or the purge
+  ran — does NOT fall through: it is told the exchange has lapsed. Fritz's own
+  relay embed is how a relay with no row is still recognised
+  (relay_format.relay_kind).
 """
 from __future__ import annotations
 
@@ -55,6 +59,9 @@ NO_WORDS = ("There were no words in that to carry, so I have carried nothing. "
             "I relay words, not parcels.")
 UNREACHABLE = ("I have no way to reach whoever sent that. "
                + relay_format.NOTHING_SENT)
+OWN_COPY = ("That is your own copy of what you sent, so a reply to it reaches no "
+            "one. Their answer, if they send one, arrives here as a new message, "
+            "and you can reply to that.")
 
 
 async def try_route_reply(client, ctx) -> bool:
@@ -87,7 +94,21 @@ async def try_route_reply(client, ctx) -> bool:
         logger.error("relay lookup failed for message %s: %s", reference.message_id, e)
         return False
     if row is None:
-        return False                    # not a relay of ours; the agent's, unchanged
+        # No row — but it may still have been a relay: forgotten by either
+        # party, purged, or closed by reconcile. Fritz's own relay embed says
+        # so, and a reply to it must not become a conversation turn containing
+        # an answer meant for someone else. Anything else is the agent's.
+        kind = relay_format.relay_kind(getattr(reference, "resolved", None),
+                                       getattr(client, "user", None))
+        if kind == "relay":
+            await _say(ctx, LAPSED)
+            return True
+        if kind == "receipt":
+            # A sender answering their own copy. It used to reach the agent,
+            # carrying words meant for the other person.
+            await _say(ctx, OWN_COPY)
+            return True
+        return False
 
     replier = canonical_user_id("discord", ctx.author.id)
     if row["recipient_id"] != resolve_identity(replier):
@@ -199,7 +220,7 @@ async def _carry_back(client, ctx, row: dict, target: str, body: str) -> None:
         f"{'s' if len(ctx.attachments) != 1 else ''}, which I do not carry.")
     embed = relay_format.relay_embed(
         body, shown_as=shown_as, icon_url=ctx.author.display_avatar.url,
-        footer=("A reply to the message I carried for you." + carried
+        footer=(relay_format.FOOTER_REPLY + " for you." + carried
                 + "\nReply to this to answer; /relay block to stop."))
     audit = relay_format.refusal_audit(replier, target, outcome.id, guild_id, body)
 

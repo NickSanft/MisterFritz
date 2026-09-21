@@ -223,7 +223,8 @@ class TestBlockStateIsNotProbeable(RelayStoreTestCase):
         self.store.mark_refused(res.id)
         closed = self._refused_row("discord-3", "discord-4")
 
-        varying = {"id", "sender_id", "sender_account", "recipient_id", "created_at",
+        varying = {"id", "sender_id", "sender_account", "recipient_id", "recipient_account",
+                   "created_at",
                    "expires_at", "closed_at"}
         self.assertEqual({k: v for k, v in blocked.items() if k not in varying},
                          {k: v for k, v in closed.items() if k not in varying})

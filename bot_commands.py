@@ -182,18 +182,40 @@ def _render_image(prompt: str) -> str:
     return generate_image(prompt)
 
 
+# DECISIONS #22: /forget all does not clear the relay blocks you placed — a
+# privacy command must not quietly re-arm a harasser — so it no longer forgets
+# literally everything, and says so in both the prompt and the result, naming
+# the one command that does drop them.
+_BLOCKS_KEPT = ("Kept on purpose: the relay blocks you have placed, so nobody "
+                "you blocked can reach you again by accident. To remove "
+                "those too, use **/relay forget-blocks**.")
+
+
+# What the relay keeps through /forget all, none of it the words anyone
+# wrote: the audit log's text-free line per message, which exists for abuse
+# handling; and, for each message you sent, what its recipient needs to block
+# you from it, until it expires (see relay_store.forget_relay).
+_RELAY_KEPT = ("Also kept: the audit log's line for each relayed message, which "
+               "holds no words and exists for handling abuse, and \u2014 until "
+               f"they expire after {fritz_utils.RELAY_RETENTION_DAYS} days \u2014 "
+               "enough of each message you sent for its recipient to block you "
+               "from it.")
+
+
 class _ForgetConfirmView(discord.ui.View):
     """30-second confirmation view for /forget all.
 
     Only the user who triggered the command can press Confirm — other users
-    clicking the buttons get an ephemeral rejection. After the timeout, the
-    buttons disable.
+    clicking the buttons get an ephemeral rejection. When the time runs out
+    the buttons are withdrawn and the message says nothing was deleted; they
+    used to simply stop working, with nothing on screen to say so.
     """
 
-    def __init__(self, requester: str, schedule_manager):
+    def __init__(self, requester: str, schedule_manager, origin=None):
         super().__init__(timeout=30.0)
         self.requester = requester
         self.schedule_manager = schedule_manager
+        self.origin = origin
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         # Compare canonical ids, not names: a rename between opening the
@@ -208,22 +230,67 @@ class _ForgetConfirmView(discord.ui.View):
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
         result = await run_blocking(privacy.forget_all, self.requester, self.schedule_manager)
         audit_log("forget", user_id=self.requester, scope="all", result=result)
-        await interaction.response.edit_message(
-            content=(
-                "✅ All data removed:\n"
-                f"• memories: {result['memories']}\n"
-                f"• conversation rows: {result['conversation_rows']}\n"
-                f"• schedules: {result['schedules']}\n"
-                f"• workspace dropped: {result['workspace_dropped']}"
-            ),
-            view=None,
-        )
+        await interaction.response.edit_message(content=_forget_all_report(result), view=None)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
         await interaction.response.edit_message(content="Aborted. Nothing was deleted.", view=None)
+
+    async def on_timeout(self) -> None:
+        if self.origin is None:
+            return
+        try:
+            await self.origin.edit_original_response(
+                content="That confirmation has lapsed. Nothing was deleted.", view=None)
+        except Exception as e:
+            logger.info("could not withdraw /forget all buttons: %s", type(e).__name__)
+
+
+def _forget_all_report(result: dict) -> str:
+    """What /forget all removed — every key forget_all returns.
+
+    alias_dropped was deleted on every /forget all and reported to nobody, the
+    under-report a single assertEqual over the whole dict now guards against.
+    """
+    return (
+        "\u2705 Removed:\n"
+        f"\u2022 memories: {result['memories']}\n"
+        f"\u2022 conversation rows: {result['conversation_rows']}\n"
+        f"\u2022 schedules: {result['schedules']}\n"
+        f"\u2022 workspace dropped: {result['workspace_dropped']}\n"
+        f"\u2022 the name I knew you by: {'forgotten' if result['alias_dropped'] else 'none held'}\n"
+        f"\u2022 relayed messages, sent and received: {result['relays']}\n"
+        "\n" + _BLOCKS_KEPT + "\n" + _RELAY_KEPT
+    )
+
+
+_EXPORT_MAX_BYTES = 8 * 1024 * 1024
+
+
+# What trims each part of an export. It used to say /forget memories whatever
+# was large, which cannot help someone whose export is mostly relayed messages.
+def _export_trim(section: str) -> str:
+    if section == "memories":
+        return "`/forget memories` clears those, then try again."
+    if section == "schedules":
+        return "`/forget schedules` clears those, then try again."
+    if section == "relays":
+        return (f"Relayed messages are removed after {fritz_utils.RELAY_RETENTION_DAYS} "
+                "days, or at once with `/forget all`.")
+    return "Please trim with `/forget`, then try again."
+
+
+def _export_too_large(data: dict, size: int) -> str:
+    """The refusal for an oversized export, naming what made it so."""
+    def weight(value) -> int:
+        return len(json.dumps(value, default=str, ensure_ascii=False).encode("utf-8"))
+    largest = max(data, key=lambda k: weight(data[k]))
+    return (f"\u274c Export is too large ({size / 1024 / 1024:.1f} MB), mostly your "
+            f"{largest}. " + _export_trim(largest))
 
 
 async def _require_admin(interaction: discord.Interaction) -> bool:
@@ -366,11 +433,17 @@ def _block_target(text: str, me: str) -> tuple[str, str] | None:
     Autocomplete only suggests; Discord submits whatever was typed, so this
     parses and never trusts. A relay token counts only if that relay was
     delivered to `me` — anything else reads exactly like gibberish.
+
+    Not a scrubbed row: it has no account left on it, and _relay_sender would
+    fall back to the resolved sender_id — naming the main behind an alt, and
+    under chained links storing a block that never binds. A row whose sender
+    forgot it is fine; it kept the account for exactly this.
     """
     text = (text or "").strip()
     if _RELAY_TOKEN_RE.fullmatch(text):
         row = relay_store.get(text)
         if (row and row["status"] == relay_store.STATUS_DELIVERED
+                and row["forgotten"] != relay_store.FORGOTTEN_SCRUBBED
                 and row["recipient_id"] == resolve_identity(me)):
             return _relay_sender(row), row["shown_as"] or "the sender of that message"
         return None
@@ -390,6 +463,10 @@ def _relay_sender(row: dict) -> str:
     """
     return row.get("sender_account") or row["sender_id"]
 
+
+_BLOCK_GONE = ("I carried that message, but I no longer hold who sent it, so I cannot "
+               "block them from it. /relay block takes their user ID or a mention, and "
+               "/relay block-everyone refuses everyone.")
 
 _RELAY_HELP = ("/relay block \u00b7 /relay block-everyone \u00b7 /relay unblock \u00b7 "
                "/relay status \u00b7 /relay forget-blocks")
@@ -652,19 +729,24 @@ class FritzCommands(commands.Cog):
 
     @forget.command(
         name="all",
-        description="Delete EVERYTHING Fritz has stored about you (memories, conversation, schedules, workspace)",
+        description="Delete your memories, conversation, schedules, workspace and relays (blocks are kept)",
     )
     async def forget_all_slash(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.forget.all")
         user_id = _identity(interaction)
         # Two-step confirmation: present a confirm/cancel view to the user.
-        view = _ForgetConfirmView(user_id, self.schedule_manager)
+        view = _ForgetConfirmView(user_id, self.schedule_manager, origin=interaction)
         await interaction.response.send_message(
-            "⚠️ This will permanently delete:\n"
-            "• all stored memories and your profile\n"
-            "• your conversation history checkpoint\n"
-            "• every scheduled task you have\n"
-            "• your workspace registration (files on disk are kept)\n"
+            "\u26a0\ufe0f This will permanently delete:\n"
+            "\u2022 all stored memories and your profile\n"
+            "\u2022 your conversation history checkpoint\n"
+            "\u2022 every scheduled task you have\n"
+            "\u2022 your workspace registration (files on disk are kept)\n"
+            "\u2022 the name I know you by\n"
+            "\u2022 every message relayed to or from you, as I hold it. What was "
+            "delivered stays in the Discord DMs it went to: I cannot unsend it\n"
+            "\n" + _RELAY_KEPT + "\n"
+            "\n" + _BLOCKS_KEPT + "\n"
             "\nClick **Confirm** within 30 seconds to proceed.",
             view=view, ephemeral=True,
         )
@@ -678,15 +760,14 @@ class FritzCommands(commands.Cog):
         user_id = _identity(interaction)
         await interaction.response.defer(ephemeral=True, thinking=True)
         data = await run_blocking(privacy.export_user_data, user_id, self.schedule_manager)
-        payload = json.dumps(data, indent=2, default=str).encode("utf-8")
+        # ensure_ascii=False: relayed bodies are whatever people typed, and an
+        # emoji escaped as \ud83d\ude00 is three times its UTF-8 size.
+        payload = json.dumps(data, indent=2, default=str, ensure_ascii=False).encode("utf-8")
         # Discord's free-tier per-message attachment cap is 25 MB; we cap at 8 MB
         # as a comfortable safety margin since exports should be tiny.
-        if len(payload) > 8 * 1024 * 1024:
-            await interaction.followup.send(
-                f"❌ Export is too large ({len(payload) / 1024 / 1024:.1f} MB). "
-                "Please run `/forget memories` first to trim, then try again.",
-                ephemeral=True,
-            )
+        if len(payload) > _EXPORT_MAX_BYTES:
+            await interaction.followup.send(_export_too_large(data, len(payload)),
+                                            ephemeral=True)
             return
         audit_log("export", user_id=user_id, bytes=len(payload))
         attachment = discord.File(
@@ -1167,7 +1248,7 @@ class FritzCommands(commands.Cog):
         embed = relay_format.relay_embed(
             message, shown_as=shown_as,
             icon_url=interaction.user.display_avatar.url,
-            footer=(f"Sent with /tell from {where}. "
+            footer=(f"{relay_format.FOOTER_RELAYED} {where}. "
                     "The words are theirs; I merely carry them.\n"
                     "Not welcome? Apps \u2192 Block this sender, on this "
                     "message \u2014 or /relay block."))
@@ -1287,7 +1368,8 @@ class FritzCommands(commands.Cog):
         embed = relay_format.relay_embed(
             message, shown_as=f"To {_relay_author_line(recipient)}",
             icon_url=recipient.display_avatar.url,
-            footer=f"Your /tell from {where}, as delivered.")
+            footer=(f"{relay_format.FOOTER_RECEIPT} {where}, as delivered. "
+                    "Their answer, if they send one, arrives here as a new message."))
         try:
             await interaction.user.send(embed=embed,
                                         allowed_mentions=discord.AllowedMentions.none())
@@ -1512,6 +1594,11 @@ class FritzCommands(commands.Cog):
         # The row holds the recipient already resolved; resolving it again is a
         # second hop through IDENTITY_LINKS, which locked a linked recipient
         # out of their own relay under a chained config.
+        if row is None and relay_format.relay_kind(message, self.bot.user) == "relay":
+            # One of ours whose row has gone: past retention, or forgotten by
+            # this recipient. "Not a message I carried" would be untrue.
+            await _answer(interaction, _BLOCK_GONE)
+            return
         if row is None or row["recipient_id"] != resolve_identity(me):
             await _answer(interaction,
                           "That is not a message I carried to you, so there is no one to "

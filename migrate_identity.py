@@ -92,6 +92,7 @@ _SQLITE_TARGETS = (
     ("relay_messages", "sender_id"),
     ("relay_messages", "recipient_id"),
     ("relay_messages", "sender_account"),
+    ("relay_messages", "recipient_account"),
     ("relay_optouts", "user_id"),
     ("relay_optouts", "blocked_id"),
 )

@@ -53,6 +53,40 @@ NOTHING_SENT = "Nothing was sent."
 REFUSAL_WINDOW_SEC = (1.0, 2.0)
 
 
+# How each kind of relay message's footer begins. Every sender builds its
+# footer from these, and relay_kind reads them back off Fritz's own message to
+# recognise a relay whose row is gone — forgotten, purged or reconciled — so a
+# reply to it is told the exchange has lapsed instead of becoming a
+# conversation turn with Fritz. They are therefore a FORMAT: change one and
+# every DM already sent with the old wording stops being recognised.
+FOOTER_RELAYED = "Sent with /tell from"
+FOOTER_REPLY = "A reply to the message I carried"
+FOOTER_RECEIPT = "Your /tell from"
+
+
+def relay_kind(message, bot_user) -> str | None:
+    """"relay" for a relay DM Fritz sent, "receipt" for a sender's own copy of
+    one, None for anything else — including a message that was deleted, or
+    one Discord did not include with the reply.
+
+    Only Fritz's own messages count: the footer text alone is forgeable by
+    anyone who can post an embed, but a DM with the bot contains nobody's
+    messages except the bot's and the person's own.
+    """
+    if not isinstance(message, discord.Message) or bot_user is None:
+        return None
+    if getattr(message.author, "id", None) != getattr(bot_user, "id", object()):
+        return None
+    footer = message.embeds[0].footer.text if message.embeds else None
+    if not footer:
+        return None
+    if footer.startswith(FOOTER_RECEIPT):
+        return "receipt"
+    if footer.startswith((FOOTER_RELAYED, FOOTER_REPLY)):
+        return "relay"
+    return None
+
+
 def max_body_chars(configured: int) -> int:
     """The longest body a relay will carry, whatever the operator configured."""
     return max(1, min(configured, EMBED_DESCRIPTION_MAX))

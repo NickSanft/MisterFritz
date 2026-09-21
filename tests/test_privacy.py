@@ -362,7 +362,8 @@ class TestForgetAll(unittest.TestCase):
         with patch.object(self.privacy, "forget_memories", return_value=10), \
              patch.object(self.privacy, "forget_conversation", return_value=5), \
              patch.object(self.privacy, "forget_workspace", return_value=True), \
-             patch.object(self.privacy, "forget_alias", return_value=True):
+             patch.object(self.privacy, "forget_alias", return_value=True), \
+             patch.object(self.privacy, "forget_relay", return_value=4):
             result = self.privacy.forget_all("alice", manager)
 
         self.assertEqual(result, {
@@ -373,6 +374,10 @@ class TestForgetAll(unittest.TestCase):
             # The display name is personal data too — "forget me" that leaves
             # behind what you are called has not forgotten you.
             "alias_dropped": True,
+            # Relayed messages, both directions. The whole dict is asserted on
+            # purpose: a new store that forget_all forgets to report is the
+            # exact under-report alias_dropped already was.
+            "relays": 4,
         })
 
 
