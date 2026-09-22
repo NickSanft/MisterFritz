@@ -481,6 +481,23 @@ class TestBlockFromMessage(RelayTestCase):
             self.assertEqual(relay_store.list_blocks(linked), [SENDER])
 
 
+class TestALinkAddedAfterDelivery(RelayTestCase):
+    """The row holds the recipient resolved as it was then. A link added since
+    must not lock the real recipient out of blocking the message in their own
+    inbox — the account it was sent to is them."""
+
+    async def test_the_menu_and_the_picker_still_block(self):
+        later = {RECIPIENT: "discord-555555555555555999"}
+        dm = await self.delivered_message()
+        rid = relay_store.get_by_dm_message(dm.id)["id"]
+        with self.links(later):
+            menu = self.recipient()
+            await self.cog.block_sender_from_message(menu, dm)
+            self.assertIn("will not be told", self.answer(menu))
+            self.assertEqual(self.blocks(), [SENDER])     # held by who they are now
+            self.assertEqual(bot_commands._block_target(rid, RECIPIENT)[0], SENDER)
+
+
 class TestAutocomplete(RelayTestCase):
     async def test_block_offers_each_sender_as_you_saw_them(self):
         await self.delivered_message(self.interaction(display="Mallory"))

@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import logging
 import random
+import re
 import unicodedata
 
 import discord
@@ -85,6 +86,35 @@ def relay_kind(message, bot_user) -> str | None:
     if footer.startswith((FOOTER_RELAYED, FOOTER_REPLY)):
         return "relay"
     return None
+
+
+# [0-9], never \d: \d also matches non-ASCII digits ("١٢٣…"), which then
+# turned into a different id, or an unhandled error, further down.
+MENTION_RE = re.compile(r"<@!?([0-9]{15,25})>")
+
+
+def mention_label(canonical: str) -> str:
+    """The label for a block typed as an id: a mention of exactly that id,
+    which the viewer's own client renders from what it already knows."""
+    return f"<@{fritz_utils.split_user_id(canonical)[1]}>"
+
+
+def block_label(label: str | None, blocked_id: str | None = None) -> str:
+    """A block's label, fit for message content.
+
+    Here rather than in bot_commands because the relayed DM's own Block button
+    answers in the same words as /relay block and the context menu, and the
+    router that handles it must never import bot_commands.
+    """
+    if label and MENTION_RE.fullmatch(label):
+        return label
+    if label:
+        return discord.utils.escape_markdown(label)
+    # A block placed without a label (only possible from code, never from a
+    # command) falls back to a mention of what is stored.
+    if blocked_id and fritz_utils.split_user_id(blocked_id)[0] == "discord":
+        return mention_label(blocked_id)
+    return "someone"
 
 
 def max_body_chars(configured: int) -> int:

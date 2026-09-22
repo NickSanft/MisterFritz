@@ -26,8 +26,6 @@ from fritz_utils import (
     TTS_MAX_CONCURRENCY,
     __version__,
     canonical_user_id,
-    resolve_identity,
-    split_user_id,
 )
 import identity_store
 # NOTE: `image_generator` and `tts` are deliberately NOT imported here. Both
@@ -41,6 +39,7 @@ from mister_fritz import ask_stuff
 from observability import METRICS, audit_log, get_health_snapshot
 import privacy
 import relay_format
+import relay_router
 import relay_store
 import workspace_store
 
@@ -357,9 +356,7 @@ async def _answer(interaction: discord.Interaction, text: str, **kwargs) -> None
 # one. Autocomplete therefore hands the client opaque tokens: a relay id, or
 # a block's entry key.
 
-# [0-9], never \d: \d also matches non-ASCII digits ("١٢٣…"), which then
-# turned into a different id, or an unhandled error, further down.
-_MENTION_RE = re.compile(r"<@!?([0-9]{15,25})>")
+_MENTION_RE = relay_format.MENTION_RE
 _SNOWFLAKE_RE = re.compile(r"[0-9]{15,25}")
 _DISCORD_ID_RE = re.compile(r"discord-([0-9]{15,25})")
 _RELAY_TOKEN_RE = re.compile(r"[0-9a-f]{8}")          # str(uuid4())[:8]
@@ -383,23 +380,9 @@ def _typed_discord_id(text: str) -> str | None:
     return None
 
 
-def _mention_label(canonical: str) -> str:
-    """The label for a block typed as an id: a mention of exactly that id,
-    which the viewer's own client renders from what it already knows."""
-    return f"<@{split_user_id(canonical)[1]}>"
-
-
-def _say(label: str | None, blocked_id: str | None = None) -> str:
-    """A label, fit for message content."""
-    if label and _MENTION_RE.fullmatch(label):
-        return label
-    if label:
-        return discord.utils.escape_markdown(label)
-    # A block placed without a label (only possible from code, never from a
-    # command) falls back to a mention of what is stored.
-    if blocked_id and split_user_id(blocked_id)[0] == "discord":
-        return _mention_label(blocked_id)
-    return "someone"
+# Shared with the relayed DM's Block button, which relay_router handles.
+_mention_label = relay_format.mention_label
+_say = relay_format.block_label
 
 
 def _choice_name(label: str | None, blocked_id: str | None = None) -> str:
@@ -444,29 +427,17 @@ def _block_target(text: str, me: str) -> tuple[str, str] | None:
         row = relay_store.get(text)
         if (row and row["status"] == relay_store.STATUS_DELIVERED
                 and row["forgotten"] != relay_store.FORGOTTEN_SCRUBBED
-                and row["recipient_id"] == resolve_identity(me)):
+                and relay_router.delivered_to(row, me)):
             return _relay_sender(row), row["shown_as"] or "the sender of that message"
         return None
     typed = _typed_discord_id(text)
     return (typed, _mention_label(typed)) if typed else None
 
 
-def _relay_sender(row: dict) -> str:
-    """What to block when blocking "the sender of this relay": the account
-    that actually sent it, not the identity it resolves to.
-
-    Blocks are resolved once, at the gate. Blocking the already-resolved id
-    resolved it twice — under chained links that caught a different identity
-    and let the real sender through — and showed the recipient a linked
-    account they were never shown. Rows written before sender_account existed
-    fall back to sender_id.
-    """
-    return row.get("sender_account") or row["sender_id"]
-
-
-_BLOCK_GONE = ("I carried that message, but I no longer hold who sent it, so I cannot "
-               "block them from it. /relay block takes their user ID or a mention, and "
-               "/relay block-everyone refuses everyone.")
+# The relayed DM's Block button blocks exactly what these do, and says so in
+# the same words; relay_router holds the one copy, since it cannot import this.
+_relay_sender = relay_router.relay_sender
+_BLOCK_GONE = relay_router.BLOCK_GONE
 
 _RELAY_HELP = ("/relay block \u00b7 /relay block-everyone \u00b7 /relay unblock \u00b7 "
                "/relay status \u00b7 /relay forget-blocks")
@@ -1262,7 +1233,10 @@ class FritzCommands(commands.Cog):
                      relay_id=reservation.id, guild_id=interaction.guild_id,
                      chars=len(message), body_digest=_audit_digest(message))
         try:
-            sent = await recipient.send(embed=embed,
+            # [Reply] [Not now] [Block sender], bound to this relay's id. See
+            # relay_router: they work across restarts because main_discord
+            # registers their classes, and relay_view is built fresh per DM.
+            sent = await recipient.send(embed=embed, view=relay_router.relay_view(reservation.id),
                                         allowed_mentions=discord.AllowedMentions.none())
         except discord.Forbidden as e:
             # The recipient's side refused: DMs closed, or Fritz blocked.
@@ -1405,23 +1379,10 @@ class FritzCommands(commands.Cog):
 
     async def _block(self, interaction: discord.Interaction, me: str,
                      target: str, label: str) -> None:
-        """Place one block and say so. Shared by /relay block and the menu.
-
-        The same answer whether or not the block was new: "you had already
-        blocked X" would say, for two ids that resolve to one person, that
-        they are linked.
-        """
-        try:
-            await run_blocking(relay_store.block, me, target, label=label)
-        except ValueError:
-            await _answer(interaction, "You cannot block yourself, however tempting.")
-            return
-        # Who blocked, never whom: the audit log outlives /relay forget-blocks,
-        # and a permanent record of the blocked party would outlive the block.
-        audit_log("relay_block", user_id=me, kind="person")
-        await _answer(interaction,
-                      f"Done. I shall carry nothing further to you from {_say(label)}. "
-                      "They will not be told.",
+        """Place one block and say so. Shared by /relay block and the menu,
+        and — through relay_router.place_block — with the relayed DM's own
+        Block button, so all three answer in the same words."""
+        await _answer(interaction, await relay_router.place_block(me, target, label),
                       allowed_mentions=discord.AllowedMentions.none())
 
     @relay.command(name="block", description="Refuse messages relayed to you by one particular person")
@@ -1599,7 +1560,7 @@ class FritzCommands(commands.Cog):
             # this recipient. "Not a message I carried" would be untrue.
             await _answer(interaction, _BLOCK_GONE)
             return
-        if row is None or row["recipient_id"] != resolve_identity(me):
+        if row is None or not relay_router.delivered_to(row, me):
             await _answer(interaction,
                           "That is not a message I carried to you, so there is no one to "
                           "block from it. /relay block works from anywhere.")

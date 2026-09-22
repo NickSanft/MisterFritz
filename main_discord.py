@@ -157,6 +157,17 @@ intents = discord.Intents.default()
 intents.message_content = True
 client = commands.Bot(command_prefix=command_prefix, intents=intents)
 
+# The relayed DM's buttons. Registered HERE, at import, and not beside add_cog
+# in on_ready as plan 12 first said. on_ready loads TTS (~17 s) before add_cog,
+# and every press in that window would have matched nothing and been dropped
+# without a word; on a reconnect, add_cog raises before any line after it
+# runs. Registration needs no event loop and survives every READY. A missed
+# one is invisible until the next restart and then breaks every relayed DM
+# ever sent — so on_ready checks it, and tests/test_relay_buttons.py imports
+# this module and checks it too. Also adds the listener that handles [Reply]
+# form submissions.
+relay_router.install(client)
+
 sayer = None
 schedule_manager = None
 
@@ -164,6 +175,7 @@ schedule_manager = None
 @client.event
 async def on_ready():
     global sayer, schedule_manager
+    relay_router.ensure_installed(client)
     # No `loop` binding needed here any more — run_blocking gets its own.
     # on_message still binds one, for run_coroutine_threadsafe in the
     # streaming/progress callbacks; do not remove that one.

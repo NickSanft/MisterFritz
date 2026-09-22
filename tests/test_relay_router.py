@@ -431,14 +431,25 @@ class TestWhatMustNotRoute(ReplyTestCase):
             self.assertIs(await self.route(ctx), True)
         self.assertIn("Carried back", self.said(ctx))
 
-    async def test_a_link_added_after_delivery_leaves_the_older_relay_alone(self):
-        """A consequence worth stating plainly: the row was written under the
-        old identity, so a reply to it is a conversation with Fritz, not a
-        misrouted answer to someone else."""
+    async def test_a_link_added_after_delivery_does_not_lock_the_recipient_out(self):
+        """The row was written under the old identity. This test used to pin
+        that the reply then fell through to the agent — safe from misrouting,
+        but the recipient's answer to someone else became a turn with Fritz,
+        which is what every other path here exists to prevent. The account
+        the DM was sent to is the one replying, so it is carried back."""
         dm = await self.relayed()
         linked = f"discord-{SENDER_SNOWFLAKE + 500}"
         with patch.object(fritz_utils, "IDENTITY_LINKS", {RECIPIENT: linked}):
-            await self.assert_falls_through(self.reply_to(dm))
+            ctx = self.reply_to(dm)
+            self.assertIs(await self.route(ctx), True)
+        self.assertIn("Carried back", self.said(ctx))
+
+    async def test_but_a_different_account_still_cannot_answer_it(self):
+        dm = await self.relayed()
+        with patch.object(fritz_utils, "IDENTITY_LINKS",
+                          {f"discord-{SENDER_SNOWFLAKE + 700}": f"discord-{SENDER_SNOWFLAKE + 800}"}):
+            await self.assert_falls_through(
+                self.reply_to(dm, author_id=SENDER_SNOWFLAKE + 700))
 
 
 class TestALapsedExchange(ReplyTestCase):
