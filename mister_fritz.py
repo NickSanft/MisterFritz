@@ -60,7 +60,6 @@ from fritz_utils import (
 )
 import identity_store
 from observability import METRICS, init_logging
-from storage import SQLiteStore
 
 EXECUTOR_NODE = "executor"
 SUMMARIZE_CONVERSATION_NODE = "summarize_conversation"
@@ -922,7 +921,6 @@ logger.debug("Conversation tools: %s", conversation_tools)
 
 CACHED_SYSTEM_PROMPT = get_system_description(_conversation_tools_desc)
 
-store = SQLiteStore(CHAT_DB_NAME)
 exit_stack = ExitStack()
 checkpointer = exit_stack.enter_context(SqliteSaver.from_conn_string(CHAT_DB_NAME))
 ollama_instance = ChatOllama(
@@ -1021,17 +1019,38 @@ workflow.add_edge(START, EXECUTOR_NODE)
 workflow.add_conditional_edges(EXECUTOR_NODE, should_continue)
 workflow.add_edge(SUMMARIZE_CONVERSATION_NODE, END)
 
-app = workflow.compile(checkpointer=checkpointer, store=store)
+# No store= here. LangGraph hands a store to nodes and tools that ask for
+# one, and nothing in this graph does; the SQLiteStore that used to be passed
+# is a langchain_core key-value store, not a langgraph one, so it could not
+# have served that purpose anyway. It read as working memory and was wiring
+# to nowhere. The `store` TABLE is still created by migrate_db.
+app = workflow.compile(checkpointer=checkpointer)
+
 
 def _write_diagram():
+    """Write the graph beside the code as Mermaid text, if asked to.
+
+    draw_mermaid(), not draw_mermaid_png(): the PNG renderer POSTs the graph
+    to mermaid.ink. That put a network call in the import path of the agent —
+    on a daemon thread here, but inline in document_engine — and the tracked
+    PNG has been 0 bytes ever since the call started failing, because open()
+    truncated the file before the renderer raised. Render first, write second,
+    so a failure leaves the last good file alone.
+    """
     try:
-        with open("mister_fritz_diagram.png", "wb") as binary_file:
-            binary_file.write(app.get_graph().draw_mermaid_png())
+        mermaid = app.get_graph().draw_mermaid()
+    except Exception as e:
+        logger.debug("Could not render the graph diagram (non-fatal): %s", e)
+        return
+    try:
+        with open("mister_fritz_diagram.mmd", "w", encoding="utf-8") as text_file:
+            text_file.write(mermaid)
         logger.debug("Graph diagram written")
-    except Exception as _diagram_err:
-        logger.debug("Could not write graph diagram (non-fatal): %s", _diagram_err)
+    except OSError as e:
+        logger.debug("Could not write the graph diagram (non-fatal): %s", e)
+
 
 # FRITZ_WRITE_DIAGRAMS=0 (set by tests/conftest.py) keeps the writer from
-# dirtying the tracked PNG on every test run.
+# dirtying the working tree on every test run.
 if os.environ.get("FRITZ_WRITE_DIAGRAMS", "1") != "0":
-    threading.Thread(target=_write_diagram, name="diagram-writer", daemon=True).start()
+    _write_diagram()

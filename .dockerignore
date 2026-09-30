@@ -45,7 +45,7 @@ chat_history.db
 *.wav
 
 # Generated artifacts
-mister_fritz_diagram.png
+*_diagram.mmd
 
 # Docs and README-only files (optional — remove if you want them in image)
 # README.md

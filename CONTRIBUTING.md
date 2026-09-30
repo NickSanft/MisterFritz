@@ -62,8 +62,8 @@ CI runs the same command. Fix any reported issues before opening a PR.
   test-plan checklist.
 - All checks must pass: tests, coverage gate, lint.
 - Don't include regenerated artifacts in commits — the Mermaid diagrams
-  (`mister_fritz_diagram.png`, `document_engine_diagram.png`) are rewritten
-  on every import and should usually be reverted before staging.
+  (`mister_fritz_diagram.mmd`, `document_engine_diagram.mmd`) are rewritten
+  on every import. They are gitignored; render them with any Mermaid viewer.
 
 ## Adding a new agent tool
 

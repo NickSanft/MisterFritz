@@ -8,7 +8,11 @@ before importing, but ChatOllama itself is real — we patch the instance after
 import to control what invoke() returns.
 """
 import json
+import os
+import pathlib
+import shutil
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -33,6 +37,8 @@ from langchain_core.tools import tool  # noqa: E402
 
 import mister_fritz  # noqa: E402
 from mister_fritz import _history_window, executor  # noqa: E402
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
 
 
 def _thread(n_pairs: int, body: str = "x" * 40) -> list:
@@ -1342,3 +1348,70 @@ class TestEveryAgentIsBuiltWithIt(unittest.TestCase):
             executor(state, config=config)
         [only] = self.middleware_of(create_agent)
         self.assertIsInstance(only, mister_fritz._ToolFailuresAreVisible)
+
+
+class TestTheGraphDiagram(unittest.TestCase):
+    """It used to be a PNG rendered by POSTing the graph to mermaid.ink, which
+    put a network call in the import path and left a 0-byte file behind when
+    that call failed."""
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp())
+        cwd = os.getcwd()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, cwd)
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_it_is_mermaid_text_written_beside_the_code(self):
+        mister_fritz._write_diagram()
+        [written] = list(self.tmp.iterdir())
+        self.assertEqual(written.name, "mister_fritz_diagram.mmd")
+        text = written.read_text(encoding="utf-8")
+        self.assertIn("graph", text.lower())
+        self.assertIn(mister_fritz.EXECUTOR_NODE, text)
+
+    def test_a_failed_render_leaves_the_last_good_one_alone(self):
+        """The tracked PNG was 0 bytes because open() truncated it before the
+        renderer raised. Render first, write second."""
+        mister_fritz._write_diagram()
+        before = (self.tmp / "mister_fritz_diagram.mmd").read_text(encoding="utf-8")
+        graph = MagicMock()
+        graph.draw_mermaid.side_effect = RuntimeError("renderer is unhappy")
+        with patch.object(mister_fritz.app, "get_graph", return_value=graph):
+            mister_fritz._write_diagram()          # must not raise
+        self.assertEqual((self.tmp / "mister_fritz_diagram.mmd").read_text(encoding="utf-8"),
+                         before)
+
+    def test_no_diagram_writer_reaches_the_network(self):
+        """draw_mermaid_png() POSTs to mermaid.ink. draw_mermaid() does not."""
+        for module in ("mister_fritz.py", "document_engine.py"):
+            with self.subTest(module=module):
+                source = (REPO / module).read_text(encoding="utf-8")
+                # The call, not the word: both modules explain in a comment
+                # why the PNG renderer is not used.
+                self.assertNotIn(".draw_mermaid_png(", source)
+                self.assertIn(".draw_mermaid()", source)
+
+    def test_each_module_still_writes_one_at_import(self):
+        """Tests run with FRITZ_WRITE_DIAGRAMS=0, so the import-time call
+        itself is only visible in the source."""
+        for module in ("mister_fritz.py", "document_engine.py"):
+            with self.subTest(module=module):
+                source = (REPO / module).read_text(encoding="utf-8")
+                gate = 'if os.environ.get("FRITZ_WRITE_DIAGRAMS", "1") != "0":'
+                self.assertIn(gate + "\n    _write_diagram()", source)
+
+
+class TestTheGraphIsCompiledWithoutAStore(unittest.TestCase):
+    """LangGraph hands a store to nodes and tools that ask for one, and
+    nothing in this graph does. What used to be passed was a
+    langchain_core key-value store, which is not the same protocol, so it
+    could not have served even if something had asked."""
+
+    def test_nothing_builds_one_at_import(self):
+        self.assertFalse(hasattr(mister_fritz, "store"))
+
+    def test_and_compile_is_not_given_one(self):
+        source = (REPO / "mister_fritz.py").read_text(encoding="utf-8")
+        compile_call = source.split("app = workflow.compile(", 1)[1].split(")", 1)[0]
+        self.assertNotIn("store", compile_call)

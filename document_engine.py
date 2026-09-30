@@ -782,16 +782,26 @@ def query_documents(user_input: str, include_sources: bool = False):
         }
     return final_answer
 
-# FRITZ_WRITE_DIAGRAMS=0 (set by tests/conftest.py) keeps the writer from
-# dirtying the tracked PNG on every test run.
-if os.environ.get("FRITZ_WRITE_DIAGRAMS", "1") != "0":
+def _write_diagram():
+    """The graph as Mermaid text. See mister_fritz._write_diagram: the PNG
+    renderer POSTed the graph to mermaid.ink, which put a remote call in this
+    module's import path, and truncated the file before it could fail."""
     try:
-        with open("document_engine_diagram.png", "wb") as binary_file:
-            binary_file.write(app.get_graph().draw_mermaid_png())
-    except Exception as _diagram_err:
-        # draw_mermaid_png hits a remote service; we don't want import to fail
-        # in offline or sandboxed environments.
-        logger.debug("Could not write document_engine diagram (non-fatal): %s", _diagram_err)
+        mermaid = app.get_graph().draw_mermaid()
+    except Exception as e:
+        logger.debug("Could not render the document_engine diagram (non-fatal): %s", e)
+        return
+    try:
+        with open("document_engine_diagram.mmd", "w", encoding="utf-8") as text_file:
+            text_file.write(mermaid)
+    except OSError as e:
+        logger.debug("Could not write the document_engine diagram (non-fatal): %s", e)
+
+
+# FRITZ_WRITE_DIAGRAMS=0 (set by tests/conftest.py) keeps the writer from
+# dirtying the working tree on every test run.
+if os.environ.get("FRITZ_WRITE_DIAGRAMS", "1") != "0":
+    _write_diagram()
 
 # Ensure watchdog observer and ingestion worker exit cleanly on interpreter shutdown.
 atexit.register(shutdown)
