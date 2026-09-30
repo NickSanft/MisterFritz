@@ -25,12 +25,12 @@ dependencies = [
     "PyNaCl>=1.5",                 # discord voice channel support
     # agent / LLM stack
     "langchain>=1.1",
-    "langchain-core>=1.2",
+    "langchain-core>=1.2.31",     # GHSA-926x-3r5x-gfhw and friends
     "langchain-community>=0.4",
     "langchain-chroma>=1.1",
     "langchain-ollama>=1.0",
     "langchain-text-splitters>=1.1",
-    "langgraph>=1.0",
+    "langgraph>=1.0.10",          # GHSA-g48c-2wqr-h844: checkpoint loading
     "langgraph-checkpoint-sqlite>=3.0",
     "chromadb>=1.3",
     "ollama>=0.6",
@@ -57,7 +57,7 @@ dependencies = [
     # model itself is deferred and lives in [voice].
     "pydub>=0.25",
     # admin panel + web chat
-    "starlette>=0.46",
+    "starlette>=1.3.1",           # GHSA-82w8-qh3p-5jfq: form() size limits
     "uvicorn>=0.38",               # plain Config: no reload, no websockets
     "python-multipart>=0.0.22",    # multipart form parsing for uploads
     "Jinja2>=3.1",
@@ -73,9 +73,11 @@ dependencies = [
     # upload to prove it really is an image rather than trusting the declared
     # Content-Type — that is the security control on chat image uploads. Without
     # Pillow it returns None for everything, so the endpoint 415s on every
+    # upload. The floor clears GHSA-45hq-cxwh-f6vc, a decompression bomb
+    # reachable from exactly those untrusted bytes.
     # upload: fails closed, but the feature is simply dead. Caught by running
     # the suite in a genuinely core-only venv, where four tests went red.
-    "pillow>=12.0",
+    "pillow>=12.3",
     # config + observability
     "python-dotenv>=1.2",
     "prometheus-client>=0.20",
@@ -92,7 +94,7 @@ image = [
     "accelerate>=1.12",
     "safetensors>=0.7",
     "transformers>=4.57",
-    "pillow>=12.0",
+    "pillow>=12.3",
 ]
 # Scanned-PDF OCR fallback (document_engine.py).
 #
@@ -105,7 +107,7 @@ image = [
 # Uninstalling it is also a trap: `fitz`'s RECORD lists fitz/__init__.py, so
 # `pip uninstall fitz` DELETES PyMuPDF's shim. Force-reinstall PyMuPDF after.
 # tests/test_packaging.py guards both halves of this.
-ocr = ["easyocr>=1.7", "PyMuPDF>=1.26", "pillow>=12.0"]
+ocr = ["easyocr>=1.7", "PyMuPDF>=1.26", "pillow>=12.3"]
 telegram = ["python-telegram-bot>=20.0"]
 dev = [
     "pytest>=8.0",
