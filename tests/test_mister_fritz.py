@@ -8,10 +8,13 @@ before importing, but ChatOllama itself is real — we patch the instance after
 import to control what invoke() returns.
 """
 import json
+import sys
 import threading
 import time
 import unittest
 from unittest.mock import MagicMock, patch
+
+import httpx
 
 # ddgs / image_generator / document_engine are stubbed in tests/conftest.py
 # before any test module is collected.
@@ -22,6 +25,11 @@ from langchain_core.messages import (  # noqa: E402
     HumanMessage,
     ToolMessage,
 )
+
+from langchain_core.language_models.fake_chat_models import (  # noqa: E402
+    GenericFakeChatModel,
+)
+from langchain_core.tools import tool  # noqa: E402
 
 import mister_fritz  # noqa: E402
 from mister_fritz import _history_window, executor  # noqa: E402
@@ -997,7 +1005,7 @@ class TestAgentCache(unittest.TestCase):
                 "image_paths": [], "user_image_paths": []}
 
     def _run(self, user_id, channel_id, manager, builds):
-        def _fake_create_agent(model, tools=None):
+        def _fake_create_agent(model, tools=None, **kwargs):
             builds.append(user_id)
             return _RecordingAgent()
         cfg = {"metadata": {"user_id": user_id, "channel_id": channel_id,
@@ -1158,3 +1166,179 @@ class TestSourceInfoCarriesBothIdentifiers(unittest.TestCase):
                 self.assertIn("name: alice", line)
                 self.assertIn("User ID: discord-9", line)
 
+
+class _Ratelimit(Exception):
+    """Shaped like ddgs's own exception, which tests never import: conftest
+    replaces the whole ddgs module with a MagicMock, so the real class is not
+    a class here. _is_transient matches on the module name for that reason."""
+
+    __module__ = "ddgs.exceptions"
+
+
+class _ScriptedModel(GenericFakeChatModel):
+    """A model that calls one tool, then answers. create_agent binds tools to
+    the model, and the stock fakes do not implement bind_tools."""
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+
+def _calls_then_answers(tool_name: str, answer: str = "done"):
+    return _ScriptedModel(messages=iter([
+        AIMessage(content="", tool_calls=[
+            {"name": tool_name, "args": {}, "id": "call-1"}]),
+        AIMessage(content=answer),
+    ]))
+
+
+def _agent_for(tool_fn):
+    """One turn's agent: the real middleware, with the waiting taken out."""
+    from langchain.agents import create_agent
+    middleware = mister_fritz._agent_middleware()
+    for item in middleware:
+        item.initial_delay, item.backoff_factor, item.jitter = 0, 0, False
+    return create_agent(_calls_then_answers(tool_fn.name), tools=[tool_fn],
+                        middleware=middleware)
+
+
+_A_TURN = {"messages": [HumanMessage(content="go on then")]}
+
+
+class TestAToolThatRaisesDoesNotEndTheTurn(unittest.TestCase):
+    """LangGraph's tool node re-raises anything that is not a tool INVOCATION
+    error, so before the middleware a search timeout or a ValueError travelled
+    out of the agent, out of ask_stuff, and the person got the generic failure
+    copy instead of an answer."""
+
+    def run_turn(self, tool_fn):
+        return _agent_for(tool_fn).invoke(_A_TURN)
+
+    def test_a_bad_argument_is_handed_back_to_the_model(self):
+        calls = []
+
+        @tool
+        def roll(faces: int = 0) -> str:
+            """Roll a die."""
+            calls.append(1)
+            raise ValueError("num_dice must be at least 1")
+
+        result = self.run_turn(roll)
+        [failure] = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+        self.assertEqual(failure.status, "error")
+        self.assertIn("num_dice must be at least 1", failure.content)
+        self.assertEqual(result["messages"][-1].content, "done")
+        self.assertEqual(len(calls), 1, "a bad argument is not worth retrying")
+
+    def test_a_transient_failure_is_retried_and_can_succeed(self):
+        calls = []
+
+        @tool
+        def search(query: str = "") -> str:
+            """Search the web."""
+            calls.append(1)
+            if len(calls) == 1:
+                raise _Ratelimit("429")
+            return "the answer"
+
+        with patch.object(mister_fritz.METRICS, "increment") as counted:
+            result = self.run_turn(search)
+        [carried] = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+        self.assertEqual(carried.content, "the answer")
+        self.assertNotEqual(carried.status, "error")
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("tool.error.search", [c.args[0] for c in counted.call_args_list])
+
+    def test_a_transient_failure_that_persists_still_answers(self):
+        calls = []
+
+        @tool
+        def search(query: str = "") -> str:
+            """Search the web."""
+            calls.append(1)
+            raise _Ratelimit("429")
+
+        result = self.run_turn(search)
+        [failure] = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+        self.assertEqual(failure.status, "error")
+        self.assertEqual(len(calls), 3, "one attempt and two retries")
+        self.assertEqual(result["messages"][-1].content, "done")
+
+    def test_the_failure_is_still_recorded_on_the_way_out(self):
+        """Nothing raises any more, so nothing reaches the error path that
+        used to record it. The model's copy is not the operator's."""
+        @tool
+        def search(query: str = "") -> str:
+            """Search the web."""
+            raise RuntimeError("upstream is down")
+
+        with patch.object(mister_fritz.METRICS, "increment") as counted, \
+             self.assertLogs(mister_fritz.logger, "WARNING") as logs:
+            self.run_turn(search)
+        self.assertIn("tool.error.search", [c.args[0] for c in counted.call_args_list])
+        self.assertIn("upstream is down", " ".join(logs.output))
+
+    def test_only_transient_failures_are_retried(self):
+        self.assertTrue(mister_fritz._is_transient(_Ratelimit("429")))
+        self.assertTrue(mister_fritz._is_transient(httpx.ReadTimeout("slow")))
+        self.assertTrue(mister_fritz._is_transient(
+            httpx.ConnectError("no route")))          # a TransportError
+        self.assertFalse(mister_fritz._is_transient(ValueError("bad argument")))
+        self.assertFalse(mister_fritz._is_transient(RuntimeError("upstream is down")))
+
+    def test_a_stubbed_search_library_cannot_break_the_retry_check(self):
+        """conftest puts a MagicMock in sys.modules for ddgs. isinstance()
+        against a MagicMock raises TypeError, so building the retry set out of
+        imported exception classes would fail inside the retry loop."""
+        self.assertIsInstance(sys.modules["ddgs"], MagicMock)
+        self.assertFalse(mister_fritz._is_transient(Exception("plain")))
+
+
+class TestTheAsyncPathRecordsItToo(unittest.IsolatedAsyncioTestCase):
+    """Nothing awaits the agent today — ask_stuff is synchronous and runs in
+    the worker pool — but the middleware has both hooks, and a future astream
+    path would otherwise lose the log line and the metric."""
+
+    async def test_a_failure_is_recorded_when_the_agent_is_awaited(self):
+        @tool
+        def search(query: str = "") -> str:
+            """Search the web."""
+            raise RuntimeError("upstream is down")
+
+        with patch.object(mister_fritz.METRICS, "increment") as counted, \
+             self.assertLogs(mister_fritz.logger, "WARNING"):
+            result = await _agent_for(search).ainvoke(_A_TURN)
+        self.assertIn("tool.error.search", [c.args[0] for c in counted.call_args_list])
+        self.assertEqual(result["messages"][-1].content, "done")
+
+
+class TestEveryAgentIsBuiltWithIt(unittest.TestCase):
+    def setUp(self):
+        mister_fritz._AGENT_CACHE.clear()
+        mister_fritz._conversation_react_agent = None
+        self.addCleanup(mister_fritz._AGENT_CACHE.clear)
+
+    def middleware_of(self, create_agent):
+        create_agent.assert_called_once()
+        return create_agent.call_args.kwargs["middleware"]
+
+    def test_the_shared_conversation_agent(self):
+        with patch.object(mister_fritz, "create_agent") as create_agent:
+            mister_fritz._get_conversation_agent()
+        [only] = self.middleware_of(create_agent)
+        self.assertIsInstance(only, mister_fritz._ToolFailuresAreVisible)
+
+    def test_and_the_per_user_agent_the_bot_actually_builds(self):
+        """Discord passes channel_id and a schedule_manager on every message,
+        so this is the path that serves real turns."""
+        state = {"messages": [HumanMessage(content="hello")],
+                 "image_paths": [], "user_image_paths": []}
+        config = {"metadata": {"user_id": "tester", "channel_id": 1,
+                               "schedule_manager": MagicMock()}}
+        with patch.object(mister_fritz, "create_agent") as create_agent, \
+             patch.object(mister_fritz, "search_memories_internal", return_value="{}"), \
+             patch.object(mister_fritz, "get_user_profile", return_value={}):
+            create_agent.return_value.stream.return_value = iter(
+                [("values", {"messages": [AIMessage(content="hi")]})])
+            executor(state, config=config)
+        [only] = self.middleware_of(create_agent)
+        self.assertIsInstance(only, mister_fritz._ToolFailuresAreVisible)

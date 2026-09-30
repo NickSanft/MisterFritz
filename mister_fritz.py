@@ -7,6 +7,8 @@ import threading
 from contextlib import ExitStack
 from typing import Annotated, Literal, TypedDict
 
+import httpx
+
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -22,6 +24,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_ollama import ChatOllama
 from langchain.agents import create_agent
+from langchain.agents.middleware import ToolRetryMiddleware
 from pydantic import BaseModel, Field
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.constants import END, START
@@ -612,7 +615,8 @@ def executor(state: EnhancedState, config: RunnableConfig):
             )
             active_tools = [tool_info[0] for tool_info in tools_desc.values()]
             cached = (get_system_description(tools_desc),
-                      create_agent(ollama_instance, tools=active_tools))
+                      create_agent(ollama_instance, tools=active_tools,
+                                   middleware=_agent_middleware()))
             with _AGENT_CACHE_LOCK:
                 # Bounded: one entry per (user, channel) pair would otherwise
                 # grow without limit on a busy guild. Oldest out first; a
@@ -935,6 +939,62 @@ fast_ollama_instance = ChatOllama(
 _conversation_react_agent = None
 
 
+def _is_transient(exc: BaseException) -> bool:
+    """Is this the sort of failure a second attempt might survive?
+
+    Matched partly by module NAME rather than by importing the search library
+    here: ddgs opens the network at import, so tests replace the whole module
+    with a MagicMock — and an isinstance tuple built at import time would then
+    hold a MagicMock, which makes isinstance() itself raise TypeError inside
+    the retry loop. httpx is imported normally; nothing stubs it.
+    """
+    if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
+        return True
+    return type(exc).__module__.split(".")[0] == "ddgs"
+
+
+class _ToolFailuresAreVisible(ToolRetryMiddleware):
+    """Retry a tool, and say in the log and the metrics when one still failed.
+
+    The middleware's own answer goes to the MODEL, not to us. Without this, a
+    tool failing every turn would be invisible on the way out: nothing raises
+    any more, so nothing reaches the error path that used to record it.
+    """
+
+    def _record(self, request, result):
+        if isinstance(result, ToolMessage) and result.status == "error":
+            name = request.tool.name if request.tool else request.tool_call["name"]
+            # "tool." prefix: observability mirrors exactly these into
+            # Prometheus (observability.py:104-112).
+            METRICS.increment(f"tool.error.{name}")
+            logger.warning("tool %s failed; the turn continues: %s", name, result.content)
+        return result
+
+    def wrap_tool_call(self, request, handler):
+        return self._record(request, super().wrap_tool_call(request, handler))
+
+    async def awrap_tool_call(self, request, handler):
+        return self._record(request, await super().awrap_tool_call(request, handler))
+
+
+def _agent_middleware() -> list:
+    """What every ReAct agent this module builds is wrapped in.
+
+    One thing, and it exists because a raising tool used to end the whole
+    turn: LangGraph's tool node re-raises anything that is not a tool
+    INVOCATION error, so a search timeout or a ValueError travelled out of the
+    agent, out of ask_stuff, and the person got the generic failure copy
+    instead of an answer. With this, a transient network failure is retried
+    (twice, backing off), and everything else comes back to the model as an
+    error message it can read, explain, or work around — which is what Fritz
+    can do with it and a traceback is not.
+
+    A fresh list per agent: middleware instances are handed to one agent at
+    build time, and sharing one across agents is not a property this relies on.
+    """
+    return [_ToolFailuresAreVisible(max_retries=2, retry_on=_is_transient)]
+
+
 # Per-(user, channel) agents, keyed by the tool set they were built from.
 # Insertion-ordered, so popping the first item evicts the oldest.
 _AGENT_CACHE: dict = {}
@@ -946,7 +1006,8 @@ def _get_conversation_agent():
     global _conversation_react_agent
     if _conversation_react_agent is None:
         logger.info("Initialising conversation ReAct agent")
-        _conversation_react_agent = create_agent(ollama_instance, tools=conversation_tools)
+        _conversation_react_agent = create_agent(ollama_instance, tools=conversation_tools,
+                                                 middleware=_agent_middleware())
     return _conversation_react_agent
 
 # START → executor → (summarize | END). Every message used to pay a FAST-model
