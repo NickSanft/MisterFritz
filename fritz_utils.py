@@ -194,6 +194,23 @@ def _at_least_one(name: str, default: str) -> int:
     return value
 
 
+# How many super-steps one ReAct turn may take. A tool call costs two — the
+# model that asks for it, then the tools node — so this allows roughly
+# (N - 1) / 2 tool calls in a turn: 19 at the default of 40.
+#
+# Set EXPLICITLY because LangGraph's own default moved underneath us: 25 up to
+# langgraph 1.0.5, 10000 from 1.0.6, 10007 since 1.2.0. At 10007 there is no
+# bound worth the name — a model that has started looping ("search_web,
+# search_web, search_web...") runs until someone notices, and every lap is a
+# local-model round trip holding one of the eight worker-pool threads with the
+# Discord placeholder still ticking.
+#
+# 40 rather than the old 25: 25 is what the bot ran on until langgraph 1.0.6
+# raised it, but it allows only 12 tool calls, and a workspace turn that reads,
+# edits and re-reads a few files can legitimately want more. A turn that does
+# hit this ends in words, not a traceback — see mister_fritz._until_the_bound.
+AGENT_RECURSION_LIMIT: int = _at_least_one("AGENT_RECURSION_LIMIT", "40")
+
 # Worker count for the shared bounded thread pool (bot_adapters.run_blocking)
 # that keeps ask_stuff / STT / TTS work off the Discord event loop.
 BLOCKING_POOL_SIZE: int = _at_least_one("BLOCKING_POOL_SIZE", "8")

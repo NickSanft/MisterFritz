@@ -124,30 +124,46 @@ jsonschema==4.25.1
 jsonschema-specifications==2025.9.1
 kiwisolver==1.4.9
 ko-speech-tools==0.1.0
-kubernetes==34.1.0
-langchain==1.1.3
+# 36.x, not 34.x, and for one reason: 34.1.0 declares urllib3<2.4.0, which
+# makes `pip install -r requirements.txt` as a whole ResolutionImpossible
+# against the urllib3 pin below. 36.x allows any urllib3 but 2.6.0. It is a
+# chromadb transitive nothing here imports; chromadb asks only for >=28.1.0.
+kubernetes==36.0.3
+langchain==1.4.3
 langchain-chroma==1.1.0
-# Held at 1.0.0 deliberately. GHSA-3644-q5cj-c5c7 (LangSmith prompt pull)
-# is fixed in 1.0.7, but every version from 1.0.5 up requires
-# langchain-core>=1.3.3 — a minor bump of the whole agent stack. Nothing in
-# this repo imports langchain_classic; it arrives as a transitive. It goes
-# with the coordinated langchain 1.4 / langgraph 1.2 upgrade.
-langchain-classic==1.0.0
-langchain-community==0.4.1
-langchain-core==1.2.31
-langchain-ollama==1.0.1
-langchain-text-splitters==1.1.0
+# A transitive of langchain-community, with no import site here. 1.0.8 puts
+# GHSA-3644-q5cj-c5c7 (LangSmith prompt pull) behind us for THIS package. The
+# same advisory also names langsmith, which is pinned below at 0.4.59 and
+# inside its range: nothing here imports langsmith either, and moving it pulls
+# in httpx2 and three more rows, so a scanner will keep flagging that one.
+langchain-classic==1.0.8
+# SUNSET upstream as of 0.4.2 — see github.com/langchain-ai/langchain-community
+# issue 674. document_engine.py:27-34 is the only consumer: five loaders plus
+# filter_complex_metadata. When it stops working, those move to standalone
+# packages; there is no 1.x to upgrade to.
+langchain-community==0.4.2
+langchain-core==1.6.6
+langchain-ollama==1.1.0
+# New in this set: langchain-core 1.6.6 requires it, and langgraph-sdk too.
+langchain-protocol==0.0.19
+langchain-text-splitters==1.1.2
 langdetect==1.0.9
-langgraph==1.0.10
-langgraph-checkpoint==3.0.1
-langgraph-checkpoint-sqlite==3.0.1
-# 1.0.8 exactly, and NOT higher, which no metadata tells you: from 1.0.9 on,
-# prebuilt imports ExecutionInfo from langgraph.runtime, which langgraph
-# 1.0.x does not have — the agent fails at import. prebuilt declares no
-# langgraph floor at all (it would be circular), so pip resolves the broken
-# pairing happily. It moves with the langgraph 1.2 upgrade, not before.
-langgraph-prebuilt==1.0.8
-langgraph-sdk==0.3.0
+langgraph==1.2.12
+# 4.x hardened the msgpack/lc:2 revival path. Verified against a copy of a real
+# fritz.db: all 28 existing checkpoints across both threads still revive, with
+# the same messages and no new warnings. The checkpoints/writes schema is
+# byte-identical to 3.0.1's, so migrate_db.py needs no change FOR THIS BUMP.
+# (Its hand-rolled DDL has a separate, older problem: see the task filed about
+# the `writes` table's column names.)
+langgraph-checkpoint==4.2.0
+langgraph-checkpoint-sqlite==3.1.1
+# Moves WITH langgraph, always: prebuilt declares no langgraph floor (it would
+# be circular), so pip will happily pair a prebuilt that imports a name the
+# pinned langgraph does not have, and the agent then fails at import. 1.0.9
+# against langgraph 1.0.x was exactly that. If either moves, import the agent
+# before trusting the resolve.
+langgraph-prebuilt==1.1.0
+langgraph-sdk==0.4.5
 langsmith==0.4.59
 lazy_loader==0.4
 librosa==0.11.0
@@ -175,7 +191,7 @@ numba==0.63.1
 numpy==2.3.5
 oauthlib==3.3.1
 olefile==0.47
-ollama==0.6.1
+ollama==0.6.3
 onnxruntime==1.23.2
 opencv-python-headless==4.13.0.92
 openpyxl==3.1.5
@@ -280,6 +296,7 @@ uuid_utils==0.12.0
 uvicorn==0.38.0
 webencodings==0.5.1
 websocket-client==1.9.0
+websockets==15.0.1         # new in this set: langgraph-sdk 0.4.5 requires it
 Werkzeug==3.1.4
 wrapt==2.0.1
 xformers==0.0.33.post2

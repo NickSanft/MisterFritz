@@ -34,7 +34,12 @@ from langchain_core.language_models.fake_chat_models import (  # noqa: E402
     GenericFakeChatModel,
 )
 from langchain_core.tools import tool  # noqa: E402
+from langchain.agents.middleware import (  # noqa: E402
+    ToolErrorMiddleware,
+    ToolRetryMiddleware,
+)
 
+import fritz_utils  # noqa: E402
 import mister_fritz  # noqa: E402
 from mister_fritz import _history_window, executor  # noqa: E402
 
@@ -66,6 +71,7 @@ class _RecordingAgent:
 
     def stream(self, inputs, config=None, stream_mode=None):
         self.seen = inputs
+        self.config = config
         self.stream_mode = stream_mode
         if self._script is not None:
             yield from self._script
@@ -1197,14 +1203,21 @@ def _calls_then_answers(tool_name: str, answer: str = "done"):
     ]))
 
 
-def _agent_for(tool_fn):
-    """One turn's agent: the real middleware, with the waiting taken out."""
-    from langchain.agents import create_agent
+def _middleware_without_waiting():
+    """The real middleware stack, with the retry backoff taken out."""
     middleware = mister_fritz._agent_middleware()
     for item in middleware:
-        item.initial_delay, item.backoff_factor, item.jitter = 0, 0, False
+        for attr, value in (("initial_delay", 0), ("backoff_factor", 0), ("jitter", False)):
+            if hasattr(item, attr):           # only the retry one waits
+                setattr(item, attr, value)
+    return middleware
+
+
+def _agent_for(tool_fn):
+    """One turn's agent, over one tool, with the real middleware."""
+    from langchain.agents import create_agent
     return create_agent(_calls_then_answers(tool_fn.name), tools=[tool_fn],
-                        middleware=middleware)
+                        middleware=_middleware_without_waiting())
 
 
 _A_TURN = {"messages": [HumanMessage(content="go on then")]}
@@ -1283,6 +1296,113 @@ class TestAToolThatRaisesDoesNotEndTheTurn(unittest.TestCase):
         self.assertIn("tool.error.search", [c.args[0] for c in counted.call_args_list])
         self.assertIn("upstream is down", " ".join(logs.output))
 
+    def test_a_wrongly_typed_argument_is_recorded_too(self):
+        """The tool node answers this one itself, before the body runs, so
+        nothing is ever raised — and a local model gets arguments wrong far
+        more often than tools break."""
+        @tool
+        def roll(faces: int) -> str:
+            """Roll a die."""
+            return "6"
+
+        model = _ScriptedModel(messages=iter([
+            AIMessage(content="", tool_calls=[
+                {"name": "roll", "args": {"faces": "not a number at all"}, "id": "c1"}]),
+            AIMessage(content="done"),
+        ]))
+        from langchain.agents import create_agent
+        agent = create_agent(model, tools=[roll], middleware=_middleware_without_waiting())
+        with patch.object(mister_fritz.METRICS, "increment") as counted, \
+             self.assertLogs(mister_fritz.logger, "WARNING"):
+            result = agent.invoke(_A_TURN)
+        [failure] = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+        self.assertEqual(failure.status, "error")
+        self.assertIn("tool.error.roll", [c.args[0] for c in counted.call_args_list])
+
+    def test_a_tool_the_model_invented_is_recorded_too(self):
+        model = _ScriptedModel(messages=iter([
+            AIMessage(content="", tool_calls=[
+                {"name": "search_the_whole_internet", "args": {}, "id": "c1"}]),
+            AIMessage(content="done"),
+        ]))
+
+        @tool
+        def roll(faces: int = 1) -> str:
+            """Roll a die."""
+            return "6"
+
+        from langchain.agents import create_agent
+        agent = create_agent(model, tools=[roll], middleware=_middleware_without_waiting())
+        with patch.object(mister_fritz.METRICS, "increment") as counted, \
+             self.assertLogs(mister_fritz.logger, "WARNING"):
+            agent.invoke(_A_TURN)
+        self.assertIn("tool.error.search_the_whole_internet",
+                      [c.args[0] for c in counted.call_args_list])
+
+    def test_a_raising_tool_is_recorded_exactly_once(self):
+        """Two middlewares see it — the converter and the recorder — and only
+        one of them counts."""
+        @tool
+        def search(query: str = "") -> str:
+            """Search the web."""
+            raise RuntimeError("upstream is down")
+
+        with patch.object(mister_fritz.METRICS, "increment") as counted, \
+             self.assertLogs(mister_fritz.logger, "WARNING"):
+            self.run_turn(search)
+        self.assertEqual([c.args[0] for c in counted.call_args_list].count(
+            "tool.error.search"), 1)
+
+    def test_an_internal_failure_names_its_type_and_nothing_else(self):
+        """A tool's exception message can carry an absolute path, a query or a
+        token. The model's context is replayed every turn, summarised into
+        Chroma and quoted back to the person, so only the type goes in."""
+        @tool
+        def read_file(path: str = "") -> str:
+            """Read a file."""
+            raise PermissionError(r"C:\Users\nicho\secrets\id_rsa is not readable")
+
+        result = self.run_turn(read_file)
+        [failure] = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+        self.assertIn("PermissionError", failure.content)
+        self.assertNotIn("id_rsa", failure.content)
+        self.assertNotIn("secrets", failure.content)
+
+    def test_a_tools_own_refusal_is_passed_along_in_its_own_words(self):
+        """Those sentences are written for the model to read."""
+        @tool
+        def roll(faces: int = 0) -> str:
+            """Roll a die."""
+            raise ValueError("num_dice must be at least 1")
+
+        result = self.run_turn(roll)
+        [failure] = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+        self.assertIn("num_dice must be at least 1", failure.content)
+
+    def test_but_not_when_it_names_a_path(self):
+        """file_tools' own ValueErrors carry the workspace's absolute path, and
+        the carve-out for a tool's own wording must not smuggle it through."""
+        @tool
+        def read_file(path: str = "") -> str:
+            """Read a file."""
+            raise ValueError(r"Workspace directory does not exist: "
+                             r"C:\Users\nicho\workspaces\discord-285249831696465921")
+
+        result = self.run_turn(read_file)
+        [failure] = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+        self.assertIn("ValueError", failure.content)
+        self.assertNotIn("nicho", failure.content)
+        self.assertNotIn("285249831696465921", failure.content)
+
+    def test_what_counts_as_naming_a_path(self):
+        for text, pathy in (("num_dice must be at least 1", False),
+                            ("that is not a valid colour", False),
+                            (r"no such file: C:\Users\nicho\x.txt", True),
+                            ("no such file: /home/nicho/x.txt", True),
+                            (r"\\fileserver\share\x.txt", True)):
+            with self.subTest(text=text):
+                self.assertEqual(bool(mister_fritz._MENTIONS_A_PATH.search(text)), pathy)
+
     def test_only_transient_failures_are_retried(self):
         self.assertTrue(mister_fritz._is_transient(_Ratelimit("429")))
         self.assertTrue(mister_fritz._is_transient(httpx.ReadTimeout("slow")))
@@ -1301,8 +1421,10 @@ class TestAToolThatRaisesDoesNotEndTheTurn(unittest.TestCase):
 
 class TestTheAsyncPathRecordsItToo(unittest.IsolatedAsyncioTestCase):
     """Nothing awaits the agent today — ask_stuff is synchronous and runs in
-    the worker pool — but the middleware has both hooks, and a future astream
-    path would otherwise lose the log line and the metric."""
+    the worker pool — but ToolErrorMiddleware takes a separate async handler,
+    and we give it none: on_error serves both paths. This proves it, because
+    the alternative is an await-time RuntimeError nobody would see until a
+    tool failed on an async turn."""
 
     async def test_a_failure_is_recorded_when_the_agent_is_awaited(self):
         @tool
@@ -1330,8 +1452,19 @@ class TestEveryAgentIsBuiltWithIt(unittest.TestCase):
     def test_the_shared_conversation_agent(self):
         with patch.object(mister_fritz, "create_agent") as create_agent:
             mister_fritz._get_conversation_agent()
-        [only] = self.middleware_of(create_agent)
-        self.assertIsInstance(only, mister_fritz._ToolFailuresAreVisible)
+        self.assert_the_stack(self.middleware_of(create_agent))
+
+    def assert_the_stack(self, middleware):
+        """Recorder OUTSIDE, then error conversion, then retry. langchain
+        composes the first entry as the outermost. Reversed, the first failure
+        would be converted and nothing would ever be retried; and a recorder
+        anywhere but outermost cannot see the failures the tool node answers
+        by itself, without raising."""
+        recorder, converter, retry = middleware
+        self.assertIsInstance(recorder, mister_fritz._ToolFailuresAreVisible)
+        self.assertIsInstance(converter, ToolErrorMiddleware)
+        self.assertIsInstance(retry, ToolRetryMiddleware)
+        self.assertEqual(retry.on_failure, "error")
 
     def test_and_the_per_user_agent_the_bot_actually_builds(self):
         """Discord passes channel_id and a schedule_manager on every message,
@@ -1346,8 +1479,7 @@ class TestEveryAgentIsBuiltWithIt(unittest.TestCase):
             create_agent.return_value.stream.return_value = iter(
                 [("values", {"messages": [AIMessage(content="hi")]})])
             executor(state, config=config)
-        [only] = self.middleware_of(create_agent)
-        self.assertIsInstance(only, mister_fritz._ToolFailuresAreVisible)
+        self.assert_the_stack(self.middleware_of(create_agent))
 
 
 class TestTheGraphDiagram(unittest.TestCase):
@@ -1415,3 +1547,112 @@ class TestTheGraphIsCompiledWithoutAStore(unittest.TestCase):
         source = (REPO / "mister_fritz.py").read_text(encoding="utf-8")
         compile_call = source.split("app = workflow.compile(", 1)[1].split(")", 1)[0]
         self.assertNotIn("store", compile_call)
+
+
+class TestOneTurnIsBounded(unittest.TestCase):
+    """LangGraph's default recursion limit moved from 25 to 10007 across
+    1.0.x/1.2.x. That bound is the only thing between a model that has started
+    looping and an afternoon of GPU time on one worker-pool thread, so the
+    repo sets it rather than inheriting whatever the library currently thinks."""
+
+    def test_the_limit_rides_on_the_config_the_agent_is_given(self):
+        config = mister_fritz.get_config_values({"metadata": {"user_id": "u"}})
+        self.assertEqual(config["recursion_limit"], fritz_utils.AGENT_RECURSION_LIMIT)
+
+    def test_it_is_not_whatever_langgraph_defaults_to(self):
+        from langgraph._internal._config import DEFAULT_RECURSION_LIMIT
+        self.assertLess(fritz_utils.AGENT_RECURSION_LIMIT, DEFAULT_RECURSION_LIMIT,
+                        "the point of setting it is that the library's default is no bound")
+
+    def test_a_looping_model_is_stopped(self):
+        """A model that calls the same tool forever. Without a bound this test
+        would not fail — it would never finish."""
+        from langgraph.errors import GraphRecursionError
+        calls = []
+
+        @tool
+        def search(query: str = "") -> str:
+            """Search the web."""
+            calls.append(1)
+            return "nothing useful"
+
+        class _Looping(_ScriptedModel):
+            def invoke(self, *args, **kwargs):
+                return AIMessage(content="", tool_calls=[
+                    {"name": "search", "args": {}, "id": f"call-{len(calls)}"}])
+
+        from langchain.agents import create_agent
+        agent = create_agent(_Looping(messages=iter([])), tools=[search],
+                             middleware=mister_fritz._agent_middleware())
+        with self.assertRaises(GraphRecursionError):
+            agent.invoke(_A_TURN, config=mister_fritz.get_config_values(
+                {"metadata": {"user_id": "u"}}))
+        self.assertLessEqual(len(calls), fritz_utils.AGENT_RECURSION_LIMIT)
+
+    def test_the_executor_hands_it_to_the_agent(self):
+        state = {"messages": [HumanMessage(content="hello")],
+                 "image_paths": [], "user_image_paths": []}
+        agent = _RecordingAgent()
+        _run_executor(state, agent)
+        self.assertEqual(agent.config["recursion_limit"], fritz_utils.AGENT_RECURSION_LIMIT)
+
+
+class TestAFailedRenderIsNotAnImagePath(unittest.TestCase):
+    """generate_image's result is collected by NAME into image_paths, and
+    Discord opens each entry as a file. Now that a raising tool comes back as
+    a ToolMessage instead of killing the turn, that message carries a sentence
+    where a path used to be."""
+
+    def _state(self):
+        return {"messages": [HumanMessage(content="draw me a cat", id="h1")],
+                "image_paths": [], "user_image_paths": []}
+
+    def test_an_error_from_generate_image_is_left_out(self):
+        failed = ToolMessage(content="generate_image failed with RuntimeError. Tell the "
+                                     "person it did not work, and carry on without it.",
+                             name="generate_image", tool_call_id="c1", status="error")
+        agent = _RecordingAgent(script=[("values", {"messages": [
+            failed, AIMessage(content="I could not draw it.")]})])
+        out = _run_executor(self._state(), agent)
+        self.assertEqual(out["image_paths"], [])
+
+    def test_a_real_render_still_arrives(self):
+        drawn = ToolMessage(content="output/cat.png", name="generate_image",
+                            tool_call_id="c1")
+        agent = _RecordingAgent(script=[("values", {"messages": [
+            drawn, AIMessage(content="Your cat.")]})])
+        out = _run_executor(self._state(), agent)
+        self.assertEqual(out["image_paths"], ["output/cat.png"])
+
+
+class TestATurnThatHitsItsBoundEndsInWords(unittest.TestCase):
+    """GraphRecursionError escaping the executor is caught far away in
+    on_message, which replaces the placeholder — and everything streamed into
+    it — with the generic failure copy, and leaves the thread holding a
+    half-finished turn."""
+
+    class _Looping:
+        """Streams one real payload, then hits the bound."""
+
+        def stream(self, inputs, config=None, stream_mode=None):
+            from langgraph.errors import GraphRecursionError
+            yield ("values", {"messages": [AIMessage(content="Let me look that up.")]})
+            raise GraphRecursionError("Recursion limit of 40 reached")
+
+    def test_the_person_is_told_plainly_and_it_is_counted(self):
+        state = {"messages": [HumanMessage(content="do the thing", id="h1")],
+                 "image_paths": [], "user_image_paths": []}
+        with patch.object(mister_fritz.METRICS, "increment") as counted, \
+             self.assertLogs(mister_fritz.logger, "WARNING") as logs:
+            out = _run_executor(state, self._Looping())
+        reply = out["messages"][-1].content
+        self.assertIn("Let me look that up.", reply)      # what was streamed survives
+        self.assertIn("round in circles", reply)
+        self.assertIn("agent.recursion_limit", [c.args[0] for c in counted.call_args_list])
+        self.assertIn("super-step bound", " ".join(logs.output))
+
+    def test_a_turn_that_does_not_hit_it_says_nothing_about_circles(self):
+        state = {"messages": [HumanMessage(content="hello", id="h1")],
+                 "image_paths": [], "user_image_paths": []}
+        out = _run_executor(state, _RecordingAgent(reply="Good day."))
+        self.assertNotIn("circles", out["messages"][-1].content)

@@ -24,10 +24,15 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_ollama import ChatOllama
 from langchain.agents import create_agent
-from langchain.agents.middleware import ToolRetryMiddleware
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    ToolErrorMiddleware,
+    ToolRetryMiddleware,
+)
 from pydantic import BaseModel, Field
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.constants import END, START
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import StateGraph, add_messages
 
 from agent_tools import (
@@ -43,6 +48,7 @@ from agent_tools import (
     update_user_profile,
 )
 from fritz_utils import (
+    AGENT_RECURSION_LIMIT,
     CHAT_DB_NAME,
     FAST_OLLAMA_MODEL,
     HISTORY_TOKEN_BUDGET,
@@ -558,6 +564,23 @@ class _DeltaEmitter:
             logger.warning("streaming_callback raised (non-fatal): %s", e)
 
 
+def _until_the_bound(stream, on_bound):
+    """The agent's stream, stopping cleanly if the turn hits its super-step bound.
+
+    A GraphRecursionError escaping the executor is caught far away in
+    on_message, which replaces the placeholder — and so everything already
+    streamed into it — with the generic failure copy, and leaves the thread
+    holding a half-finished turn: an __error__ write, and next=("executor",)
+    for the following turn to trip over. Stopping here lets the node return
+    normally, so the state commits and the person gets whatever the model
+    managed plus a sentence saying it stopped. See AGENT_RECURSION_LIMIT.
+    """
+    try:
+        yield from stream
+    except GraphRecursionError:
+        on_bound()
+
+
 def executor(state: EnhancedState, config: RunnableConfig):
     """Run the ReAct agent over the conversation window and stream the reply.
 
@@ -729,14 +752,16 @@ def executor(state: EnhancedState, config: RunnableConfig):
                                ("user", latest.content if latest is not None else "")]}
 
     final_state = None
+    bound_hit: list[bool] = []
     emitter = _DeltaEmitter(streaming_callback)
     # A LIST — even of one mode — is what makes LangGraph tuple its output as
     # (mode, payload); a bare string yields raw payloads instead. Keeping it a
     # list either way makes the loop below uniform.
     stream_modes = ["values", "messages"] if streaming_callback else ["values"]
 
-    for mode, payload in agent.stream(
-        inputs, config=get_config_values(config), stream_mode=stream_modes
+    for mode, payload in _until_the_bound(
+        agent.stream(inputs, config=get_config_values(config), stream_mode=stream_modes),
+        lambda: bound_hit.append(True),
     ):
         if mode == "values":
             final_state = payload
@@ -764,11 +789,20 @@ def executor(state: EnhancedState, config: RunnableConfig):
     emitter.flush()
 
     resp = final_state["messages"][-1].content if final_state and "messages" in final_state else ""
+    if bound_hit:
+        METRICS.increment("agent.recursion_limit")
+        logger.warning("a turn hit the %d-super-step bound", AGENT_RECURSION_LIMIT)
+        stopped = ("I found myself going round in circles with my own tools, so I "
+                   "stopped. Do ask again, more narrowly if you can.")
+        resp = f"{resp.rstrip()}\n\n{stopped}" if str(resp).strip() else stopped
 
     image_paths = state.get("image_paths", []).copy()
     if final_state and "messages" in final_state:
         for msg in final_state["messages"]:
-            if isinstance(msg, ToolMessage) and hasattr(msg, 'name') and msg.name == 'generate_image':
+            # status != "error": a failed render's content is now a sentence
+            # for the model, not a path, and Discord would try to open it.
+            if (isinstance(msg, ToolMessage) and getattr(msg, "name", None) == "generate_image"
+                    and msg.status != "error"):
                 image_paths.append(msg.content)
 
     # Bare strings are coerced to HumanMessage by the add_messages reducer,
@@ -788,6 +822,9 @@ def get_config_values(config: RunnableConfig) -> RunnableConfig:
             "thread_id": metadata.get("thread_id"),
         },
         "metadata": metadata,
+        # The ReAct loop's own bound. Explicit because LangGraph's default
+        # moved from 25 to 10007 across 1.0.x/1.2.x; see AGENT_RECURSION_LIMIT.
+        "recursion_limit": AGENT_RECURSION_LIMIT,
     }
 
 
@@ -951,12 +988,23 @@ def _is_transient(exc: BaseException) -> bool:
     return type(exc).__module__.split(".")[0] == "ddgs"
 
 
-class _ToolFailuresAreVisible(ToolRetryMiddleware):
-    """Retry a tool, and say in the log and the metrics when one still failed.
+# Does a message bound for the model name a filesystem path? Deliberately
+# eager: it decides only whether a tool's own wording is passed through, and
+# the fallback says the same thing without the detail.
+_MENTIONS_A_PATH = re.compile(r"[A-Za-z]:[\\/]|/[^\s]*/|\\\\")
 
-    The middleware's own answer goes to the MODEL, not to us. Without this, a
-    tool failing every turn would be invisible on the way out: nothing raises
-    any more, so nothing reaches the error path that used to record it.
+
+class _ToolFailuresAreVisible(AgentMiddleware):
+    """Count and log every tool call that came back an error, however it failed.
+
+    OUTERMOST, and it inspects the RESULT rather than catching an exception,
+    because the two kinds of failure arrive by different routes and only the
+    result sees both. A bad argument or a hallucinated tool name is turned into
+    an error ToolMessage by LangGraph's tool node BEFORE the tool body runs, so
+    nothing is ever raised; a tool that raises is converted by
+    ToolErrorMiddleware below. Catching exceptions alone missed the first kind
+    — and a local model gets arguments wrong far more often than tools break,
+    so the metric and the log went quiet for the failures that happen most.
     """
 
     def _record(self, request, result):
@@ -969,28 +1017,63 @@ class _ToolFailuresAreVisible(ToolRetryMiddleware):
         return result
 
     def wrap_tool_call(self, request, handler):
-        return self._record(request, super().wrap_tool_call(request, handler))
+        return self._record(request, handler(request))
 
     async def awrap_tool_call(self, request, handler):
-        return self._record(request, await super().awrap_tool_call(request, handler))
+        return self._record(request, await handler(request))
+
+
+def _tool_error_message(exc: BaseException, request) -> str:
+    r"""What the model is told when a tool RAISED.
+
+    ToolErrorMiddleware turns an exception into an error ToolMessage only if
+    this returns content; returning None would let it propagate and end the
+    turn. Counting and logging are NOT done here — see _ToolFailuresAreVisible,
+    which also sees the failures that never raise.
+
+    A tool's own ValueError is a sentence its author wrote FOR the model
+    ("num_dice must be at least 1"), so it is passed along — unless it names a
+    path, which file_tools' own ValueErrors do ("Workspace directory does not
+    exist: C:\Users\..."). Everything else is named by type only. An arbitrary
+    exception can carry an absolute path, a query or a token in its message,
+    and the model's context — replayed every turn, summarised into Chroma, and
+    quoted back to the person — is no place for any of that. The full detail,
+    with a traceback, goes to the log.
+    """
+    name = request.tool.name if request.tool else request.tool_call["name"]
+    logger.warning("tool %s raised; the turn continues", name, exc_info=exc)
+    if isinstance(exc, ValueError) and not _MENTIONS_A_PATH.search(str(exc)):
+        return f"{name} refused that: {exc}"
+    return (f"{name} failed with {type(exc).__name__}. Tell the person it did not "
+            "work, and carry on without it.")
 
 
 def _agent_middleware() -> list:
     """What every ReAct agent this module builds is wrapped in.
 
-    One thing, and it exists because a raising tool used to end the whole
-    turn: LangGraph's tool node re-raises anything that is not a tool
+Three of them, and the last two exist because a raising tool used to end
+    the whole turn: LangGraph's tool node re-raises anything that is not a tool
     INVOCATION error, so a search timeout or a ValueError travelled out of the
     agent, out of ask_stuff, and the person got the generic failure copy
-    instead of an answer. With this, a transient network failure is retried
-    (twice, backing off), and everything else comes back to the model as an
-    error message it can read, explain, or work around — which is what Fritz
-    can do with it and a traceback is not.
+    instead of an answer.
+
+    ORDER IS LOAD-BEARING. The first entry is the outermost (langchain's
+    _chain_tool_call_wrappers), so: the recorder sees every finished tool call,
+    including the failures the tool node answers by itself without raising;
+    then exceptions are converted to messages; then calls are retried.
+    Reversed, conversion would happen on the first failure and nothing would
+    ever be retried. The retry middleware is configured with
+    on_failure="error" for the same reason: it must re-raise once it has given
+    up, or the exception never reaches the handler that answers the model.
 
     A fresh list per agent: middleware instances are handed to one agent at
     build time, and sharing one across agents is not a property this relies on.
     """
-    return [_ToolFailuresAreVisible(max_retries=2, retry_on=_is_transient)]
+    return [
+        _ToolFailuresAreVisible(),
+        ToolErrorMiddleware(on_error=_tool_error_message),
+        ToolRetryMiddleware(max_retries=2, retry_on=_is_transient, on_failure="error"),
+    ]
 
 
 # Per-(user, channel) agents, keyed by the tool set they were built from.

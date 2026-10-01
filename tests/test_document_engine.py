@@ -10,6 +10,7 @@ PyMuPDF, watchdog). We stub the few that aren't installable in this
 environment so the import itself succeeds.
 """
 import importlib.machinery
+import importlib.util
 import sys
 import threading
 import time
@@ -18,12 +19,28 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 
-def _real_module_stub(name: str) -> types.ModuleType:
+def _real_module_stub(name: str):
     """Insert a real (importable) stub module — needed when downstream code
     calls importlib.util.find_spec(name) which rejects MagicMock-based stubs.
+
+    An INSTALLED package is left alone, because these stubs are module-scope
+    and never removed: an empty module named `transformers` leaked into every
+    later test module in the session, and made the real diffusers import in
+    test_packaging's [image] check fail with "cannot import name
+    'AutoImageProcessor' from 'transformers' (unknown location)" — hundreds of
+    tests after this file was collected. It only stayed hidden while something
+    earlier in the suite happened to import transformers first.
     """
     if name in sys.modules:
         return sys.modules[name]
+    try:
+        if importlib.util.find_spec(name) is not None:
+            return None                   # the real one is installed and imports fine
+    except Exception:
+        # An absent parent package — or one that is installed and explodes on
+        # import, which is the numpy ABI mismatch these stubs exist for, since
+        # find_spec on a dotted name imports the parent to resolve it.
+        pass                              # stub it below
     mod = types.ModuleType(name)
     mod.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
     mod.__path__ = []  # mark as a package so submodule imports succeed
