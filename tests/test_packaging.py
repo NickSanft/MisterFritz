@@ -348,6 +348,118 @@ class TestSdxlPipelineIsGuarded(unittest.TestCase):
             if stub is not None:
                 sys.modules["image_generator"] = stub
 
+
+
+class TestEveryLockLineIsInstallable(unittest.TestCase):
+    """requirements.txt is hand-edited on purpose (DECISIONS #9), so a stray
+    line is a real possibility — and pip rejects the WHOLE file for one bad
+    line, which is the kind of failure that only shows up on a fresh deploy.
+    Found the hard way: a shell command substitution once pasted three lines
+    of `distro` output into the header.
+    """
+
+    def test_no_line_is_anything_but_a_comment_or_a_requirement(self):
+        from packaging.requirements import InvalidRequirement, Requirement
+        for number, raw in enumerate(
+                (REPO / "requirements.txt").read_text(encoding="utf-8").splitlines(), 1):
+            line = raw.strip()
+            if not line or line.startswith(("#", "-")):
+                continue
+            with self.subTest(line=number):
+                try:
+                    Requirement(line.split("#")[0].strip())
+                except InvalidRequirement as e:
+                    self.fail(f"requirements.txt:{number} is not installable: {raw!r} ({e})")
+
+
+class TestChromaCannotPhoneHome(unittest.TestCase):
+    """Up to chromadb 1.5.2, Chroma's product telemetry imported posthog and
+    POSTed to a hardcoded project key on collection operations, on by default.
+    It carried counts, flags and collection UUIDs — never anything anyone
+    wrote — but it was outbound traffic from an app whose premise is that
+    everything runs locally. 1.5.3 reduced that client to a `pass` and dropped
+    the dependency; the floor is 1.5.4 because 1.5.3 is yanked on PyPI and its
+    settings raise ValidationError on import against this repo's own .env.
+
+    Version numbers alone cannot carry that property, so the last test here
+    looks at the client itself. If a future chromadb revives telemetry under a
+    new transport, that is the test that fails.
+    """
+
+    LAST_SENDER = (1, 5, 2)
+    FIRST_INSTALLABLE_INERT = (1, 5, 4)
+
+    @staticmethod
+    def _parts(spec: str) -> tuple:
+        return tuple(int(p) for p in re.findall(r"\d+", spec)[:3])
+
+    @staticmethod
+    def _pinned(name: str) -> str:
+        for line in (REPO / "requirements.txt").read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith(f"{name}=="):
+                return line.split("==", 1)[1].split("#")[0].split(";")[0].strip()
+        raise AssertionError(f"{name} is not pinned in requirements.txt")
+
+    @staticmethod
+    def _declared() -> str:
+        [declared] = [d for d in _pyproject()["project"]["dependencies"]
+                      if d.split(">")[0].strip().lower() == "chromadb"]
+        return declared
+
+    def test_the_lock_pins_a_chromadb_that_cannot_send(self):
+        pinned = self._pinned("chromadb")
+        self.assertGreaterEqual(self._parts(pinned), self.FIRST_INSTALLABLE_INERT, pinned)
+
+    def test_the_floor_excludes_every_release_that_could_send(self):
+        floor = self._parts(self._declared().split(">=", 1)[1])
+        self.assertGreaterEqual(floor, self.FIRST_INSTALLABLE_INERT, floor)
+        self.assertGreater(floor, self.LAST_SENDER, floor)
+
+    def test_and_the_range_is_closed(self):
+        """A bare `>=` asserts nothing about a version that does not exist yet:
+        a 1.6 that revived telemetry would satisfy it. The claim is checked
+        against the 1.5 line, so the dependency says so."""
+        self.assertIn("<", self._declared().split(">=", 1)[1])
+
+    def test_posthog_is_not_pinned_anywhere(self):
+        """It only ever arrived as a chromadb dependency, and chromadb dropped
+        it. A regenerated freeze must not quietly bring it back."""
+        self.assertNotIn("posthog", _requirements_names())
+
+    def test_the_installed_chromadb_does_not_require_posthog(self):
+        """The pin states the intent; this is the environment matching it."""
+        import importlib.metadata as md
+        requires = md.requires("chromadb") or []
+        self.assertEqual([r for r in requires if r.lower().startswith("posthog")], [])
+
+    def test_the_installed_telemetry_client_sends_nothing(self):
+        """The one assertion here about behaviour rather than version strings.
+
+        chromadb still names this class as its product-telemetry client
+        (config.py: chroma_product_telemetry_impl), so it is what would carry
+        any revival. Its body being `pass` is the property every version
+        assertion above is only a proxy for.
+        """
+        import ast
+        import inspect
+        import textwrap
+
+        from chromadb.config import Settings
+        from chromadb.telemetry.product.posthog import Posthog
+
+        self.assertEqual(Settings().chroma_product_telemetry_impl,
+                         "chromadb.telemetry.product.posthog.Posthog")
+        [function] = ast.parse(textwrap.dedent(inspect.getsource(Posthog.capture))).body
+        statements = [node for node in function.body
+                      if not (isinstance(node, ast.Expr)
+                              and isinstance(node.value, ast.Constant)
+                              and isinstance(node.value.value, str))]   # the docstring
+        self.assertEqual([type(node).__name__ for node in statements], ["Pass"],
+                         "Chroma's telemetry client does something again; read what "
+                         "it does and decide whether this app still wants it")
+
+
 if __name__ == "__main__":
     unittest.main()
 
