@@ -47,7 +47,7 @@ import sqlite3
 import sys
 import time
 
-from fritz_utils import is_canonical_user_id
+from fritz_utils import is_canonical_user_id, refuse_stored_embedders
 
 # Imported lazily inside main() so --help works without a configured .env.
 CHROMA_COLLECTION = "langchain_store"
@@ -168,6 +168,13 @@ def survey_chroma(chroma_path: str) -> dict[str, int]:
     try:
         client = chromadb.PersistentClient(path=chroma_path)
         collection = client.get_collection(CHROMA_COLLECTION)
+    except Exception as e:
+        print(f"  [skip] could not read Chroma at {chroma_path}: {e}")
+        return {}
+    # Deliberately outside the try: a store naming its own embedder is not a
+    # store to skip past, and this script's next step writes to it.
+    refuse_stored_embedders(collection, f"the Chroma collection at {chroma_path}")
+    try:
         data = collection.get(include=["metadatas"])
     except Exception as e:
         print(f"  [skip] could not read Chroma at {chroma_path}: {e}")
@@ -265,6 +272,13 @@ def rewrite_chroma(chroma_path: str, mapping: dict[str, str]) -> int:
     try:
         client = chromadb.PersistentClient(path=chroma_path)
         collection = client.get_collection(CHROMA_COLLECTION)
+    except Exception as e:
+        print(f"  [skip] could not read Chroma at {chroma_path}: {e}")
+        return 0
+    # The rename path below calls collection.add() with documents, which is
+    # exactly the write that hands text to a stored embedder. Stop here.
+    refuse_stored_embedders(collection, f"the Chroma collection at {chroma_path}")
+    try:
         data = collection.get(include=["metadatas", "documents", "embeddings"])
     except Exception as e:
         print(f"  [skip] could not read Chroma at {chroma_path}: {e}")

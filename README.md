@@ -516,6 +516,12 @@ The file-tools shell sandbox uses an allowlist. Allowed programs are listed in `
 **Missing `DISCORD_BOT_TOKEN` error on startup**
 Copy `.env.example` → `.env` and fill in the required values.
 
+**Startup refuses: "the memory store ... names its own embedding function"**
+Chroma keeps an embedding function inside the collection itself, and calls it on every write — whatever embedding function the application passed in. This bot always embeds locally with Ollama and never stores one, so a store that names one did not come from this bot: it has been edited, restored from elsewhere, or synced from a machine you don't control. The names available to it include one that POSTs every document to a Chroma-hosted endpoint, together with the value of whichever environment variable the stored spec picks as its credential — `DISCORD_BOT_TOKEN` is a valid pick. None of this needs a Chroma server; the embedded client on your disk does it. So Fritz stops instead of finding out. Restore a known-good `chroma_store/`, or move it aside and let the memories rebuild from new conversations. The wider point: back that directory up from somewhere you trust and don't bind-mount it from anywhere else — it is closer to code than to data.
+
+**Startup refuses: "CHROMA_API_IMPL is set"**
+chromadb builds its own settings from the environment and from any `.env` in the working directory — the same `.env` you wrote for the bot. `CHROMA_API_IMPL` overrides `CHROMA_DB_PATH` completely: pointed at Chroma's HTTP client, with a host beside it, every memory the assistant holds goes to that server instead of the folder on disk, and `persist_directory` is simply ignored. This bot has no remote mode, so it refuses to start. Unset it — check `.env` as well as your shell. (It is also why the open chromadb CVEs don't apply to this bot: all four need the Chroma server, which nothing here starts.)
+
 **Bot not responding in Discord**
 Ensure "Message Content Intent" is enabled in the [Discord Developer Portal](https://discord.com/developers/applications) under your bot's settings.
 

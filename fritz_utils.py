@@ -618,6 +618,130 @@ TELEGRAM_BOT_TOKEN: str | None = _env_or_json("TELEGRAM_BOT_TOKEN", "telegram_bo
 
 
 # ---------------------------------------------------------------------------
+# The memory store is trusted input
+# ---------------------------------------------------------------------------
+
+# Chroma builds an embedding function named in a collection's persisted
+# configuration or schema, and then calls it on every write — whatever
+# embedding function the caller passed in. Nothing about that needs a Chroma
+# server: an embedded PersistentClient does it from the store on disk.
+#
+# So a store that arrived from somewhere else — a restored backup, a bind
+# mount, a collection exported from Chroma Cloud, a directory someone else
+# could write — can name `chroma-cloud-splade`, and chromadb will POST every
+# document to embed.trychroma.com with the value of whichever environment
+# variable the spec chooses in the `x-chroma-token` header. Measured against
+# the pinned chromadb 1.5.9 on a throwaway store: opening the collection built
+# the function, `get` never touched it, and a single `add` sent the document
+# text plus that variable. `DISCORD_BOT_TOKEN` is a variable.
+#
+# No chromadb release fixes this and there is nothing to configure, so the
+# store is treated as what it has always been — trusted input, code-adjacent,
+# not data. A persisted spec naming anything but Chroma's own local default
+# stops the process rather than being obeyed.
+_LOCAL_EMBEDDERS = frozenset({"default"})
+
+# The two API implementations that keep Chroma in this process, reading the
+# directory on disk. Anything else is a network client.
+_EMBEDDED_CHROMA_APIS = ("RustBindingsAPI", "SegmentAPI")
+
+
+def chroma_api_impl(environ=None) -> str | None:
+    """CHROMA_API_IMPL as chromadb reads it, rather than as an exact name.
+
+    chromadb's settings are pydantic-settings, which match environment names
+    case-insensitively, so `chroma_api_impl=...` in a .env binds for chromadb
+    just as well as the shouted form. os.environ is case-insensitive on Windows
+    and not on Linux, so an exact-name lookup here would find it on a laptop
+    and miss it on a server.
+    """
+    source = os.environ if environ is None else environ
+    for name, value in source.items():
+        if name.upper() == "CHROMA_API_IMPL":
+            return value
+    return None
+
+
+def _persisted_schema(collection):
+    """The collection's schema as it is stored, not as chromadb currently reads
+    it.
+
+    The difference matters. When a named embedder cannot be built at this
+    moment — its package is not installed, the environment variable it wants to
+    send as a credential is unset — chromadb warns, substitutes None, and its
+    own Schema object comes back clean. The spec is still in the file, and goes
+    live the day that variable exists. So the stored bytes are the question,
+    and the deserialized object is only a fallback for a chromadb that no
+    longer carries them.
+    """
+    model = getattr(collection, "_model", None)
+    try:
+        raw = model["serialized_schema"]
+    except (TypeError, KeyError, IndexError):
+        raw = None
+    if raw is None:
+        schema = getattr(collection, "schema", None)
+        raw = schema.serialize_to_json() if schema is not None else None
+    if isinstance(raw, (str, bytes)):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return None
+    return raw
+
+
+def stored_embedders(collection) -> list[str]:
+    """Every embedder named in a collection's own configuration or schema.
+
+    Specs of type "unknown" or "legacy" are not names: those are the two
+    chromadb itself treats as absent.
+    """
+    persisted = [collection.configuration_json, _persisted_schema(collection)]
+
+    named: list[str] = []
+
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            spec = node.get("embedding_function")
+            if isinstance(spec, dict):
+                kind = spec.get("type")
+                name = str(spec.get("name") or "unnamed")
+                if kind not in (None, "unknown", "legacy"):
+                    if name not in _LOCAL_EMBEDDERS:
+                        named.append(name)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(persisted)
+    return sorted(set(named))
+
+
+def refuse_stored_embedders(collection, source: str) -> None:
+    """Refuse a store that has opinions about where this app's text is sent.
+
+    Raises rather than warns: every caller is about to read or write the
+    memories, and continuing means a remote embedder sees them.
+    """
+    named = stored_embedders(collection)
+    if not named:
+        return
+    raise RuntimeError(
+        f"{source} names its own embedding function(s): {', '.join(named)}. "
+        "Chroma builds these from the store itself and calls them on every "
+        "write, with whatever environment variable the stored spec asks for "
+        "sent as a credential — so this store would decide where the "
+        "assistant's memories, and a token, are sent. This app embeds "
+        f"locally with Ollama ({EMBEDDING_MODEL}) and never stores an "
+        "embedder, so a store that carries one did not come from this app. "
+        "Restore a known-good copy of the store, or delete the collection and "
+        "let it be rebuilt; do not start against this one."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Startup validation
 # ---------------------------------------------------------------------------
 
@@ -634,6 +758,26 @@ def validate_config() -> None:
             + "\n".join(f"  - {m}" for m in missing)
             + "\nSet these in a .env file or as environment variables."
             + " See .env.example for reference."
+        )
+
+    # chromadb builds its own pydantic Settings from the environment and from
+    # any .env in the working directory — the same .env this repo tells people
+    # to write. CHROMA_API_IMPL is read from there, and it wins over the
+    # persist_directory this app passes: with it set to the FastAPI impl and a
+    # host alongside, Chroma(persist_directory=...) is quietly an HTTP client
+    # instead, and every memory goes to that host. Verified against the pinned
+    # chromadb 1.5.9: the first write asks /api/v2/auth/identity on the remote
+    # and the documents follow. Nothing in this app sets it, so if it is set,
+    # something else set it.
+    api_impl = chroma_api_impl()
+    if api_impl and not api_impl.strip().endswith(_EMBEDDED_CHROMA_APIS):
+        raise RuntimeError(
+            f"CHROMA_API_IMPL is set to {api_impl!r}. That replaces this app's "
+            "embedded, on-disk Chroma with a client of a remote Chroma server, "
+            "whatever CHROMA_DB_PATH says — every memory the assistant holds "
+            "would be sent there, and the open chromadb CVEs are all in that "
+            "server's authentication and authorization. Unset it (check .env "
+            "as well as the environment); this app has no remote mode."
         )
 
     for knob, requested in _CLAMPED_KNOBS:

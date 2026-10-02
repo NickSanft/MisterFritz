@@ -86,9 +86,33 @@ charset-normalizer==3.4.4
 # store afterwards — so a rollback works, but the file is not byte-identical
 # and is worth copying before the first run.
 #
-# The four open CVEs against chromadb are NOT fixed by this or any release:
-# they are all in the Chroma HTTP server's auth and trust_remote_code paths,
-# and this app runs an embedded PersistentClient with no server.
+# The four open CVEs against chromadb are NOT fixed by this or any release —
+# there has been none since 1.5.9, the two RCE fixes are merged but unreleased,
+# and the authorization fix landed in the Rust crate only. All four need the
+# Chroma HTTP server: its token/basic auth, its authorization rules, and the
+# model loading reachable through its API. This app starts no server. Checked
+# rather than assumed: nothing here imports chromadb.app (it cannot — the
+# opentelemetry instrumentation it needs is not installed), the running process
+# listens on no Chroma port, allow_reset is False, and no authn or authz
+# provider is configured. So the CVEs are not the thing to act on here.
+#
+# What IS reachable embedded is shared client code, nothing to do with the
+# server: Chroma builds an embedding function named in a collection's own
+# persisted schema and calls it on every write, whatever embedding function the
+# caller passed. A store that arrived from elsewhere can therefore name
+# `chroma-cloud-splade` and have every document POSTed to embed.trychroma.com
+# with the value of any environment variable it chooses as the credential
+# header. Measured on a throwaway store against this pin; `get` is unaffected.
+# fritz_utils.refuse_stored_embedders is the answer, called wherever a
+# collection is opened, and tests/test_store_trust.py is the record.
+#
+# Which leaves one rule for this file. Chroma builds that embedder while it
+# deserializes the schema — before any guard in this app gets a turn — so the
+# only thing keeping the build itself inert is that the embedders needing a
+# local model cannot be constructed here at all. Do not add fastembed,
+# sentence-transformers, InstructorEmbedding, open-clip-torch or text2vec,
+# directly or as somebody's extra: each one turns a line in a stored schema
+# into model loading at open time. tests/test_packaging.py keeps the list.
 chromadb==1.5.9
 click==8.3.1
 colorama==0.4.6

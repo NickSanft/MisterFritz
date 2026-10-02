@@ -40,7 +40,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import END, StateGraph, START
 
 from fritz_utils import CHROMA_DB_PATH, INDEXED_FILES_PATH, CHROMA_COLLECTION_NAME, DOC_FOLDER, FAST_OLLAMA_MODEL, \
-    OLLAMA_KEEP_ALIVE, OLLAMA_TIMEOUT, THINKING_OLLAMA_MODEL, EMBEDDING_MODEL
+    OLLAMA_KEEP_ALIVE, OLLAMA_TIMEOUT, THINKING_OLLAMA_MODEL, EMBEDDING_MODEL, refuse_stored_embedders
 from observability import init_logging, METRICS
 
 # Define supported file extensions
@@ -397,6 +397,8 @@ def initialize_vectorstore():
         embedding_function=embeddings,
         collection_name=CHROMA_COLLECTION_NAME
     )
+    refuse_stored_embedders(vectorstore._collection,
+                            f"the document index at {CHROMA_DB_PATH}")
     with VECTORSTORE_LOCK:
         GLOBAL_VECTORSTORE = vectorstore
 

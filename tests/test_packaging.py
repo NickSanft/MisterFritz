@@ -464,6 +464,71 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestNoEmbedderCanLoadAModelWhenAStoreIsOpened(unittest.TestCase):
+    """Chroma builds an embedding function named in a collection's persisted
+    schema while it deserializes that schema — which happens as the collection
+    is opened, before any check this app makes gets a turn.
+
+    fritz_utils.refuse_stored_embedders then refuses the store, so nothing is
+    ever called with anyone's text. What keeps the build itself harmless is
+    narrower: of the embedders chromadb can name, the only ones constructible
+    in this environment talk to a remote API over httpx and send nothing from
+    __init__. The ones that would load a model at that moment need a package
+    that is not installed, so they warn and deserialize to None.
+
+    That is a dependency property, so it is asserted here. Adding any of these
+    — directly or as somebody's extra — turns a line in a store on disk into
+    model loading at open time, which is the one chromadb CVE class that would
+    then have an embedded path.
+    """
+
+    FORBIDDEN = ("fastembed", "sentence-transformers", "instructorembedding",
+                 "open-clip-torch", "text2vec")
+
+    IMPORTS = ("fastembed", "sentence_transformers", "InstructorEmbedding",
+               "open_clip", "text2vec")
+
+    def test_none_are_pinned_in_the_lock(self):
+        pinned = _requirements_names()
+        for name in self.FORBIDDEN:
+            with self.subTest(package=name):
+                self.assertNotIn(name, pinned, self.__doc__)
+
+    def test_none_are_declared_anywhere_in_pyproject(self):
+        """Extras included: an extra nobody installs today is still a line that
+        says this is allowed, and the GPU extra is installed on the host that
+        actually runs the bot."""
+        project = _pyproject()["project"]
+        declared = list(project.get("dependencies", []))
+        for extra, deps in (project.get("optional-dependencies") or {}).items():
+            declared.extend(f"{dep}   (extra: {extra})" for dep in deps)
+        for raw in declared:
+            name = raw.split(";")[0].split("[")[0].strip().lower()
+            for forbidden in self.FORBIDDEN:
+                with self.subTest(dependency=raw):
+                    self.assertFalse(name.startswith(forbidden),
+                                     f"{raw!r} lets a stored schema load a model")
+
+    def test_none_can_be_imported_here(self):
+        """The declaration is the intent; this is the environment matching it.
+
+        A transitive dependency, or a stray `pip install`, counts just as much
+        as a line in pyproject — chromadb only asks whether the import works.
+        """
+        import importlib.util
+        for module in self.IMPORTS:
+            with self.subTest(module=module):
+                try:
+                    spec = importlib.util.find_spec(module)
+                except Exception:                      # pragma: no cover
+                    spec = None
+                self.assertIsNone(
+                    spec,
+                    f"{module} is importable, so a collection schema naming its "
+                    "embedder would load a model while the store is being "
+                    "opened — see requirements.txt at the chromadb pin")
+
+
 class TestTheLockActuallyLocks(unittest.TestCase):
     """The file's stated job is "the pinned closure of those roots".
 

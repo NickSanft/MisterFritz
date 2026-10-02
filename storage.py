@@ -9,7 +9,7 @@ from langchain_core.stores import BaseStore
 from langchain_ollama import OllamaEmbeddings
 from typing_extensions import Literal
 
-from fritz_utils import CHROMA_DB_PATH, EMBEDDING_MODEL
+from fritz_utils import CHROMA_DB_PATH, EMBEDDING_MODEL, refuse_stored_embedders
 
 _embeddings = None
 
@@ -125,6 +125,10 @@ class ChromaStore(BaseStore[str, Union[str, bytes]]):
             collection_name=collection_name,
             embedding_function=embeddings,
             persist_directory=persist_directory,
+        )
+        refuse_stored_embedders(
+            self.vectorstore._collection,
+            f"the memory store at {persist_directory}",
         )
 
     def get(self, key: str) -> Optional[Dict[str, Any]]:
