@@ -217,7 +217,7 @@ Recorded so they are not re-proposed. Each was killed because the mechanism was 
 
 | Batch | Items | State |
 |---|---|---|
-| A | 6 | A1, A3, A4 in progress — see commits following this plan |
+| A | 7 (A4 split in two) | **A1, A3, A4a, A4b closed** (`15ef73f`, `79421a4`, `e169057`, `00e58d0`). A2, A5, A6 open |
 | B | 4 | not started |
 | C | 3 (+ queued symlink chip) | not started |
 | D | 3 | not started |
