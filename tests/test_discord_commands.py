@@ -314,5 +314,106 @@ class TestStreamingCallbackFactory(unittest.IsolatedAsyncioTestCase):
         params = list(inspect.signature(cb).parameters)
         self.assertEqual(params, ["delta", "accumulated", "restart"])
 
+class OnReadyCase(unittest.IsolatedAsyncioTestCase):
+    """Drives the real `on_ready` body with everything heavy patched out.
+
+    Nothing executed `on_ready` before this class: it was read as source by
+    test_packaging and test_relay_buttons, never run. But its whole job is to
+    assemble the process - scheduler, relay housekeeping, admin panel,
+    pre-warm, the command cog, the tree error hook - so the only question
+    worth asking is whether it reaches the end, and only the real body can
+    answer that.
+    """
+
+    def setUp(self):
+        self.client = MagicMock()
+        self.client.add_cog = AsyncMock()
+        self.client.tree = MagicMock()
+        self.client.tree.sync = AsyncMock(return_value=[])
+        self.scheduler = MagicMock()
+        self.cog = MagicMock()
+        replacements = {
+            "client": self.client,
+            "sayer": None,                      # so the TTS branch is entered
+            "schedule_manager": None,
+            "ScheduleManager": MagicMock(return_value=self.scheduler),
+            "relay_housekeeping": AsyncMock(),
+            "start_admin_panel": MagicMock(),
+            "prewarm_models": MagicMock(),
+            "FritzCommands": MagicMock(return_value=self.cog),
+        }
+        for name, value in replacements.items():
+            patcher = patch.object(main_discord, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        installed = patch.object(main_discord.relay_router, "ensure_installed", MagicMock())
+        installed.start()
+        self.addCleanup(installed.stop)
+
+    def _loading_tts(self, outcome):
+        """Patch the one run_blocking call on_ready makes - the TTS load."""
+        return patch.object(main_discord, "run_blocking", AsyncMock(**outcome))
+
+    def assert_the_bot_came_up(self):
+        """The assertions that matter: a boot that stops early is silent."""
+        self.assertTrue(main_discord.ScheduleManager.called, "no scheduler")
+        self.scheduler.start.assert_called_once()
+        main_discord.relay_housekeeping.assert_awaited_once()
+        main_discord.start_admin_panel.assert_called_once()
+        main_discord.prewarm_models.assert_called_once()
+        self.client.add_cog.assert_awaited_once_with(self.cog)
+        self.assertIs(self.client.tree.on_error, main_discord.handle_tree_error)
+        self.client.tree.sync.assert_awaited_once()
+
+
+class TestABrokenVoiceExtraDoesNotTakeTheBootWithIt(OnReadyCase):
+    """TTSEngine logs and re-raises whatever the model load threw (tts.py:50),
+    and none of those is an ImportError: a failed download of the ~2GB XTTS
+    weights, a CUDA OOM, a corrupt cache, an unsupported device string.
+
+    Before this, `except ImportError` let every one of them escape on_ready,
+    which skipped the scheduler, the relay housekeeping, the admin panel, the
+    pre-warm, `add_cog` and `tree.sync` - so the bot logged in with no slash
+    commands at all and nothing in the log tying that to TTS.
+    """
+
+    async def test_the_commands_still_register(self):
+        with self._loading_tts({"side_effect": RuntimeError("CUDA out of memory")}):
+            with self.assertLogs("main_discord", level="ERROR"):
+                await main_discord.on_ready()
+        self.assert_the_bot_came_up()
+
+    async def test_voice_is_the_only_thing_lost(self):
+        """sayer stays None, which is what makes /voice report itself
+        unavailable rather than half-work."""
+        with self._loading_tts({"side_effect": RuntimeError("no CUDA device")}):
+            with self.assertLogs("main_discord", level="ERROR"):
+                await main_discord.on_ready()
+        self.assertIsNone(main_discord.sayer)
+        self.assertIsNone(main_discord.FritzCommands.call_args.args[1])
+
+    async def test_an_absent_extra_keeps_its_own_wording(self):
+        """README.md:157 promises an absent extra reports itself unavailable
+        rather than crashing. That path is a warning about installing the
+        extra; a present-but-broken one is an error. Keep them distinct."""
+        with self._loading_tts({"side_effect": ImportError("No module named 'TTS'")}):
+            with self.assertLogs("main_discord", level="WARNING") as caught:
+                await main_discord.on_ready()
+        # The level is the distinction, not the wording: both messages
+        # mention the extra, so only "WARNING and nothing worse" says this
+        # path is still the ordinary absent-extra one.
+        self.assertEqual([r.levelname for r in caught.records], ["WARNING"])
+        self.assertIn("install the [voice]", "; ".join(caught.output))
+        self.assert_the_bot_came_up()
+
+    async def test_a_working_engine_is_handed_to_the_cog(self):
+        engine = MagicMock(name="TTSEngine")
+        with self._loading_tts({"return_value": engine}):
+            await main_discord.on_ready()
+        self.assertIs(main_discord.sayer, engine)
+        self.assertIs(main_discord.FritzCommands.call_args.args[1], engine)
+        self.assert_the_bot_came_up()
+
+
 if __name__ == "__main__":
     unittest.main()

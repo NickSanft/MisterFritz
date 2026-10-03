@@ -200,6 +200,24 @@ async def on_ready():
                 "TTS unavailable (%s). /voice is disabled; install the [voice] "
                 "extra to enable it.", e,
             )
+        except Exception:
+            # The extra is installed but the engine will not come up: a failed
+            # download of the ~2GB XTTS weights, a CUDA OOM, a corrupt model
+            # cache, a device string this build does not support. TTSEngine
+            # logs and re-raises every one of those, and none is an ImportError.
+            #
+            # Letting it escape costs the whole boot, not just /voice. Every
+            # line below this block would be skipped: no scheduler, no relay
+            # housekeeping, no admin panel, no pre-warm, and - the one that
+            # looks like a different bug entirely - no add_cog, so the bot
+            # logs in and sits there with no slash commands and nothing in the
+            # log to connect the two. /voice reporting itself unavailable is
+            # the better failure, and the one README.md:157 promises.
+            logger.exception(
+                "TTS failed to load, so /voice is disabled. Everything else "
+                "starts normally; reinstall or reconfigure the [voice] extra "
+                "to re-enable it."
+            )
         else:
             logger.info("TTS engine ready")
     schedule_manager = ScheduleManager(client)
