@@ -28,7 +28,9 @@ This file is the integration layer: what to build once, what collides with what,
 
 [11. The minor findings](11-minor-findings.md) — the post-implementation audit's long tail, batched into 9 low-risk commits. The criticals and majors it found are already closed.
 
-[12. Discord direct-message relay](12-direct-message-relay.md) — NEW FEATURE, not yet built. `/tell @user` carries an attributed, verbatim message by DM; the reply routes back to the sender. Two phases, 9 PRs. The riskiest piece is the reply router, because `main_discord.on_message` already treats every DM as a full agent conversation.
+[12. Discord direct-message relay](12-direct-message-relay.md) — `/tell @user` carries an attributed, verbatim message by DM; the reply routes back to the sender. **Phase 1 (PRs 1–6) landed**, through `6c85157`: the command, blocks, the reply router, carry-back, `[Reply]` / `[Not now]` / `[Block sender]` buttons, and `/forget` + `/export` coverage with retention and reconciliation. `RELAY_ENABLED` still defaults to false, pending a live two-account test. Phase 2 (PRs 8–9, the agent-facing tool) is unbuilt — see plan 13, G2, for the knob that currently advertises it anyway.
+
+[13. What is left — the survey findings](13-survey-findings.md) — the October 2026 117-agent survey, verified and batched: six items that break something today (a failed TTS load removing every slash command, a non-idempotent `on_ready`, `migrate_db` bricking a fresh deployment, the agent's reminders sharing one pseudo-identity, neither deployment persisting the database, and overlapping turns losing an exchange), then 16 more in batches B–G. Also records the 17 candidates that were refuted, and four questions that need answers in [DECISIONS.md](DECISIONS.md) before they can be planned.
 
 
 ---
