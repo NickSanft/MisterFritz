@@ -601,7 +601,7 @@ def executor(state: EnhancedState, config: RunnableConfig):
     extra_tools: dict = {}
     if channel_id is not None and schedule_manager is not None:
         extra_tools["schedule_message"] = (
-            make_schedule_message_tool(channel_id, schedule_manager),
+            make_schedule_message_tool(user_id, channel_id, schedule_manager),
             "Schedule a one-time message to be sent in the current channel after N minutes.",
         )
         extra_tools["list_my_schedules"] = (

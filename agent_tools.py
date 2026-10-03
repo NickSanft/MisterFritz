@@ -534,16 +534,32 @@ def make_cancel_reminder_tool(user_id: str, schedule_manager) -> BaseTool:
     return cancel_reminder
 
 
-def make_schedule_message_tool(channel_id: int, schedule_manager) -> BaseTool:
-    """Return a tool that lets Fritz schedule a one-time message in the current channel."""
+def make_schedule_message_tool(user_id: str, channel_id: int, schedule_manager) -> BaseTool:
+    """Return a tool that lets Fritz schedule a one-time message in the current channel.
+
+    `user_id` is the caller's canonical identity, and it is not bookkeeping:
+    the job this books runs a full agent turn through `ask_stuff`, which uses
+    the value verbatim as the Chroma memory namespace and as the LangGraph
+    thread id. This once passed the literal string "scheduled", which put
+    every user's reminders in one namespace and one shared thread - so one
+    person's reminder was recalled into another's - and left all of it out of
+    reach of /forget and /export, which resolve the caller's real id.
+    """
 
     @tool
     def schedule_message(delay_minutes: int, message: str) -> str:
         """Schedule a one-time message to be sent in the current Discord channel after a delay.
         Use this when the user asks you to remind them of something or say something in N minutes.
         delay_minutes must be a positive integer. message is what Fritz should say when the time arrives."""
+        if not user_id:
+            # Refuse rather than book a turn that would write to an empty
+            # namespace. Every surface that reaches this tool resolves an
+            # identity first, so an empty one is a wiring fault, not
+            # something a user can ask for.
+            logger.warning("schedule_message called with no caller identity; refusing")
+            return "I can't schedule that: I don't know who is asking."
         try:
-            sid = schedule_manager.schedule_once(channel_id, "scheduled", delay_minutes, message)
+            sid = schedule_manager.schedule_once(channel_id, user_id, delay_minutes, message)
             return f"Scheduled (ID: {sid}). Will deliver in {delay_minutes} minute(s)."
         except Exception as e:
             logger.warning("schedule_message tool failed: %s", e)

@@ -7,6 +7,7 @@ wrapped in a try/except in the source, so it won't fail. The DB and chroma
 directory creation are lightweight and acceptable in a test environment.
 """
 import json
+import pathlib
 import re
 import unittest
 from unittest.mock import MagicMock, patch
@@ -322,6 +323,85 @@ class TestProfileUpdateIsSerialised(unittest.TestCase):
         self.assertEqual(final, 6,
                          f"lost {6 - final} increment(s) — update_user_profile "
                          "is not serialised")
+
+
+class TestTheOneShotReminderBelongsToWhoeverAskedForIt(unittest.TestCase):
+    """`schedule_message` books a job that runs a full agent turn, and
+    `ask_stuff` uses the id it carries verbatim as the Chroma memory namespace
+    and as the LangGraph thread id (mister_fritz.py:850-851).
+
+    It used to pass the literal string "scheduled". That put every user's
+    reminders in one namespace and one shared thread - so one person's
+    reminder was recalled into another person's turn - addressed Fritz to a
+    person named "scheduled", and left the lot outside /forget and /export,
+    which both resolve the caller's real id. The tool is not admin-gated:
+    anyone saying "remind me in ten minutes" reaches it.
+    """
+
+    CALLER = "discord-123456789"
+
+    def _tool(self, user_id=CALLER):
+        self.manager = MagicMock()
+        self.manager.schedule_once.return_value = "ab12cd34"
+        return agent_tools.make_schedule_message_tool(user_id, 4242, self.manager)
+
+    def test_the_caller_is_who_the_job_runs_as(self):
+        reply = self._tool().invoke({"delay_minutes": 10, "message": "stand up"})
+        self.manager.schedule_once.assert_called_once_with(
+            4242, self.CALLER, 10, "stand up")
+        self.assertIn("ab12cd34", reply)
+
+    def test_no_placeholder_identity_survives(self):
+        """The specific regression: the value must be the caller's, and must
+        not be the old literal under any circumstances."""
+        self._tool().invoke({"delay_minutes": 1, "message": "x"})
+        booked_as = self.manager.schedule_once.call_args.args[1]
+        self.assertEqual(booked_as, self.CALLER)
+        self.assertNotEqual(booked_as, "scheduled")
+
+    def test_an_unidentified_caller_books_nothing(self):
+        """Refusing beats writing a turn into an empty namespace. No surface
+        reaches this tool without resolving an identity first, so an empty one
+        is a wiring fault - say so rather than storing it somewhere nobody
+        can reach with /forget."""
+        reply = self._tool(user_id="").invoke({"delay_minutes": 5, "message": "x"})
+        self.manager.schedule_once.assert_not_called()
+        self.assertIn("don't know who is asking", reply)
+
+    def test_a_scheduling_failure_is_still_reported_not_raised(self):
+        tool = self._tool()
+        self.manager.schedule_once.side_effect = ValueError("Delay must be at least 1 minute(s).")
+        reply = tool.invoke({"delay_minutes": 0, "message": "x"})
+        self.assertIn("Failed to schedule", reply)
+        self.assertIn("at least 1 minute", reply)
+
+    def test_every_schedule_factory_takes_the_caller_first(self):
+        """The three factories are wired on adjacent lines in
+        mister_fritz.py's tool registry, and this one was the odd one out.
+        Keeping the signatures uniform is what makes a miswire visible."""
+        import inspect
+        for factory in (agent_tools.make_list_schedules_tool,
+                        agent_tools.make_cancel_reminder_tool,
+                        agent_tools.make_schedule_message_tool):
+            with self.subTest(factory=factory.__name__):
+                first = list(inspect.signature(factory).parameters)[0]
+                self.assertEqual(first, "user_id")
+
+    def test_the_registry_passes_the_caller_it_resolved(self):
+        """Read rather than run: building the tool registry means standing up
+        an agent node. The one call site has to pass the id the node resolved
+        from config metadata, and the agent cache key comment at
+        mister_fritz.py:623-625 already claims all three tools are bound to
+        it - which was only true of two of them."""
+        import ast
+        source = pathlib.Path(agent_tools.__file__).with_name("mister_fritz.py")
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        calls = [node for node in ast.walk(tree)
+                 if isinstance(node, ast.Call)
+                 and getattr(node.func, "id", None) == "make_schedule_message_tool"]
+        self.assertEqual(len(calls), 1, "expected exactly one call site")
+        self.assertEqual([getattr(arg, "id", None) for arg in calls[0].args],
+                         ["user_id", "channel_id", "schedule_manager"])
 
 
 if __name__ == "__main__":
