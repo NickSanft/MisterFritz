@@ -8,7 +8,7 @@ _October 2026. Produced by a 117-agent survey workflow run against the tree at `
 
 Every file:line below was verified at plan time. The six items in batch A were additionally re-read by hand, because a batch that claims something is broken today has to be right about that.
 
-> Three of these already have background task chips queued: **A2** (`on_ready` idempotency), **A3** (`migrate_db`), and the `file_tools` symlink hardening mentioned under batch C. Starting one of those from its chip and also doing it here would duplicate the work.
+> Background task chips: **A2** (`on_ready` idempotency) is still queued, as is the `file_tools` symlink hardening under batch C. The **A3** chip is superseded — that work is done.
 
 ## Grouping rules
 
@@ -36,6 +36,8 @@ The bot logs in and sits there with no commands and no diagnostic. It also makes
 
 **Risk:** none — it strictly widens a handler. **Verify:** a test that makes the loader raise a non-`ImportError` and asserts the cog still registers.
 
+> **Closed in `15ef73f`.** Also added the harness that executes `on_ready` at all — nothing had, so A2's test has somewhere to live now.
+
 ### A2. `on_ready` is not idempotent — a reconnect doubles every schedule
 
 **Where:** `main_discord.py:205-216`, `scheduler.py:279-315`, `scheduler.py:332`
@@ -58,6 +60,8 @@ Two companions in the same file: `_migrate_table` copies with `INSERT OR IGNORE 
 
 **Risk:** low, and it only affects a path that is currently broken. **Verify:** a new `tests/test_migrate_db.py` that runs the migration against a temp DB, then has a real `SqliteSaver` complete a `put_writes` against the result.
 
+> **Closed in `79421a4`**, with one addition the plan did not anticipate. Writing the tests showed `INSERT OR IGNORE` does not raise on a rejected row, it *skips* it: a source predating a NOT NULL column lost every row with no exception and a count of zero — indistinguishable from "already migrated", then "Done" and the advice to delete. OR IGNORE has to stay so a re-run is safe, so the copy now verifies arrival by primary key instead.
+
 ### A4. The agent books every reminder under one shared pseudo-identity
 
 **Where:** `agent_tools.py:537-552` (`"scheduled"` at :546), `scheduler.py:113-120`, `mister_fritz.py:851`, `mister_fritz.py:944`
@@ -74,6 +78,8 @@ The tool is not admin-gated: any guild member saying "remind me in ten minutes" 
 **Fix:** give `make_schedule_message_tool` a `user_id` parameter like its two siblings at `agent_tools.py:493` and `:515`, and pass it instead of the literal. The call site already has it in scope at `mister_fritz.py:594`. Keep a guarded fallback for the empty/legacy id rather than writing to an empty namespace. No migration — one-shot jobs are not persisted, so nothing in `schedules` carries the bad value.
 
 **Risk:** low. Note the agent cache key comment at `mister_fritz.py:623-625` — the key is meant to be exactly what the closures capture, and `user_id` is already in it. **Verify:** assert `schedule_once` receives the caller's canonical id, and that a reminder's memories land in that namespace.
+
+> **Split and closed.** `e169057` threads the identity (A4a). Consequence 4 needed its own commit, because `remove_schedule` reads the schedules table and a one-shot never enters it — so no identity fix alone could make one cancellable. `00e58d0` makes `remove_schedule` and `remove_all_for_user` consult the job store, keyed on the owner the job now carries (A4b), which also closes the `/forget` gap.
 
 ### A5. Neither deployment persists the database
 
