@@ -180,7 +180,10 @@ class ScheduleManager:
                 "SELECT user_id FROM schedules WHERE id = ?", (schedule_id,)
             ).fetchone()
             if not row:
-                return False
+                # Not persisted, so it is either a one-shot from
+                # schedule_once or nothing at all. Ask the job store, which
+                # is a one-shot's only record.
+                return self._remove_one_shot(schedule_id, user_id)
             if row[0] != user_id:
                 raise PermissionError("You can only remove your own schedules.")
             conn.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
@@ -191,6 +194,51 @@ class ScheduleManager:
         except Exception:
             pass
         logger.info("Removed schedule %s", schedule_id)
+        return True
+
+    def _jobs_for(self, user_id: str) -> list:
+        """Live jobs whose owner is user_id.
+
+        Every job this class registers carries
+        `[schedule_id, user_id, channel_id, prompt]` as its args, so the owner
+        is args[1] whether the job was persisted or not. Callers decide which
+        kind they are looking at: a persisted one has a row in the schedules
+        table, a one-shot never does.
+        """
+        owned = []
+        for job in self.scheduler.get_jobs():
+            args = getattr(job, "args", None) or ()
+            if len(args) >= 2 and args[1] == user_id:
+                owned.append(job)
+        return owned
+
+    def _remove_one_shot(self, schedule_id: str, user_id: str) -> bool:
+        """Cancel a job that exists only in the scheduler.
+
+        schedule_once does not persist (there is nothing to restore - a
+        one-shot that missed its moment should not fire on the next boot), so
+        a one-shot has no row in the schedules table. That made every id
+        schedule_message ever handed out uncancellable: remove_schedule
+        returned False, so Fritz confirmed a reminder and then denied it
+        existed, and /forget schedules left it running.
+        """
+        job = self.scheduler.get_job(schedule_id)
+        if job is None:
+            return False
+        args = getattr(job, "args", None) or ()
+        if len(args) < 2:
+            # A job this class did not book, or one whose args no longer carry
+            # an owner. "Not yours" would be a claim about an owner there is
+            # no evidence for, so report it the way an absent id is reported.
+            logger.warning("Job %s has no identifiable owner; not removing", schedule_id)
+            return False
+        if args[1] != user_id:
+            # Same answer the persisted path gives, deliberately: a one-shot
+            # should not be the one place that reports somebody else's
+            # schedule as simply absent.
+            raise PermissionError("You can only remove your own schedules.")
+        self.scheduler.remove_job(schedule_id)
+        logger.info("Removed one-shot %s", schedule_id)
         return True
 
     def list_schedules(self, user_id: str) -> list[dict]:
@@ -234,7 +282,19 @@ class ScheduleManager:
                 self.scheduler.remove_job(sid)
             except Exception as e:
                 logger.debug("remove_job(%s) raised on bulk removal: %s", sid, e)
-        return len(ids)
+
+        # The persisted jobs are detached by now, so anything still in the
+        # store under this user is a one-shot - which has no row to delete and
+        # so used to survive /forget schedules entirely, still holding the
+        # prompt it was booked with.
+        one_shots = 0
+        for job in self._jobs_for(user_id):
+            try:
+                self.scheduler.remove_job(job.id)
+                one_shots += 1
+            except Exception as e:
+                logger.debug("remove_job(%s) raised on one-shot sweep: %s", job.id, e)
+        return len(ids) + one_shots
 
     def list_all_schedules(self) -> list[dict]:
         """Return every schedule across all users. Admin / observability use."""

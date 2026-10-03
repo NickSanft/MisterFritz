@@ -257,5 +257,106 @@ class TestParseTrigger(unittest.TestCase):
             self.manager._parse_trigger("0 9 * *")  # only 4 parts
 
 
+class TestAOneShotCanBeCancelledAndForgotten(unittest.TestCase):
+    """`schedule_once` deliberately does not persist - a reminder that missed
+    its moment should not fire on the next boot - so the APScheduler job store
+    is a one-shot's only record.
+
+    `remove_schedule` only ever read the schedules table, so it returned False
+    for every id `schedule_message` handed out: Fritz confirmed a reminder and
+    then denied it existed. `/forget schedules` missed them for the same
+    reason, leaving the prompt booked and still due to fire.
+
+    These tests use a real (unstarted) AsyncIOScheduler rather than the
+    MagicMock the rest of this file uses, because the behaviour under test IS
+    the job store: pending jobs are visible to get_job/get_jobs/remove_job,
+    and the owner is args[1] exactly as schedule_once writes it.
+    """
+
+    OWNER = "discord-111"
+    OTHER = "discord-222"
+
+    def setUp(self):
+        import os
+        import tempfile
+        fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.manager, self.sched_mod = _make_manager(self.db_path)
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+        self.manager.scheduler = AsyncIOScheduler()
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        import os
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.unlink(self.db_path + suffix)
+            except OSError:
+                pass
+
+    def _book(self, owner=OWNER, minutes=10, prompt="stand up"):
+        return self.manager.schedule_once(4242, owner, minutes, prompt)
+
+    def test_the_id_fritz_hands_out_can_be_cancelled(self):
+        sid = self._book()
+        self.assertTrue(self.manager.remove_schedule(sid, self.OWNER))
+        self.assertIsNone(self.manager.scheduler.get_job(sid))
+
+    def test_cancelling_it_twice_reports_the_second_as_absent(self):
+        sid = self._book()
+        self.manager.remove_schedule(sid, self.OWNER)
+        self.assertFalse(self.manager.remove_schedule(sid, self.OWNER))
+
+    def test_an_unknown_id_is_still_simply_absent(self):
+        self.assertFalse(self.manager.remove_schedule("nosuchid", self.OWNER))
+
+    def test_one_person_cannot_cancel_anothers(self):
+        sid = self._book(owner=self.OTHER)
+        with self.assertRaises(PermissionError):
+            self.manager.remove_schedule(sid, self.OWNER)
+        self.assertIsNotNone(self.manager.scheduler.get_job(sid),
+                             "the job was removed despite the refusal")
+
+    def test_a_job_with_no_identifiable_owner_is_not_claimed(self):
+        """Reporting it as somebody else's would assert an owner there is no
+        evidence for, so it is reported the way an absent id is."""
+        self.manager.scheduler.add_job(
+            lambda _only_arg: None, trigger=self.sched_mod.DateTrigger(
+                run_date=self.sched_mod.datetime.now(self.sched_mod.timezone.utc)
+                + self.sched_mod.timedelta(minutes=5)),
+            args=["orphan"], id="orphan")
+        self.assertFalse(self.manager.remove_schedule("orphan", self.OWNER))
+        self.assertIsNotNone(self.manager.scheduler.get_job("orphan"))
+
+    def test_forget_schedules_removes_one_shots_and_counts_them(self):
+        """The privacy consequence: /forget schedules reports what it removed,
+        and a one-shot used to be neither removed nor counted."""
+        self._book(prompt="first")
+        self._book(prompt="second")
+        self.assertEqual(self.manager.remove_all_for_user(self.OWNER), 2)
+        self.assertEqual(self.manager.scheduler.get_jobs(), [])
+
+    def test_forget_schedules_counts_persisted_and_one_shot_together(self):
+        persisted = self.manager.add_schedule(self.OWNER, 111, 4242, "ping", "30m")
+        self._book()
+        self.assertEqual(self.manager.remove_all_for_user(self.OWNER), 2)
+        self.assertEqual(self.manager.list_schedules(self.OWNER), [])
+        self.assertIsNone(self.manager.scheduler.get_job(persisted))
+        self.assertEqual(self.manager.scheduler.get_jobs(), [])
+
+    def test_forget_leaves_other_peoples_reminders_alone(self):
+        mine = self._book()
+        theirs = self._book(owner=self.OTHER)
+        self.assertEqual(self.manager.remove_all_for_user(self.OWNER), 1)
+        self.assertIsNone(self.manager.scheduler.get_job(mine))
+        self.assertIsNotNone(self.manager.scheduler.get_job(theirs))
+
+    def test_a_persisted_job_is_not_counted_twice(self):
+        """remove_all_for_user detaches the persisted jobs before sweeping the
+        store, so the sweep must not find them again."""
+        self.manager.add_schedule(self.OWNER, 111, 4242, "ping", "30m")
+        self.assertEqual(self.manager.remove_all_for_user(self.OWNER), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
