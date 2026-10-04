@@ -8,7 +8,7 @@ _October 2026. Produced by a 117-agent survey workflow run against the tree at `
 
 Every file:line below was verified at plan time. The six items in batch A were additionally re-read by hand, because a batch that claims something is broken today has to be right about that.
 
-> Background task chips: **A2** (`on_ready` idempotency) is still queued, as is the `file_tools` symlink hardening under batch C. The **A3** chip is superseded — that work is done.
+> Background task chips: the **A2** and **A3** chips are both superseded — that work is done. The `file_tools` symlink hardening under batch C is still queued.
 
 ## Grouping rules
 
@@ -47,6 +47,8 @@ discord.py re-dispatches `on_ready` on every full reconnect, not just the first.
 **Fix:** guard the process-wide singletons the way `sayer` already is — build the scheduler once (or stop the previous one via the already-defined `stop()`), and pass `override=True` to `add_cog` so the rest of `on_ready` still completes on a reconnect.
 
 **Risk:** low. **Verify:** dispatch `on_ready` twice against a fake client and assert one scheduler, one cog, jobs registered once.
+
+> **Closed in `f165683`**, wider than scoped. Two more things on that path own something process-wide and were re-entered every reconnect: `start_admin_panel` built a second `uvicorn.Server` on the same port (the guard now sits beside the port, keyed on the thread still being alive so a crashed panel can return), and the models were re-warmed. `relay_housekeeping` and `tree.sync` are left deliberately unguarded, with comments saying why — the second is the only thing that repairs a sync which failed on boot. One interaction A1 created is also closed: TTS is retried while it has not succeeded, so an engine arriving late is now attached to the already-registered cog, which the retry otherwise could never reach.
 
 ### A3. `migrate_db` bricks a fresh deployment
 
@@ -217,7 +219,7 @@ Recorded so they are not re-proposed. Each was killed because the mechanism was 
 
 | Batch | Items | State |
 |---|---|---|
-| A | 7 (A4 split in two) | **A1, A3, A4a, A4b closed** (`15ef73f`, `79421a4`, `e169057`, `00e58d0`). A2, A5, A6 open |
+| A | 7 (A4 split in two) | **A1, A2, A3, A4a, A4b closed** (`15ef73f`, `f165683`, `79421a4`, `e169057`, `00e58d0`). A5, A6 open |
 | B | 4 | not started |
 | C | 3 (+ queued symlink chip) | not started |
 | D | 3 | not started |
