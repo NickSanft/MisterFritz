@@ -170,11 +170,12 @@ relay_router.install(client)
 
 sayer = None
 schedule_manager = None
+_models_prewarmed = False
 
 
 @client.event
 async def on_ready():
-    global sayer, schedule_manager
+    global sayer, schedule_manager, _models_prewarmed
     relay_router.ensure_installed(client)
     # No `loop` binding needed here any more — run_blocking gets its own.
     # on_message still binds one, for run_coroutine_threadsafe in the
@@ -220,23 +221,64 @@ async def on_ready():
             )
         else:
             logger.info("TTS engine ready")
-    schedule_manager = ScheduleManager(client)
-    schedule_manager.start()
+    # discord.py dispatches `ready` on every READY, not only the first, so
+    # everything below here runs again on each gateway reconnect — routine on a
+    # home connection. It is all process-wide, and each step is guarded on its
+    # own evidence rather than on one "have we booted" flag, so a step that
+    # failed last time is retried while the ones that succeeded are not
+    # repeated.
+    #
+    # Unguarded, this built a SECOND ScheduleManager with its own
+    # AsyncIOScheduler and replayed every persisted row onto it. The first was
+    # never stopped (ScheduleManager.stop had no caller at all), so each
+    # /schedule row then fired twice per period — a channel post and a whole
+    # ask_stuff turn each time — compounding to N+1 after N reconnects and
+    # recovering only on restart. add_cog then raised ClientException on the
+    # duplicate name, which aborted the rest of on_ready and left the live cog
+    # holding manager #1 while on_message handed manager #2 to ask_stuff: one
+    # scheduler took /schedule add, the other took the agent's reminders.
+    if schedule_manager is None:
+        schedule_manager = ScheduleManager(client)
+        schedule_manager.start()
+    # Re-entrant by design, and it registers its hourly purge on whichever
+    # scheduler it is handed — which is now always the surviving one.
     await relay_housekeeping(schedule_manager)
-    # Start the read-only admin panel (no-op if ADMIN_PANEL_PASSWORD is unset).
+    # No-op if ADMIN_PANEL_PASSWORD is unset, and returns early if it is
+    # already serving: the guard is in start_admin_panel, because the port
+    # belongs to the process rather than to this caller.
     start_admin_panel(schedule_manager=schedule_manager)
-    # Pre-warm Ollama in a daemon thread so the first DM doesn't pay model-load lag.
-    prewarm_models(
-        chat_models=(THINKING_OLLAMA_MODEL, FAST_OLLAMA_MODEL, VISION_MODEL),
-        embedding_models=(EMBEDDING_MODEL,),
-        keep_alive=OLLAMA_KEEP_ALIVE,
-    )
-    await client.add_cog(FritzCommands(client, sayer, schedule_manager))
+    if not _models_prewarmed:
+        # Pre-warm Ollama in a daemon thread so the first DM doesn't pay
+        # model-load lag. Once per process: a reconnect does not cool the
+        # models, and re-warming three of them costs real GPU time.
+        prewarm_models(
+            chat_models=(THINKING_OLLAMA_MODEL, FAST_OLLAMA_MODEL, VISION_MODEL),
+            embedding_models=(EMBEDDING_MODEL,),
+            keep_alive=OLLAMA_KEEP_ALIVE,
+        )
+        _models_prewarmed = True
+    cog = client.get_cog("FritzCommands")
+    if cog is None:
+        await client.add_cog(FritzCommands(client, sayer, schedule_manager))
+    elif cog.sayer is None and sayer is not None:
+        # The TTS block above retries while it has not succeeded, and the cog
+        # registered on an earlier pass is still holding the None it was given
+        # then. Without this the retry could never take effect: /voice would
+        # report itself unavailable for the life of the process even after the
+        # engine finally came up.
+        cog.sayer = sayer
+        logger.info("TTS engine attached to the command cog that was already registered")
     # Backstop for app-command failures raised OUTSIDE the cog (e.g. a stale
     # sync producing CommandNotFound), which the cog hook never sees. It
     # must skip commands that have their own handler - discord.py calls both.
     client.tree.on_error = handle_tree_error
     logger.info("Logged in as %s", client.user)
+    # Deliberately NOT guarded to once per process. The command set does not
+    # change across reconnects, so this is usually redundant work, but it is
+    # also the only step that repairs a first sync which failed — and before
+    # the guards above, add_cog raised first and so this never ran on a
+    # reconnect at all. If a flapping connection ever starts burning Discord's
+    # daily command-write allowance, this is the line to put behind a flag.
     try:
         synced = await client.tree.sync()
         print(f"Synced {len(synced)} command(s)")

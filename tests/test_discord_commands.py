@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 # tts (prevents a TTS model download), image_generator and document_engine are
 # stubbed in tests/conftest.py before any test module is collected.
 
+import admin_panel  # noqa: E402
 import main_discord  # noqa: E402
 from main_discord import split_into_chunks, StreamingMessageHandler  # noqa: E402
 
@@ -327,11 +328,34 @@ class OnReadyCase(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         self.client = MagicMock()
-        self.client.add_cog = AsyncMock()
         self.client.tree = MagicMock()
         self.client.tree.sync = AsyncMock(return_value=[])
         self.scheduler = MagicMock()
         self.cog = MagicMock()
+        self.cog.sayer = MagicMock(name="already-held-engine")
+
+        # A real registry rather than a bare mock: on_ready asks get_cog
+        # whether it has already registered, so a client that always answers
+        # "yes" (any MagicMock attribute is truthy) or always "no" would make
+        # the idempotency tests below meaningless in opposite directions.
+        self.cogs = {}
+
+        async def _add_cog(cog, **kwargs):
+            self.cogs["FritzCommands"] = cog
+
+        self.client.add_cog = AsyncMock(side_effect=_add_cog)
+        self.client.get_cog = MagicMock(side_effect=lambda name: self.cogs.get(name))
+
+        # Module-level once-only state, reset so test order cannot decide
+        # whether a step is skipped.
+        for module, name, value in (
+            (main_discord, "_models_prewarmed", False),
+            (admin_panel, "_PANEL_THREAD", None),
+        ):
+            patcher = patch.object(module, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
         replacements = {
             "client": self.client,
             "sayer": None,                      # so the TTS branch is entered
@@ -413,6 +437,161 @@ class TestABrokenVoiceExtraDoesNotTakeTheBootWithIt(OnReadyCase):
         self.assertIs(main_discord.sayer, engine)
         self.assertIs(main_discord.FritzCommands.call_args.args[1], engine)
         self.assert_the_bot_came_up()
+
+
+class TestOnReadyIsIdempotent(OnReadyCase):
+    """discord.py dispatches `ready` on every READY, not only the first, so a
+    gateway reconnect — routine on a home connection — re-ran all of on_ready.
+
+    It built a second ScheduleManager with its own AsyncIOScheduler and
+    replayed every persisted row onto it, while the first was never stopped
+    (ScheduleManager.stop had no caller anywhere). Every /schedule row then
+    fired twice per period, each firing a channel post and a full ask_stuff
+    turn, compounding to N+1 after N reconnects and recovering only on a
+    process restart.
+    """
+
+    async def reconnect(self, times=2):
+        for _ in range(times):
+            await main_discord.on_ready()
+
+    async def test_one_scheduler_however_many_reconnects(self):
+        with self._loading_tts({"return_value": MagicMock()}):
+            await self.reconnect(times=4)
+        self.assertEqual(main_discord.ScheduleManager.call_count, 1)
+        self.scheduler.start.assert_called_once()
+
+    async def test_the_surviving_scheduler_is_the_one_everything_else_holds(self):
+        """The subtler half of the bug: add_cog raised on the duplicate name,
+        which aborted the rest of on_ready and left the live cog holding
+        manager #1 while on_message read manager #2 out of the global."""
+        with self._loading_tts({"return_value": MagicMock()}):
+            await self.reconnect()
+        built = main_discord.ScheduleManager.return_value
+        self.assertIs(main_discord.schedule_manager, built)
+        self.assertIs(main_discord.FritzCommands.call_args.args[2], built)
+        for call in main_discord.relay_housekeeping.await_args_list:
+            self.assertIs(call.args[0], built)
+
+    async def test_the_cog_is_registered_once(self):
+        with self._loading_tts({"return_value": MagicMock()}):
+            await self.reconnect()
+        self.client.add_cog.assert_awaited_once()
+        self.assertEqual(main_discord.FritzCommands.call_count, 1)
+
+    async def test_the_models_are_pre_warmed_once(self):
+        with self._loading_tts({"return_value": MagicMock()}):
+            await self.reconnect(times=3)
+        main_discord.prewarm_models.assert_called_once()
+
+    async def test_the_admin_panel_is_started_once(self):
+        """The call is made every time; the guard that matters is inside
+        start_admin_panel, because the port belongs to the process. This
+        asserts the call still happens, so the guard is reached."""
+        with self._loading_tts({"return_value": MagicMock()}):
+            await self.reconnect()
+        self.assertEqual(main_discord.start_admin_panel.call_count, 2)
+
+    async def test_housekeeping_still_runs_on_every_reconnect(self):
+        """Deliberately not guarded: it closes reservations a previous process
+        left open and purges expired rows, and its own docstring says it must
+        tolerate re-running."""
+        with self._loading_tts({"return_value": MagicMock()}):
+            await self.reconnect(times=3)
+        self.assertEqual(main_discord.relay_housekeeping.await_count, 3)
+
+    async def test_the_commands_are_still_synced_on_a_reconnect(self):
+        """The regression this bug hid: add_cog raised before the sync, so a
+        reconnect never reached it. Left unguarded so a failed first sync can
+        still be repaired."""
+        with self._loading_tts({"return_value": MagicMock()}):
+            await self.reconnect(times=3)
+        self.assertEqual(self.client.tree.sync.await_count, 3)
+        self.assertIs(self.client.tree.on_error, main_discord.handle_tree_error)
+
+    async def test_a_tts_engine_that_arrives_late_reaches_the_live_cog(self):
+        """TTS is retried while it has not succeeded, so the engine can turn up
+        after the cog was registered holding None. Without attaching it, the
+        retry is inert and /voice stays unavailable for the whole process."""
+        engine = MagicMock(name="TTSEngine")
+        self.cog.sayer = None
+        with self._loading_tts({"side_effect": RuntimeError("model download failed")}):
+            with self.assertLogs("main_discord", level="ERROR"):
+                await main_discord.on_ready()
+        self.assertIsNone(self.cogs["FritzCommands"].sayer)
+
+        with self._loading_tts({"return_value": engine}):
+            await main_discord.on_ready()
+        self.assertIs(self.cogs["FritzCommands"].sayer, engine)
+
+    async def test_a_cog_that_already_has_an_engine_is_left_alone(self):
+        engine = MagicMock(name="TTSEngine")
+        with self._loading_tts({"return_value": engine}):
+            await self.reconnect()
+        held = self.cogs["FritzCommands"].sayer
+        self.assertIsNot(held, engine, "the first cog's own engine was replaced")
+
+
+class TestTheAdminPanelBindsItsPortOnce(unittest.TestCase):
+    """on_ready calls start_admin_panel on every reconnect, and two uvicorn
+    servers cannot share a port: the second bind loses and leaves a dead
+    thread, while the app it built holds a different schedule_manager than the
+    live one."""
+
+    def setUp(self):
+        for name, value in (("_PANEL_THREAD", None),
+                            ("ADMIN_PANEL_PASSWORD", "pw"),
+                            ("CHAT_PASSWORD", "pw")):
+            patcher = patch.object(admin_panel, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _start_twice(self):
+        made = []
+
+        class FakeThread:
+            def __init__(self, **kwargs):
+                made.append(self)
+                self.alive = False
+
+            def start(self):
+                self.alive = True
+
+            def is_alive(self):
+                return self.alive
+
+        with patch.object(admin_panel.threading, "Thread", FakeThread), \
+                patch.object(admin_panel, "create_app", MagicMock()), \
+                patch.object(admin_panel, "uvicorn", MagicMock()):
+            first = admin_panel.start_admin_panel()
+            second = admin_panel.start_admin_panel()
+        return first, second, made
+
+    def test_only_one_server_thread_is_created(self):
+        first, second, made = self._start_twice()
+        self.assertEqual(len(made), 1)
+
+    def test_the_second_call_reports_the_port_that_is_serving(self):
+        first, second, _made = self._start_twice()
+        self.assertEqual(second, first)
+        self.assertEqual(second, admin_panel.ADMIN_PANEL_PORT)
+
+    def test_a_dead_thread_does_not_block_a_restart(self):
+        """The guard asks whether the server is alive, not whether one was
+        ever made, so a crashed panel can still be brought back."""
+        _first, _second, made = self._start_twice()
+        made[0].alive = False
+        with patch.object(admin_panel.threading, "Thread", MagicMock()), \
+                patch.object(admin_panel, "create_app", MagicMock()), \
+                patch.object(admin_panel, "uvicorn", MagicMock()):
+            self.assertEqual(admin_panel.start_admin_panel(),
+                             admin_panel.ADMIN_PANEL_PORT)
+            self.assertTrue(admin_panel.threading.Thread.called)
+
+    def test_a_disabled_panel_never_marks_itself_started(self):
+        with patch.object(admin_panel, "ADMIN_PANEL_PASSWORD", None):
+            self.assertIsNone(admin_panel.start_admin_panel())
+        self.assertIsNone(admin_panel._PANEL_THREAD)
 
 
 if __name__ == "__main__":

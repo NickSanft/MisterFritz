@@ -1240,15 +1240,28 @@ def create_app(password: str, schedule_manager=None, chat_password: str | None =
     return app
 
 
+_PANEL_THREAD: Optional[threading.Thread] = None
+
+
 def start_admin_panel(schedule_manager=None) -> Optional[int]:
     """Spin up the admin panel in a background thread.
 
-    Returns the port if started, or None if disabled (no password set).
-    Bound to 127.0.0.1 only — port-forward over SSH for remote access.
+    Returns the port if started (or already serving), or None if disabled (no
+    password set). Bound to 127.0.0.1 only — port-forward over SSH for remote access.
     """
     if not ADMIN_PANEL_PASSWORD:
         logger.info("ADMIN_PANEL_PASSWORD not set — admin panel disabled.")
         return None
+
+    global _PANEL_THREAD
+    if _PANEL_THREAD is not None and _PANEL_THREAD.is_alive():
+        # Called again in the same process. on_ready fires on every gateway
+        # reconnect, and the port is not something two servers can share: the
+        # second bind loses and leaves a dead thread behind, while the app it
+        # built holds a different schedule_manager than the live one. Report
+        # the port that IS serving.
+        logger.debug("Admin panel already serving on :%d", ADMIN_PANEL_PORT)
+        return ADMIN_PANEL_PORT
 
     if not CHAT_PASSWORD:
         logger.warning(
@@ -1274,6 +1287,7 @@ def start_admin_panel(schedule_manager=None) -> Optional[int]:
 
     t = threading.Thread(target=_run, name="admin-panel", daemon=True)
     t.start()
+    _PANEL_THREAD = t
     logger.info(
         "Admin panel started at http://127.0.0.1:%d/ — HTTP Basic, any username + ADMIN_PANEL_PASSWORD",
         ADMIN_PANEL_PORT,
