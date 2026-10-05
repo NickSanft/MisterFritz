@@ -105,6 +105,10 @@ Nothing serialises `ask_stuff` per thread. `thread_id_for` returns the bare iden
 
 **Risk:** medium — it introduces waiting where there was none, so a long turn now delays a follow-up instead of corrupting history. That is the intended trade. **Verify:** two concurrent `ask_stuff` calls on one thread; assert both exchanges survive in the checkpoint.
 
+> **Closed in `09cc25f`.** The hazard was measured rather than argued: an interleaved read-append-write against a real `SqliteSaver` keeps only the first exchange, and that stands as a canary for the day the checkpointer starts serialising turns itself. One turn runs per thread with at most one more waiting — the cap is small because a waiter holds a pool thread, so an unbounded queue would let one person stall the bot for everyone.
+>
+> Implementing it surfaced something the plan missed: `_run_task` posts the returned text straight into the channel, so a refused scheduled turn would have delivered the refusal *as* the reminder and lost the real one. `ask_stuff` therefore takes `may_wait`, and the scheduler is its one caller. `_run_task` also got its first test, which is part of what batch **E2** is about.
+
 ---
 
 ## Batch B — the privacy and feedback commands tell the truth
@@ -219,7 +223,7 @@ Recorded so they are not re-proposed. Each was killed because the mechanism was 
 
 | Batch | Items | State |
 |---|---|---|
-| A | 7 (A4 split in two) | **A1, A2, A3, A4a, A4b closed** (`15ef73f`, `f165683`, `79421a4`, `e169057`, `00e58d0`). A5, A6 open |
+| A | 7 (A4 split in two) | **A1, A2, A3, A4a, A4b, A6 closed** (`15ef73f`, `f165683`, `79421a4`, `e169057`, `00e58d0`, `09cc25f`). A5 open |
 | B | 4 | not started |
 | C | 3 (+ queued symlink chip) | not started |
 | D | 3 | not started |
