@@ -116,6 +116,13 @@ class ScheduleManager:
                 lambda: ask_stuff(
                     prompt, MessageSource.LOCAL, user_id,
                     display_name=display, channel_key=str(channel_id),
+                    # Queue behind a live conversation on this thread rather
+                    # than being turned away: the text that comes back is
+                    # posted to the channel as the reminder, so a refusal
+                    # would be delivered as the reminder and the real one
+                    # lost. A schedule fires once per period, so this cannot
+                    # pile up.
+                    may_wait=True,
                 ),
             )
             text = response_data.get("text") or "No response generated."

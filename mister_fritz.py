@@ -4,7 +4,7 @@ import logging
 import os
 import re
 import threading
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from typing import Annotated, Literal, TypedDict
 
 import httpx
@@ -322,6 +322,87 @@ def _summarize_and_profile_inner(messages: list, user_id: str | None) -> None:
 # concurrent 20B summaries of nearly the same transcript.
 _summarize_inflight: set = set()
 _summarize_lock = threading.Lock()
+
+
+# One turn at a time per LangGraph thread, and at most one more waiting.
+#
+# Nothing serialised a turn before this. thread_id_for returns the bare
+# identity unless THREADS_PER_CHANNEL is on, so one person's DMs and every
+# channel they mention Fritz in share a single thread; the blocking pool allows
+# BLOCKING_POOL_SIZE turns at once and on_message offloads every message onto
+# it with no per-user gate. Two turns that overlapped — a follow-up sent while
+# the first reply was still streaming, a DM alongside a channel mention, the
+# web chat beside Discord — both streamed against the one SqliteSaver. Its
+# internal lock makes each individual database operation safe, which is the
+# only property plan 08 ever claimed for it; it does not make a turn's
+# read-modify-write atomic. The later writer won and one question with its
+# answer simply vanished from the history, with no error, no metric and no log
+# line. It presented as the assistant randomly forgetting things, which is
+# indistinguishable from the model being bad.
+#
+# The cap is deliberately small. A waiter occupies one of the pool's threads
+# for as long as the turn ahead of it takes, so an unbounded queue would let
+# one person's rapid-fire messages hold every thread and stall the bot for
+# everybody. Two means a follow-up is still answered in order, which is the
+# case that actually happens, while the third concurrent message is told to
+# wait rather than silently deleting an exchange.
+_TURN_GATES: dict = {}
+_TURN_GATES_GUARD = threading.Lock()
+MAX_TURNS_PER_THREAD = 2
+
+
+class _TurnGate:
+    """One lock per thread, plus a count of who holds it or waits for it."""
+
+    __slots__ = ("lock", "participants")
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.participants = 0
+
+
+class ThreadBusy(Exception):
+    """This thread already has a turn running and another waiting."""
+
+
+@contextmanager
+def one_turn_at_a_time(thread_id: str, *, may_wait: bool = False):
+    """Serialise turns on `thread_id`, refusing a third concurrent one.
+
+    `may_wait` lifts the refusal for a caller that would rather queue than be
+    turned away. The cap exists to stop one person's rapid-fire messages from
+    holding every thread in the blocking pool; a scheduled task is neither
+    rapid-fire (one firing per schedule per period, and APScheduler coalesces
+    a backlog) nor on that pool, and it posts whatever text comes back — so
+    refusing it would deliver the refusal into the channel as the reminder and
+    lose the reminder itself.
+
+    The gate is removed once the last participant leaves, so this does not
+    accumulate an entry per (person, channel) for the life of the process.
+    """
+    with _TURN_GATES_GUARD:
+        gate = _TURN_GATES.get(thread_id)
+        if gate is None:
+            gate = _TURN_GATES[thread_id] = _TurnGate()
+        if not may_wait and gate.participants >= MAX_TURNS_PER_THREAD:
+            raise ThreadBusy(thread_id)
+        gate.participants += 1
+
+    # Counted separately from the wait itself: "how often do turns overlap" is
+    # the question this answers, and it is the one worth watching.
+    if not gate.lock.acquire(blocking=False):
+        METRICS.increment("turn_waited_for_thread")
+        logger.info("A turn is already running on thread %s; queued behind it",
+                    thread_id)
+        gate.lock.acquire()
+    try:
+        yield
+    finally:
+        gate.lock.release()
+        with _TURN_GATES_GUARD:
+            gate.participants -= 1
+            if gate.participants == 0 and _TURN_GATES.get(thread_id) is gate:
+                del _TURN_GATES[thread_id]
 
 
 def summarize_conversation(state: EnhancedState, config: RunnableConfig):
@@ -844,6 +925,7 @@ def ask_stuff(
     thread_id: str | None = None,
     display_name: str | None = None,
     channel_key: str | None = None,
+    may_wait: bool = False,
 ) -> dict:
     """Process user input and return structured output with text and attachments.
 
@@ -865,6 +947,11 @@ def ask_stuff(
     `delta` and clear on `restart`.
 
     progress_callback(message) is called with human-readable tool notices.
+
+    `may_wait` is for callers that are not a person waiting on a reply. One
+    turn runs at a time per thread and one more may queue; beyond that an
+    interactive caller is told to try again, because a waiter holds a pool
+    thread. A caller that sets this queues instead — see one_turn_at_a_time.
     """
     # No transformation here any more. `user_id` arrives canonical from the
     # adapter (canonical_user_id at the boundary), and is passed VERBATIM to
@@ -923,14 +1010,32 @@ def ask_stuff(
 
     final_state = None
     debug = logger.isEnabledFor(logging.DEBUG)
-    for s in app.stream(inputs, config=config, stream_mode="values"):
-        final_state = s
-        # pretty_print writes to stdout. It used to fire on every superstep
-        # regardless of log level.
-        if debug:
-            message = s["messages"][-1] if "messages" in s and s["messages"] else None
-            if message and not isinstance(message, tuple) and hasattr(message, 'pretty_print'):
-                message.pretty_print()
+    try:
+        # The whole stream, not just the write: LangGraph loads the checkpoint
+        # when the stream opens and writes as it goes, so the read and the
+        # write have to be inside the same gate to be one turn.
+        with one_turn_at_a_time(thread_id_clean, may_wait=may_wait):
+            for s in app.stream(inputs, config=config, stream_mode="values"):
+                final_state = s
+                # pretty_print writes to stdout. It used to fire on every
+                # superstep regardless of log level.
+                if debug:
+                    message = s["messages"][-1] if "messages" in s and s["messages"] else None
+                    if message and not isinstance(message, tuple) and hasattr(message, 'pretty_print'):
+                        message.pretty_print()
+    except ThreadBusy:
+        METRICS.increment("turn_refused_thread_busy")
+        logger.warning(
+            "Refusing a third concurrent turn on thread %s; one is running and "
+            "one is already queued", thread_id_clean,
+        )
+        return {
+            "text": ("One moment, sir. I am still attending to your previous "
+                     "message, and one more besides. Do ask again once I have "
+                     "caught up."),
+            "image_paths": [],
+            "timestamp": get_current_time_internal(),
+        }
 
     final_text = ""
     if final_state and "messages" in final_state and final_state["messages"]:
