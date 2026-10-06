@@ -93,7 +93,13 @@ This lands squarely on a recorded decision. [DECISIONS.md](DECISIONS.md) #22 kee
 
 **Fix:** mount what the code actually opens. Prefer a `./data` directory plus `DB_NAME=/app/data/fritz.db` over a bare file bind, which avoids the missing-source-becomes-a-directory trap entirely; add `./workspaces` and the audit log. For k8s, either drop `CHAT_DB_NAME` from the configmap so the three stay unified, or give the deployment a volume.
 
-**Risk:** medium — it changes where data lives, so it needs a note about moving an existing `fritz.db` into `./data`. **Verify:** `docker compose up`, send a message, `docker compose down && up`, confirm the conversation and a placed block survive.
+**Risk:** medium — it changes where data lives. **Verify:** `docker compose up`, send a message, `docker compose down && up`, confirm the conversation and a placed block survive.
+
+> **Closed in `21eafcf`**, and the premise needed one correction: k8s does have a PVC, with subPath mounts for input, output and chroma_store. The hole there was that `CHAT_DB_NAME` named a path on none of them while `DB_NAME` kept its working-directory default — the same loss, less visibly.
+>
+> Nothing moves: input, output and chroma_store keep their paths, and only the state that was never persisted is new. Three things turned up alongside: `.gitignore` covered `fritz.db*` but not `./data`, `./workspaces` (somebody else's files) or `audit.log` (which names the people `/forget` was run for); and `.chat_cookie_secret` cannot sensibly be mounted, so the docs now say to set `CHAT_COOKIE_SECRET` for any container rather than have every chat session signed out on restart.
+>
+> The tests read the manifests against what the code resolves, in a subprocess, because `conftest.py` sandboxes every one of these paths and an inherited environment would have made them pass whatever the manifest said. Verified against `docker compose config` too; no container was started, since that would connect to Discord as the live bot.
 
 ### A6. Two overlapping turns silently lose an exchange
 
@@ -223,7 +229,7 @@ Recorded so they are not re-proposed. Each was killed because the mechanism was 
 
 | Batch | Items | State |
 |---|---|---|
-| A | 7 (A4 split in two) | **A1, A2, A3, A4a, A4b, A6 closed** (`15ef73f`, `f165683`, `79421a4`, `e169057`, `00e58d0`, `09cc25f`). A5 open |
+| A | 7 (A4 split in two) | **CLOSED** — `15ef73f` (A1), `f165683` (A2), `79421a4` (A3), `e169057` + `00e58d0` (A4a/b), `21eafcf` (A5), `09cc25f` (A6) |
 | B | 4 | not started |
 | C | 3 (+ queued symlink chip) | not started |
 | D | 3 | not started |
