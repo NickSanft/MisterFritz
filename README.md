@@ -216,6 +216,24 @@ docker compose up -d
 
 > On Linux, set `OLLAMA_HOST=http://172.17.0.1:11434` in `.env` (Docker bridge IP) or add `--add-host=host.docker.internal:host-gateway` to your compose config.
 
+#### What is on disk, and what to back up
+
+Everything the bot writes is bind-mounted, so `docker compose down` and image updates do not take it with them:
+
+| Host path | Holds |
+|---|---|
+| `./data/fritz.db` | Conversation history (LangGraph checkpoints), schedules, relay messages **and the block list**, identity aliases |
+| `./data/workspaces/` | Per-user sandboxes from `/workspace enable` |
+| `./data/audit.log` | `/forget` and `/export` events, kept so a deletion is reconstructable after the data is gone |
+| `./chroma_store/` | Semantic memories and the document index |
+| `./input/`, `./output/` | The watched folder, and generated images and audio |
+
+`./data` is the one to back up: it is the only place a lost file cannot be rebuilt from something else. The block list is the sharpest example — [DECISIONS.md](plans/DECISIONS.md) #22 deliberately keeps a block out of `/forget all` so that a privacy command can never be a safety regression, and before these mounts existed a container restart undid someone's block with no command run and no audit line.
+
+Also set `CHAT_COOKIE_SECRET` in `.env` for any containerised run. Left unset, the web chat generates a signing key into `.chat_cookie_secret` in the working directory, which in a container is thrown away on restart — so every chat session is silently signed out. `openssl rand -hex 32` is a fine value.
+
+> **Upgrading an existing compose deployment?** Nothing to move. `./chroma_store`, `./input` and `./output` keep the paths they always had. Earlier versions mounted `./chat_history.db`, which nothing in the codebase ever opened — Docker will have created an empty **directory** of that name on your host, and you can delete it. The database itself was never on the host at all, so the first `docker compose up` after this change starts a fresh `./data/fritz.db`; a conversation history from before it is not recoverable, because it was being destroyed on every `down`.
+
 ---
 
 ## Configuration Reference

@@ -7,6 +7,14 @@ chroma_store/*
 *.wav
 .cache.sqlite
 fritz.db*
+# Everything the containerised bot writes lands here (docker-compose binds it),
+# and `fritz.db*` alone would not cover the workspaces or the audit log.
+data/
+# Per-user sandboxes from /workspace enable: somebody else's files, and not
+# this repository's to carry.
+workspaces/
+# /forget and /export events, which name the people they were run for.
+audit.log*
 
 # Test debris — tests/conftest.py sandboxes these into a temp dir, but keep
 # them ignored in case the suite is ever run with the sandbox disabled.

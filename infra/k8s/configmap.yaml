@@ -13,7 +13,16 @@ data:
   DOC_STORAGE_DESCRIPTION: "anything you don't know about."
   DOC_FOLDER: "/app/input"
   CHROMA_DB_PATH: "/app/chroma_store"
-  CHAT_DB_NAME: "/app/chat_history.db"
+  # One database, on the volume. This used to name CHAT_DB_NAME
+  # "/app/chat_history.db", which is not on any mount and not a path this
+  # codebase opens, while DB_NAME kept its "fritz.db" default in the working
+  # directory - so the checkpoints, schedules, relay rows and blocks, and
+  # identity aliases all lived on the pod's ephemeral layer and went with it on
+  # every restart and every rollout. DB_NAME alone covers CHAT_DB_NAME and
+  # SCHEDULE_DB, which default to it.
+  DB_NAME: "/app/data/fritz.db"
+  WORKSPACES_ROOT: "/app/data/workspaces"
+  AUDIT_LOG_PATH: "/app/data/audit.log"
   METRICS_PORT: "8000"
   LOG_FORMAT: "json"
   LOG_LEVEL: "INFO"

@@ -21,11 +21,34 @@ services:
       # On Linux add --add-host=host.docker.internal:host-gateway to docker run,
       # or set OLLAMA_HOST=http://172.17.0.1:11434 in your .env file.
       - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      # Everything the bot WRITES goes under /app/data, which is the one bind
+      # mount below. Without these three the files landed on the container's
+      # writable layer and `docker compose down`, a rebuild or any image update
+      # destroyed them: the whole conversation history, every schedule, the
+      # relay's messages AND its block list, and the identity aliases that keep
+      # Fritz from greeting you as "discord-123456789".
+      #
+      # The relay blocks are the reason this is not merely annoying.
+      # DECISIONS.md #22 deliberately keeps a block out of `/forget all`, so
+      # that a privacy command can never become a safety regression - and a
+      # container restart was doing exactly what that decision forbade, with no
+      # command run and no audit line.
+      #
+      # DB_NAME alone covers CHAT_DB_NAME and SCHEDULE_DB, which default to it.
+      - DB_NAME=/app/data/fritz.db
+      - WORKSPACES_ROOT=/app/data/workspaces
+      - AUDIT_LOG_PATH=/app/data/audit.log
     volumes:
+      # input, output and chroma_store keep the paths they have always had, so
+      # an existing deployment does not have to move anything. Only the state
+      # that was never persisted is new, and it is a DIRECTORY bind: naming a
+      # file that does not exist on the host makes Docker create a directory
+      # there instead, which is how ./chat_history.db - a path nothing in this
+      # codebase ever opens - became a directory on every first `up`.
+      - ./data:/app/data
       - ./input:/app/input
       - ./output:/app/output
       - ./chroma_store:/app/chroma_store
-      - ./chat_history.db:/app/chat_history.db
     restart: unless-stopped
     depends_on:
       - prometheus

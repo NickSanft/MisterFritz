@@ -40,6 +40,10 @@ input/
 output/
 temp_images/
 temp_audio/
+data/
+workspaces/
+audit.log*
+.chat_cookie_secret
 chat_history.db
 *.db
 *.wav

@@ -56,6 +56,12 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
           volumeMounts:
+            # Everything the bot writes that is not a document: the database,
+            # the per-user workspaces and the audit log. See the configmap for
+            # why this is not optional.
+            - name: data
+              mountPath: /app/data
+              subPath: data
             - name: data
               mountPath: /app/input
               subPath: input
