@@ -479,6 +479,13 @@ async def on_message(ctx):
 
     user_image_paths = []
     temp_audio_paths = []          # tracked so they can be cleaned up
+    # Three separate facts about the audio attachments, because one value
+    # cannot carry them: whether there were any, the best transcript obtained,
+    # and whether any clip failed outright. transcribe returns "" for a clip
+    # with no speech and None only for a failure.
+    had_audio = False
+    voice_text = ""
+    voice_failed = False
     source = MessageSource.DISCORD_TEXT
     if ctx.attachments:
         logger.info("Processing %d attachment(s) for %s", len(ctx.attachments), request_id)
@@ -504,13 +511,39 @@ async def on_message(ctx):
                     await attachment.save(file_path)
                     temp_audio_paths.append(file_path)
                     logger.info("Saved audio %s for %s", file_path, request_id)
-                    voice_text = await speech_to_text(file_path)
-                    if not message_clean:
+                    had_audio = True
+                    heard = await speech_to_text(file_path)
+                    if heard is None:
+                        voice_failed = True
+                    elif heard:
+                        # Keep the first clip that actually said something, so
+                        # one unreadable attachment cannot mask a good one.
+                        voice_text = voice_text or heard
+                    if voice_text and not message_clean:
                         message_clean = voice_text
-                    logger.info("Voice text: %s", voice_text)
+                    logger.info("Voice text: %r", heard)
                 except Exception as e:
                     METRICS.record_error("attachment_audio", e)
                     logger.warning("Error handling audio attachment: %s", e)
+
+    # A voice note that IS the message, and could not be read, is the only
+    # thing there is to answer. message_clean was left as None or "" here and
+    # went to the agent as the prompt, so Fritz replied to nothing at all with
+    # no hint that he had not heard anything.
+    #
+    # A clip that arrives alongside text is different: there is still a message
+    # to answer, and interrupting it to report the attachment would be worse
+    # than answering what was legible. That case keeps its log line.
+    if had_audio and not message_clean:
+        await ctx.channel.send(
+            "I could not make out a word of that, sir. Do send it again, or "
+            "put it in writing."
+            if voice_failed else
+            "There is no speech in that recording, sir. Silence has its place, "
+            "but I cannot answer it."
+        )
+        _cleanup_temp_files(user_image_paths + temp_audio_paths, request_id)
+        return
 
     if user_image_paths:
         status_msg = await ctx.channel.send(f"✍️ *Analyzing {len(user_image_paths)} image(s)...*")

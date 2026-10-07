@@ -100,7 +100,12 @@ def transcribe(audio_file_path: str) -> str | None:
             "Whisper transcription (lang=%s, prob=%.2f): %r",
             info.language, info.language_probability, text,
         )
-        return text or None
+        # "" for a clip Whisper heard nothing in — silence, a half second
+        # of fumbling, a recording of a quiet room — and None only when the
+        # transcription itself failed. Both used to come back as None, so the
+        # caller could not tell "you said nothing" from "I could not hear
+        # you", and ended up saying neither.
+        return text
 
     except Exception as exc:
         METRICS.record_error("whisper_stt", exc)

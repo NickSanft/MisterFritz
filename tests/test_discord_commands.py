@@ -706,3 +706,107 @@ class TestADeletedPlaceholderDoesNotWedgeTheTurn(unittest.IsolatedAsyncioTestCas
         await asyncio.wait_for(handler.final_update("short answer"), timeout=5)
         message.edit.assert_awaited_with(content="short answer")
         message.channel.send.assert_not_awaited()
+
+
+class TestAVoiceNoteThatCouldNotBeReadSaysSo(unittest.IsolatedAsyncioTestCase):
+    """stt.transcribe returned None both for a failure and for a clip with no
+    speech in it, and on_message did `if not message_clean: message_clean =
+    voice_text`. For a voice-note-only message that made the prompt None,
+    which went to the agent as the thing to answer — so Fritz replied to
+    nothing, with no hint that he had not heard anything.
+    """
+
+    def _message(self, content="", audio=True):
+        ctx = MagicMock()
+        ctx.clean_content = content
+        # A real string: on_message slices ctx.content to look for the
+        # command prefix, and a MagicMock slices into another MagicMock,
+        # which then looks like a registered command.
+        ctx.content = content
+        ctx.author = MagicMock()
+        ctx.author.id = 4242
+        ctx.author.bot = False
+        ctx.author.display_name = "Nick"
+        ctx.channel = MagicMock()
+        ctx.channel.id = 99
+        ctx.channel.send = AsyncMock()
+        ctx.channel.typing = MagicMock()
+        ctx.guild = None
+        attachment = MagicMock()
+        attachment.content_type = "audio/ogg"
+        attachment.filename = "voice.ogg"
+        attachment.id = 7
+        attachment.save = AsyncMock()
+        ctx.attachments = [attachment] if audio else []
+        return ctx
+
+    @staticmethod
+    def _client():
+        """on_message needs a bot user: a guild message is only for Fritz
+        if client.user is mentioned in it, and client.user is None outside a
+        live gateway connection."""
+        client = MagicMock()
+        client.user = MagicMock()
+        client.user.mentioned_in = MagicMock(return_value=True)
+        client.get_command = MagicMock(return_value=None)
+        return client
+
+    async def _on_message(self, ctx, heard):
+        """Drive on_message far enough to see what it says about the clip."""
+        with patch.object(main_discord, "client", self._client()), \
+                patch.object(main_discord, "speech_to_text", AsyncMock(return_value=heard)), \
+                patch.object(main_discord, "ask_stuff", MagicMock(
+                    return_value={"text": "an answer", "image_paths": []})) as asked, \
+                patch.object(main_discord, "_cleanup_temp_files", MagicMock()), \
+                patch.object(main_discord.os, "makedirs", MagicMock()), \
+                patch.object(main_discord.workspace_store, "get", MagicMock(return_value=None)), \
+                patch.object(main_discord.identity_store, "record", MagicMock()):
+            await main_discord.on_message(ctx)
+        return asked
+
+    async def test_a_failed_transcription_is_reported(self):
+        ctx = self._message()
+        asked = await self._on_message(ctx, heard=None)
+        said = ctx.channel.send.await_args_list[0].args[0]
+        self.assertIn("could not make out", said)
+        asked.assert_not_called()
+
+    async def test_a_silent_clip_is_reported_differently(self):
+        """The distinction the None-for-both conflation made impossible."""
+        ctx = self._message()
+        asked = await self._on_message(ctx, heard="")
+        said = ctx.channel.send.await_args_list[0].args[0]
+        self.assertIn("no speech", said)
+        asked.assert_not_called()
+
+    async def test_nothing_unreadable_reaches_the_agent(self):
+        for heard in (None, ""):
+            with self.subTest(heard=heard):
+                ctx = self._message()
+                asked = await self._on_message(ctx, heard=heard)
+                asked.assert_not_called()
+
+    async def test_the_temporary_audio_is_still_cleaned_up(self):
+        """The early return happens before the two existing cleanup calls."""
+        ctx = self._message()
+        with patch.object(main_discord, "client", self._client()), \
+                patch.object(main_discord, "speech_to_text", AsyncMock(return_value=None)), \
+                patch.object(main_discord, "_cleanup_temp_files", MagicMock()) as cleanup, \
+                patch.object(main_discord.os, "makedirs", MagicMock()), \
+                patch.object(main_discord.identity_store, "record", MagicMock()):
+            await main_discord.on_message(ctx)
+        cleanup.assert_called_once()
+
+    async def test_a_clip_that_was_heard_becomes_the_prompt(self):
+        ctx = self._message()
+        asked = await self._on_message(ctx, heard="what is the time")
+        asked.assert_called_once()
+        self.assertEqual(asked.call_args.args[0], "what is the time")
+
+    async def test_an_unreadable_clip_alongside_text_still_answers_the_text(self):
+        """There is still a message to answer, and interrupting it to report
+        the attachment would be worse than answering what was legible."""
+        ctx = self._message(content="and what about this")
+        asked = await self._on_message(ctx, heard=None)
+        asked.assert_called_once()
+        self.assertEqual(asked.call_args.args[0], "and what about this")

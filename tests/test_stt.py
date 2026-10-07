@@ -153,8 +153,13 @@ class TestTranscribe(unittest.TestCase):
 
         self.assertIsNone(result)
 
-    def test_returns_none_on_empty_transcription(self):
-        """Empty transcription result → returns None."""
+    def test_returns_empty_string_when_the_clip_held_no_speech(self):
+        """A clip with no speech in it → "", not None.
+
+        Both used to be None, so the caller could not tell "you said nothing"
+        from "I could not hear you" and said neither. main_discord now answers
+        each differently, which is only possible because of this.
+        """
         stub, _, _ = _make_faster_whisper_stub("")
         audio = _make_audio_mock()
 
@@ -164,10 +169,10 @@ class TestTranscribe(unittest.TestCase):
             import stt
             result = stt.transcribe("audio.ogg")
 
-        self.assertIsNone(result)
+        self.assertEqual(result, "")
 
-    def test_returns_none_on_whitespace_only_transcription(self):
-        """Whitespace-only transcription → returns None."""
+    def test_whitespace_only_is_no_speech_either(self):
+        """Whitespace-only transcription → "", for the same reason."""
         stub, _, _ = _make_faster_whisper_stub("   ")
         audio = _make_audio_mock()
 
@@ -177,7 +182,7 @@ class TestTranscribe(unittest.TestCase):
             import stt
             result = stt.transcribe("audio.ogg")
 
-        self.assertIsNone(result)
+        self.assertEqual(result, "")
 
     def test_returns_none_on_audio_load_failure(self):
         """AudioSegment.from_file() raising → returns None, does not propagate."""
