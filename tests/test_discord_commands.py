@@ -9,6 +9,8 @@ import asyncio
 import pathlib
 import time
 import unittest
+
+import discord
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # tts (prevents a TTS model download), image_generator and document_engine are
@@ -596,3 +598,111 @@ class TestTheAdminPanelBindsItsPortOnce(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestADeletedPlaceholderDoesNotWedgeTheTurn(unittest.IsolatedAsyncioTestCase):
+    """_perform_update retried a failing edit with no limit, and never cleared
+    pending_text, so the composed output still differed from what was on screen
+    and the loop re-rendered it every two seconds. discord.NotFound and
+    discord.Forbidden are both HTTPException subclasses, so a permanently-gone
+    message was retried for the life of the process - and final_update waits on
+    is_updating, which meant the turn never completed either: no reply, and a
+    task looping forever.
+
+    Every test here is wrapped in a timeout, because the failure mode under
+    test is "this never returns".
+    """
+
+    def _handler(self, edit_raises=None):
+        message = MagicMock()
+        message.edit = AsyncMock(side_effect=edit_raises)
+        message.channel = MagicMock()
+        message.channel.send = AsyncMock()
+        handler = StreamingMessageHandler(message, asyncio.get_event_loop(),
+                                          min_update_interval=0.0)
+        return handler, message
+
+    @staticmethod
+    def _instant_sleep():
+        """Drop the two-second backoff but keep yielding to the loop.
+
+        A bare AsyncMock never yields, so an unbounded-retry bug would spin
+        without letting asyncio.wait_for's timeout fire: the test would HANG
+        rather than fail, which is the one thing a test for "this never
+        returns" must not do. (It did, under mutation.)
+        """
+        real_sleep = asyncio.sleep
+        return patch("asyncio.sleep", lambda *_a, **_k: real_sleep(0))
+
+    @staticmethod
+    def _http(status: int, cls):
+        """A real discord exception: the point is the class hierarchy."""
+        response = MagicMock()
+        response.status = status
+        return cls(response, {"code": 0, "message": "gone"})
+
+    async def test_a_deleted_message_stops_the_loop(self):
+        handler, message = self._handler(
+            edit_raises=self._http(404, discord.NotFound))
+        await asyncio.wait_for(handler.update_text("hello"), timeout=5)
+        self.assertFalse(handler.is_updating)
+        self.assertTrue(handler.gave_up)
+        self.assertEqual(message.edit.await_count, 1,
+                         "a permanent failure was retried")
+
+    async def test_a_forbidden_channel_stops_the_loop(self):
+        handler, message = self._handler(
+            edit_raises=self._http(403, discord.Forbidden))
+        await asyncio.wait_for(handler.update_text("hello"), timeout=5)
+        self.assertTrue(handler.gave_up)
+        self.assertEqual(message.edit.await_count, 1)
+
+    async def test_the_rest_of_the_stream_stops_attempting(self):
+        """Without this every remaining token mounts another doomed edit."""
+        handler, message = self._handler(
+            edit_raises=self._http(404, discord.NotFound))
+        await asyncio.wait_for(handler.update_text("one"), timeout=5)
+        for token in ("two", "three", "four"):
+            await asyncio.wait_for(handler.update_text(token), timeout=5)
+        self.assertEqual(message.edit.await_count, 1)
+
+    async def test_a_transient_failure_is_retried_but_bounded(self):
+        handler, message = self._handler(
+            edit_raises=self._http(500, discord.errors.HTTPException))
+        with self._instant_sleep():
+            await asyncio.wait_for(handler.update_text("hello"), timeout=5)
+        self.assertEqual(message.edit.await_count, handler.MAX_EDIT_ATTEMPTS)
+        self.assertFalse(handler.is_updating)
+        # Not terminal: a 500 is not evidence the message is gone, so the
+        # handler does not latch.
+        self.assertFalse(handler.gave_up)
+
+    async def test_final_update_is_not_blocked_by_a_dead_placeholder(self):
+        """The wedge that mattered most: final_update spins on is_updating, so
+        a stuck _perform_update meant the reply was never delivered at all."""
+        handler, message = self._handler(
+            edit_raises=self._http(404, discord.NotFound))
+        await asyncio.wait_for(handler.update_text("partial"), timeout=5)
+        await asyncio.wait_for(handler.final_update("the whole answer"), timeout=5)
+        message.channel.send.assert_awaited()
+        self.assertIn("the whole answer",
+                      message.channel.send.await_args.args[0])
+
+    async def test_the_reply_goes_to_the_channel_when_the_placeholder_is_gone(self):
+        handler, message = self._handler(
+            edit_raises=self._http(404, discord.NotFound))
+        await asyncio.wait_for(handler.final_update("the whole answer"), timeout=5)
+        message.channel.send.assert_awaited_once_with("the whole answer")
+
+    async def test_a_long_reply_still_sends_every_chunk_without_a_placeholder(self):
+        handler, message = self._handler(
+            edit_raises=self._http(404, discord.NotFound))
+        await asyncio.wait_for(handler.final_update("y" * 2500), timeout=5)
+        sent = "".join(call.args[0] for call in message.channel.send.await_args_list)
+        self.assertEqual(sent, "y" * 2500)
+
+    async def test_a_working_placeholder_is_still_edited_not_re_sent(self):
+        handler, message = self._handler()
+        await asyncio.wait_for(handler.final_update("short answer"), timeout=5)
+        message.edit.assert_awaited_with(content="short answer")
+        message.channel.send.assert_not_awaited()

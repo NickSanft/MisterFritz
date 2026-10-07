@@ -60,6 +60,9 @@ class StreamingMessageHandler:
         # Tool/plan progress, rendered inside this same placeholder message
         # rather than as separate permanent sends.
         self.status_text: str | None = None
+        # Set once the placeholder is beyond saving, so a long stream stops
+        # re-attempting an edit that cannot work. See _perform_update.
+        self.gave_up = False
 
     def _compose(self, body: str) -> str:
         """Render the status line plus the streamed body, tail-windowed to fit.
@@ -82,13 +85,32 @@ class StreamingMessageHandler:
 
     async def update_text(self, new_text: str):
         """Update the message with new text, respecting rate limits."""
+        if self.gave_up:
+            # The placeholder is gone or unreachable. Without this, every
+            # token in the rest of the stream would mount another attempt.
+            return
         self.pending_text = new_text
         if not self.is_updating:
             self.is_updating = True
             await self._perform_update()
 
+    # How many times a failing edit is retried before live updating stops.
+    # There was no bound: a 404 was retried every two seconds for the life of
+    # the process. The reply is not lost by stopping — final_update delivers
+    # the whole thing, and it was this loop that kept it from running.
+    MAX_EDIT_ATTEMPTS = 3
+
+    # The counter is per call, and that is enough: a clean edit clears
+    # pending_text, so the next pass finds nothing changed and the loop
+    # ends. One _perform_update therefore lands at most one successful
+    # edit, and a blip cannot accumulate across the stream — each token's
+    # update_text starts a fresh call with a fresh count. (A reset on
+    # success was written here first and then removed: nothing could
+    # reach it.)
+
     async def _perform_update(self):
         """Perform the actual message edit with rate limiting."""
+        attempts = 0
         while self.is_updating:
             # Compare the COMPOSED output, not just the body: a new status line
             # over unchanged text is still a change the user needs to see, and
@@ -113,8 +135,31 @@ class StreamingMessageHandler:
                     self.current_rendered = rendered
                     self.last_update_time = time.time()
                     self.pending_text = None
+                except (discord.NotFound, discord.Forbidden) as e:
+                    # Both are HTTPException subclasses, so the handler below
+                    # used to retry them — forever. The message has been
+                    # deleted, or this channel is no longer writable: no number
+                    # of attempts changes either, and pending_text was never
+                    # cleared, so the loop re-rendered the same edit every two
+                    # seconds for the life of the process. final_update waits
+                    # on is_updating, so the turn never completed at all.
+                    logger.warning("Placeholder is beyond editing (%s): %s",
+                                   type(e).__name__, e)
+                    self.gave_up = True
+                    self.is_updating = False
+                    return
                 except discord.errors.HTTPException as e:
-                    logger.warning("Error editing message: %s", e)
+                    attempts += 1
+                    logger.warning("Error editing message (attempt %d of %d): %s",
+                                   attempts, self.MAX_EDIT_ATTEMPTS, e)
+                    if attempts >= self.MAX_EDIT_ATTEMPTS:
+                        # Still transient as far as we can tell, but the stream
+                        # has to end: the reply itself is delivered by
+                        # final_update, which this was blocking.
+                        logger.warning("Giving up on live updates after %d attempts",
+                                       attempts)
+                        self.is_updating = False
+                        return
                     await asyncio.sleep(2)
             else:
                 self.is_updating = False
@@ -131,7 +176,17 @@ class StreamingMessageHandler:
         self.status_text = None
         chunks = split_into_chunks(final_text) or [final_text]
         try:
-            await self.message.edit(content=chunks[0])
+            try:
+                await self.message.edit(content=chunks[0])
+            except (discord.NotFound, discord.Forbidden) as e:
+                # The placeholder is gone — usually because somebody deleted
+                # it mid-reply. The answer still exists and the channel is
+                # usually still writable, so send it rather than dropping the
+                # reply along with the message that was announcing it.
+                logger.warning("Placeholder unusable (%s); sending the reply "
+                               "to the channel instead", type(e).__name__)
+                self.gave_up = True
+                await self.message.channel.send(chunks[0])
             for chunk in chunks[1:]:
                 await self.message.channel.send(chunk)
             if files:
