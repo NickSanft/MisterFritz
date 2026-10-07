@@ -229,10 +229,34 @@ class _ForgetConfirmView(discord.ui.View):
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # The longest of these by far: Chroma deletes, the checkpoint rows, the
+        # workspace drop, the alias drop and the relay purge. It outlasting the
+        # three-second deadline is the ordinary case, not the unlucky one, and
+        # editing an expired token raises — which left the data deleted, the
+        # buttons on screen and nothing said.
+        await interaction.response.defer()
+        # stop() before the work, deliberately, and unlike the relay's
+        # unblock-all view below. The 30-second timeout would otherwise fire
+        # mid-deletion and edit this message to say "Nothing was deleted",
+        # which is the one piece of copy here that must never be wrong.
         self.stop()
-        result = await run_blocking(privacy.forget_all, self.requester, self.schedule_manager)
-        audit_log("forget", user_id=self.requester, scope="all", result=result)
-        await interaction.response.edit_message(content=_forget_all_report(result), view=None)
+        try:
+            result = await run_blocking(
+                privacy.forget_all, self.requester, self.schedule_manager)
+        except Exception as e:
+            logger.error("/forget all failed for %s: %s", self.requester, e)
+            text = ("I could not complete that just now, and I will not guess at "
+                    "what went and what stayed. Do try again, and if it fails "
+                    "once more the log will say why.")
+        else:
+            audit_log("forget", user_id=self.requester, scope="all", result=result)
+            text = _forget_all_report(result)
+        try:
+            await interaction.edit_original_response(content=text, view=None)
+        except Exception as e:
+            # The buttons are already dead (stop()), so the worst case is a
+            # stale message rather than a control that looks live.
+            logger.info("could not report /forget all outcome: %s", type(e).__name__)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -671,9 +695,17 @@ class FritzCommands(commands.Cog):
     async def forget_memories_slash(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.forget.memories")
         user_id = _identity(interaction)
+        # Acknowledged BEFORE the store work, like /voice, /gen and /lore.
+        # These deletes go through the shared blocking pool, which a long model
+        # turn can fill, so the work can outlast Discord's three-second
+        # deadline — and once the token has expired the reply fails, telling
+        # someone their deletion did not happen when it already has. The error
+        # path copes either way: _reply_error answers via followup once the
+        # interaction is done.
+        await interaction.response.defer(ephemeral=True, thinking=True)
         count = await run_blocking(privacy.forget_memories, user_id)
         audit_log("forget", user_id=user_id, scope="memories", removed=count)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ Removed {count} memory entry(ies).", ephemeral=True,
         )
 
@@ -681,9 +713,10 @@ class FritzCommands(commands.Cog):
     async def forget_conversation_slash(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.forget.conversation")
         user_id = _identity(interaction)
+        await interaction.response.defer(ephemeral=True, thinking=True)
         count = await run_blocking(privacy.forget_conversation, user_id)
         audit_log("forget", user_id=user_id, scope="conversation", removed=count)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ Cleared {count} checkpoint row(s). Your next message starts a fresh thread.",
             ephemeral=True,
         )
@@ -692,9 +725,10 @@ class FritzCommands(commands.Cog):
     async def forget_schedules_slash(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.forget.schedules")
         user_id = _identity(interaction)
+        await interaction.response.defer(ephemeral=True, thinking=True)
         count = await run_blocking(privacy.forget_schedules, user_id, self.schedule_manager)
         audit_log("forget", user_id=user_id, scope="schedules", removed=count)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ Cancelled {count} schedule(s).", ephemeral=True,
         )
 

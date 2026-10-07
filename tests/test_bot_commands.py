@@ -836,3 +836,132 @@ class TestMetricsMeasureTheRightThing(unittest.IsolatedAsyncioTestCase):
         # The wait was ~0.15s; the render is a no-op lambda.
         self.assertGreater(queue, 0.05, "queue time was not measured")
         self.assertLess(work, 0.05, "work latency still includes the queue wait")
+
+
+class TestTheDestructiveCommandsAreAcknowledgedFirst(unittest.IsolatedAsyncioTestCase):
+    """Each of these did its store work BEFORE making any response, so it could
+    pass Discord's three-second deadline with the data already gone - and an
+    expired token makes the reply fail, telling someone their deletion did not
+    happen when it had. /voice, /gen and /lore already deferred.
+    """
+
+    SLASH = (
+        ("forget_memories_slash", "forget_memories", ("user_id",)),
+        ("forget_conversation_slash", "forget_conversation", ("user_id",)),
+        ("forget_schedules_slash", "forget_schedules", ("user_id", "manager")),
+    )
+
+    async def _run(self, command: str, target: str, returns=3):
+        cog = _make_cog()
+        interaction = _fake_interaction("someone")
+        with unittest.mock.patch.object(bot_commands.privacy, target,
+                                        MagicMock(return_value=returns)) as store:
+            with unittest.mock.patch.object(bot_commands, "audit_log"):
+                await getattr(cog, command).callback(cog, interaction)
+        return interaction, store
+
+    async def test_the_interaction_is_deferred_before_the_store_is_touched(self):
+        for command, target, _args in self.SLASH:
+            with self.subTest(command=command):
+                interaction, store = await self._run(command, target)
+                interaction.response.defer.assert_awaited_once()
+                self.assertTrue(store.called, "the store was never called")
+
+    async def test_the_outcome_is_reported_through_followup(self):
+        """A deferred interaction can only be answered with a followup;
+        response.send_message raises InteractionResponded against it."""
+        for command, target, _args in self.SLASH:
+            with self.subTest(command=command):
+                interaction, _store = await self._run(command, target)
+                interaction.followup.send.assert_awaited_once()
+                interaction.response.send_message.assert_not_awaited()
+                said = interaction.followup.send.await_args.args[0]
+                self.assertIn("3", said)
+
+    async def test_the_reply_stays_ephemeral(self):
+        """It names what Fritz has stored about the person. The old call said
+        so explicitly and a followup does not default to it."""
+        for command, target, _args in self.SLASH:
+            with self.subTest(command=command):
+                interaction, _store = await self._run(command, target)
+                self.assertIs(interaction.response.defer.await_args.kwargs["ephemeral"], True)
+                self.assertIs(interaction.followup.send.await_args.kwargs["ephemeral"], True)
+
+
+class TestForgetAllAnswersThePressItWasGiven(unittest.IsolatedAsyncioTestCase):
+    """The longest of them: Chroma deletes, checkpoint rows, the workspace
+    drop, the alias drop and the relay purge."""
+
+    RESULT = {"memories": 3, "conversation_rows": 1, "schedules": 2,
+              "workspace_dropped": True, "alias_dropped": True, "relays": 0,
+              "relay_bodies_scrubbed": 0}
+
+    def _view(self):
+        view = bot_commands._ForgetConfirmView(FAKE_IDENTITY, MagicMock())
+        interaction = _fake_interaction("someone")
+        interaction.edit_original_response = AsyncMock()
+        return view, interaction
+
+    async def _press(self, result=None, raises=None):
+        view, interaction = self._view()
+        store = MagicMock(side_effect=raises) if raises else MagicMock(
+            return_value=result or self.RESULT)
+        with unittest.mock.patch.object(bot_commands.privacy, "forget_all", store):
+            with unittest.mock.patch.object(bot_commands, "audit_log") as audit:
+                await view.confirm.callback(interaction)
+        return view, interaction, audit
+
+    async def test_the_press_is_acknowledged_before_the_deletion(self):
+        _view, interaction, _audit = await self._press()
+        interaction.response.defer.assert_awaited_once()
+
+    async def test_the_report_edits_the_original_message(self):
+        _view, interaction, _audit = await self._press()
+        interaction.edit_original_response.assert_awaited_once()
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        self.assertIsNone(kwargs["view"], "the buttons were left on screen")
+        self.assertIn("3", kwargs["content"])
+
+    async def test_the_timeout_cannot_fire_mid_deletion(self):
+        """on_timeout says "Nothing was deleted", which would be a lie while
+        forget_all is running. stop() therefore happens before the work, not
+        after - the opposite of the relay's unblock-all view, whose timeout
+        copy stays true."""
+        view, interaction = self._view()
+        stopped_before = {}
+
+        def slow_forget(*_args):
+            stopped_before["value"] = view.is_finished()
+            return self.RESULT
+
+        with unittest.mock.patch.object(bot_commands.privacy, "forget_all", slow_forget):
+            with unittest.mock.patch.object(bot_commands, "audit_log"):
+                await view.confirm.callback(interaction)
+        self.assertTrue(stopped_before.get("value"),
+                        "the 30-second timeout was still live during the deletion")
+
+    async def test_a_failure_says_so_and_withdraws_the_buttons(self):
+        _view, interaction, audit = await self._press(raises=RuntimeError("chroma is down"))
+        audit.assert_not_called()
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        self.assertIsNone(kwargs["view"])
+        self.assertIn("could not complete", kwargs["content"])
+
+    async def test_a_failure_does_not_claim_what_was_removed(self):
+        """Reporting partial counts after a failure would be a guess. The copy
+        says it will not guess, and this is what holds it to that."""
+        _view, interaction, _audit = await self._press(raises=RuntimeError("boom"))
+        said = interaction.edit_original_response.await_args.kwargs["content"]
+        for misleading in ("Removed", "Cleared", "Cancelled"):
+            self.assertNotIn(misleading, said)
+
+    async def test_an_unreportable_outcome_is_logged_not_raised(self):
+        """The press is already answered by the defer; a failed edit must not
+        turn into an unhandled exception in a button callback."""
+        view, interaction = self._view()
+        interaction.edit_original_response = AsyncMock(
+            side_effect=RuntimeError("token expired"))
+        with unittest.mock.patch.object(bot_commands.privacy, "forget_all",
+                                        MagicMock(return_value=self.RESULT)):
+            with unittest.mock.patch.object(bot_commands, "audit_log"):
+                await view.confirm.callback(interaction)   # must not raise

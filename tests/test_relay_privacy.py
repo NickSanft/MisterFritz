@@ -915,14 +915,22 @@ class TestForgetAllSaysWhatItDoes(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(view.is_finished(), "a lapse notice could follow a cancel")
 
     async def test_confirming_stops_the_view_and_reports(self):
+        # The press is deferred and the report edits the original message:
+        # forget_all routinely outlasts Discord's three-second deadline, after
+        # which response.edit_message raises on an expired token and the data
+        # is gone with nothing said. The view is still stopped BEFORE the work,
+        # which is what this test's first assertion is about — on_timeout says
+        # "Nothing was deleted", and it must not fire mid-deletion.
         view = bot_commands._ForgetConfirmView("discord-1", None, origin=MagicMock())
         press = MagicMock()
-        press.response.edit_message = AsyncMock()
+        press.response.defer = AsyncMock()
+        press.edit_original_response = AsyncMock()
         with patch.object(privacy, "forget_all", return_value=self.RESULT):
             await view.confirm.callback(press)
         self.assertTrue(view.is_finished(), "a lapse notice could follow a confirm")
-        self.assertEqual(press.response.edit_message.await_args.kwargs["content"],
+        self.assertEqual(press.edit_original_response.await_args.kwargs["content"],
                          bot_commands._forget_all_report(self.RESULT))
+        self.assertIsNone(press.edit_original_response.await_args.kwargs["view"])
 
 
 class TestForgetAllIsWiredToItsOrigin(RelayPrivacyTestCase):
