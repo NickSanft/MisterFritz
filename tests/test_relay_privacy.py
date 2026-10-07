@@ -225,10 +225,27 @@ class TestForgetRelay(RelayPrivacyTestCase):
         self.assertEqual(result["relays"], 1)
         self.assertEqual(privacy.export_relay(SENDER)["sent"], [])
 
-    async def test_a_store_failure_is_reported_as_nothing_removed(self):
+    async def test_a_store_failure_is_raised_not_reported_as_nothing_removed(self):
+        """The name this test used to have was the bug: "nothing removed" is
+        what an empty relay history looks like, so /forget all rendered a
+        refusal as a clean zero."""
         with patch.object(relay_store, "forget_relay",
                           side_effect=relay_store.RelayStoreError("locked")):
-            self.assertEqual(privacy.forget_relay(SENDER), 0)
+            with self.assertRaises(privacy.PrivacyOperationFailed) as caught:
+                privacy.forget_relay(SENDER)
+        self.assertEqual(caught.exception.operation, "forget_relay")
+
+    async def test_forget_all_names_the_store_that_refused(self):
+        """And the aggregate stays best-effort around it: the other stores still
+        run, and the zero it keeps beside the refusal is labelled."""
+        with patch.object(relay_store, "forget_relay",
+                          side_effect=relay_store.RelayStoreError("locked")):
+            result = privacy.forget_all(SENDER, None)
+        self.assertEqual(result["failed"], ["forget_relay"])
+        self.assertEqual(result["relays"], 0)
+        report = bot_commands._forget_all_report(result)
+        self.assertIn("relayed messages, sent and received: could NOT be removed", report)
+        self.assertNotIn("\u2705 Removed", report)
 
 
 class TestResolvedExactlyOnce(RelayPrivacyTestCase):
@@ -847,7 +864,10 @@ class TestForgetAllSaysWhatItDoes(unittest.IsolatedAsyncioTestCase):
     must say so, and name the one command that drops your blocks."""
 
     RESULT = {"memories": 101, "conversation_rows": 202, "schedules": 303,
-              "workspace_dropped": True, "alias_dropped": True, "relays": 404}
+              "workspace_dropped": True, "alias_dropped": True, "relays": 404,
+              # Named refusals rather than zeros. Empty here: every assertion
+              # in this class is about a complete run.
+              "failed": []}
 
     def test_every_key_is_rendered_against_its_own_label(self):
         """Distinct values, so two labels swapped cannot pass."""

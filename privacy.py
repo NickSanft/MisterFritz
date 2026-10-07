@@ -3,9 +3,15 @@
 Centralises every place per-user state lives so the slash-command handlers
 can stay thin and the future web admin panel can call the same operations.
 
-Each delete function is best-effort: a failure in one store still tries the
-others and returns whatever it managed. Counts are reported back so the user
-sees how much was actually removed.
+Every operation here RAISES PrivacyOperationFailed when a store refuses, and
+returns a count only when it actually ran. It used to catch and return 0, [] or
+False - which is exactly what "nothing stored" looks like, so a total failure
+rendered as a clean success: "Removed 0 memory entry(ies)." for someone whose
+memories were all still there.
+
+The aggregates (forget_all, export_user_data) stay best-effort: one store
+refusing does not abort the others, and they name what refused in `failed` so
+the caller can say so instead of reporting zeros.
 """
 from __future__ import annotations
 
@@ -16,6 +22,27 @@ from typing import Any, Optional
 from fritz_utils import CHAT_DB_NAME, resolve_identity, thread_id_for
 
 logger = logging.getLogger(__name__)
+
+
+class PrivacyOperationFailed(RuntimeError):
+    """A store refused to delete or export.
+
+    Raised rather than swallowed because the neutral values these functions
+    used to return — 0, [] and False — are indistinguishable from the ordinary
+    "there was nothing there", and /forget is the one place in the app where
+    that difference is the whole point.
+    """
+
+    def __init__(self, operation: str, cause: BaseException):
+        super().__init__(f"{operation} failed: {cause}")
+        self.operation = operation
+        self.cause = cause
+
+
+def _failed(operation: str, user_id: str, cause: BaseException) -> PrivacyOperationFailed:
+    """Log in the wording these failures have always had, and build the raise."""
+    logger.warning("%s failed for %s: %s", operation, user_id, cause)
+    return PrivacyOperationFailed(operation, cause)
 
 
 def _sanitise_thread_id(user_id: str) -> str:
@@ -55,8 +82,7 @@ def forget_memories(user_id: str) -> int:
     try:
         return get_default_chroma_store().delete_namespace((str(user_id),))
     except Exception as e:
-        logger.warning("forget_memories failed for %s: %s", user_id, e)
-        return 0
+        raise _failed("forget_memories", user_id, e) from e
 
 
 def export_memories(user_id: str) -> list[dict]:
@@ -77,8 +103,7 @@ def export_memories(user_id: str) -> list[dict]:
     try:
         return get_default_chroma_store().export_namespace((str(user_id),))
     except Exception as e:
-        logger.warning("export_memories failed for %s: %s", user_id, e)
-        return []
+        raise _failed("export_memories", user_id, e) from e
 
 
 # ── Conversation checkpoints (LangGraph SqliteSaver) ─────────────────────────
@@ -150,8 +175,7 @@ def forget_conversation(user_id: str, thread_id: str | None = None) -> int:
         logger.debug("forget_conversation: no checkpoint tables yet (%s)", e)
         return 0
     except Exception as e:
-        logger.warning("forget_conversation failed for %s: %s", user_id, e)
-        return 0
+        raise _failed("forget_conversation", user_id, e) from e
 
 
 def count_conversation_checkpoints(user_id: str) -> int:
@@ -177,8 +201,13 @@ def count_conversation_checkpoints(user_id: str) -> int:
                 (thread_id, _like_escape(thread_id) + "#%"),
             ).fetchone()
             return count
-    except Exception:
+    except sqlite3.OperationalError as e:
+        # No checkpoint tables yet on a fresh deployment, the same case
+        # forget_conversation treats as a legitimate zero.
+        logger.debug("count_conversation_checkpoints: no tables yet (%s)", e)
         return 0
+    except Exception as e:
+        raise _failed("count_conversation_checkpoints", user_id, e) from e
 
 
 # ── Schedules (APScheduler-backed) ───────────────────────────────────────────
@@ -196,8 +225,7 @@ def forget_schedules(user_id: str, schedule_manager: Any) -> int:
     try:
         return schedule_manager.remove_all_for_user(user_id)
     except Exception as e:
-        logger.warning("forget_schedules failed for %s: %s", user_id, e)
-        return 0
+        raise _failed("forget_schedules", user_id, e) from e
 
 
 def export_schedules(user_id: str, schedule_manager: Any) -> list[dict]:
@@ -213,8 +241,7 @@ def export_schedules(user_id: str, schedule_manager: Any) -> list[dict]:
     try:
         return schedule_manager.list_schedules(user_id)
     except Exception as e:
-        logger.warning("export_schedules failed for %s: %s", user_id, e)
-        return []
+        raise _failed("export_schedules", user_id, e) from e
 
 
 # ── Workspace registration ──────────────────────────────────────────────────
@@ -233,8 +260,7 @@ def forget_workspace(user_id: str) -> bool:
     try:
         return workspace_store.remove(user_id)
     except Exception as e:
-        logger.warning("forget_workspace failed for %s: %s", user_id, e)
-        return False
+        raise _failed("forget_workspace", user_id, e) from e
 
 
 def get_workspace_for_export(user_id: str) -> Optional[str]:
@@ -249,8 +275,8 @@ def get_workspace_for_export(user_id: str) -> Optional[str]:
     import workspace_store
     try:
         return workspace_store.get(user_id)
-    except Exception:
-        return None
+    except Exception as e:
+        raise _failed("get_workspace_for_export", user_id, e) from e
 
 
 # ── Aggregates ───────────────────────────────────────────────────────────────
@@ -275,8 +301,7 @@ def forget_relay(user_id: str) -> int:
     try:
         return relay_store.forget_relay(user_id)
     except Exception as e:
-        logger.warning("forget_relay failed for %s: %s", user_id, e)
-        return 0
+        raise _failed("forget_relay", user_id, e) from e
 
 
 def export_relay(user_id: str) -> dict:
@@ -289,29 +314,44 @@ def export_relay(user_id: str) -> dict:
     try:
         return relay_store.export_relay(user_id)
     except Exception as e:
-        logger.warning("export_relay failed for %s: %s", user_id, e)
+        raise _failed("export_relay", user_id, e) from e
         return empty
 
 
 def forget_all(user_id: str, schedule_manager: Any = None) -> dict:
-    """Run every forget_* op and report counts back. Best-effort — partial
-    failure in one store does not abort the others."""
+    """Run every forget_* op and report counts back.
+
+    Still best-effort — one store refusing does not abort the others — but a
+    refusal is now named in `failed` instead of being counted as zero. The
+    neutral value is kept beside it so the report stays renderable; what stops
+    that zero being read as "there was nothing there" is `failed`.
+    """
     # NOT resolved here. Every operation below resolves at its own entry
     # point, so resolving here as well was a second hop through
     # IDENTITY_LINKS: under chained links (A->B, B->C), /forget all from A
     # deleted C's memories, conversation, schedules and workspace.
-    return {
-        "memories": forget_memories(user_id),
-        "conversation_rows": forget_conversation(user_id),
-        "schedules": forget_schedules(user_id, schedule_manager),
-        "workspace_dropped": forget_workspace(user_id),
+    operations = (
+        ("memories", 0, lambda: forget_memories(user_id)),
+        ("conversation_rows", 0, lambda: forget_conversation(user_id)),
+        ("schedules", 0, lambda: forget_schedules(user_id, schedule_manager)),
+        ("workspace_dropped", False, lambda: forget_workspace(user_id)),
         # The display-name alias is personal data too — leaving it behind would
         # mean "forget me" still knows what you are called.
-        "alias_dropped": forget_alias(user_id),
+        ("alias_dropped", False, lambda: forget_alias(user_id)),
         # Messages this person sent or received through the relay. NOT their
         # relay blocks: see forget_relay.
-        "relays": forget_relay(user_id),
-    }
+        ("relays", 0, lambda: forget_relay(user_id)),
+    )
+    result: dict = {}
+    failed: list[str] = []
+    for key, neutral, operation in operations:
+        try:
+            result[key] = operation()
+        except PrivacyOperationFailed as e:
+            result[key] = neutral
+            failed.append(e.operation)
+    result["failed"] = failed
+    return result
 
 
 def forget_alias(user_id: str) -> bool:
@@ -328,24 +368,43 @@ def forget_alias(user_id: str) -> bool:
     try:
         return identity_store.forget(user_id)
     except Exception as e:
-        logger.warning("forget_alias failed for %s: %s", user_id, e)
-        return False
+        raise _failed("forget_alias", user_id, e) from e
 
 
 def export_user_data(user_id: str, schedule_manager: Any = None) -> dict:
-    """Return a JSON-serialisable snapshot of everything we have on this user."""
+    """Return a JSON-serialisable snapshot of everything we have on this user.
+
+    `failed` lists any section that could not be read. It is empty on a
+    complete export, and a caller that ignores it is telling somebody that a
+    section they hold is absent.
+    """
     # NOT resolved here. Every operation below resolves at its own entry
     # point, so resolving here as well was a second hop through
     # IDENTITY_LINKS: under chained links (A->B, B->C), /forget all from A
     # deleted C's memories, conversation, schedules and workspace.
     resolved = resolve_identity(user_id) if user_id else user_id
     import identity_store
-    return {
+    sections = (
+        ("memories", [], lambda: export_memories(user_id)),
+        ("schedules", [], lambda: export_schedules(user_id, schedule_manager)),
+        ("conversation_checkpoint_count", 0,
+         lambda: count_conversation_checkpoints(user_id)),
+        ("workspace_path", None, lambda: get_workspace_for_export(user_id)),
+        ("relays", {}, lambda: export_relay(user_id)),
+    )
+    data: dict = {
         "user_id": resolved,
         "display_name": identity_store.display_name(resolved, default=""),
-        "memories": export_memories(user_id),
-        "schedules": export_schedules(user_id, schedule_manager),
-        "conversation_checkpoint_count": count_conversation_checkpoints(user_id),
-        "workspace_path": get_workspace_for_export(user_id),
-        "relays": export_relay(user_id),
     }
+    failed: list[str] = []
+    for key, neutral, section in sections:
+        try:
+            data[key] = section()
+        except PrivacyOperationFailed as e:
+            # An export that quietly omits a section is worse than a partial
+            # one that says which section is missing: somebody checking what
+            # is held about them would conclude it is not held.
+            data[key] = neutral
+            failed.append(e.operation)
+    data["failed"] = failed
+    return data

@@ -65,10 +65,15 @@ class TestForgetMemories(unittest.TestCase):
         self.assertEqual(result, 0)
         ctor.assert_not_called()
 
-    def test_swallows_store_exceptions_returns_zero(self):
+    def test_a_store_failure_raises_rather_than_counting_zero(self):
+        """It used to return 0, which is what an empty store returns too — so
+        /forget memories answered "Removed 0 memory entry(ies)." to somebody
+        whose memories were all still there."""
         with patch("storage.ChromaStore", side_effect=RuntimeError("boom")):
-            result = self.privacy.forget_memories("alice")
-        self.assertEqual(result, 0)
+            with self.assertRaises(self.privacy.PrivacyOperationFailed) as caught:
+                self.privacy.forget_memories("alice")
+        self.assertEqual(caught.exception.operation, "forget_memories")
+        self.assertIn("boom", str(caught.exception))
 
 
 class TestForgetMemoriesPunctuatedId(unittest.TestCase):
@@ -371,6 +376,9 @@ class TestForgetAll(unittest.TestCase):
             "conversation_rows": 5,
             "schedules": 3,
             "workspace_dropped": True,
+            # Empty because every store answered. A refusal lands here by
+            # operation name instead of being counted as zero.
+            "failed": [],
             # The display name is personal data too — "forget me" that leaves
             # behind what you are called has not forgotten you.
             "alias_dropped": True,
@@ -475,6 +483,136 @@ class TestIdentityIsResolvedEverywhere(unittest.TestCase):
         with patch.dict(fritz_utils.IDENTITY_LINKS, self.LINKS, clear=False):
             self.privacy.forget_schedules("discord-99", manager)
         manager.remove_all_for_user.assert_called_once_with("discord-99")
+
+
+class PrivacyCase(unittest.TestCase):
+    """The reload-per-class pattern the rest of this file uses: privacy.py
+    reads CHAT_DB_NAME at import, and conftest sandboxes it."""
+
+    def setUp(self):
+        import privacy
+        importlib.reload(privacy)
+        self.privacy = privacy
+
+
+class TestNothingStoredIsNotTheSameAsTheStoreFailing(PrivacyCase):
+    """Every operation here used to catch Exception and return 0, [] or False.
+    Those are precisely the values an empty store returns, so a total failure
+    rendered as a clean success — "Removed 0 memory entry(ies)." to somebody
+    whose memories were all still there, and an /export that showed a section
+    as absent when it could not be read.
+
+    Each one raises now; the aggregates stay best-effort by naming what
+    refused.
+    """
+
+    OPERATIONS = (
+        ("forget_memories", "storage.ChromaStore"),
+        ("export_memories", "storage.ChromaStore"),
+        ("forget_workspace", "workspace_store.remove"),
+        ("get_workspace_for_export", "workspace_store.get"),
+        ("forget_alias", "identity_store.forget"),
+    )
+
+    def test_each_operation_raises_rather_than_returning_a_neutral_value(self):
+        for operation, collaborator in self.OPERATIONS:
+            with self.subTest(operation=operation):
+                with patch(collaborator, side_effect=RuntimeError("store is down")):
+                    with self.assertRaises(self.privacy.PrivacyOperationFailed) as caught:
+                        getattr(self.privacy, operation)("discord-1")
+                self.assertEqual(caught.exception.operation, operation)
+
+    def test_the_failure_carries_its_cause(self):
+        """So a log line or an audit entry can say why, not merely that
+        something went wrong."""
+        with patch("storage.ChromaStore", side_effect=RuntimeError("chroma is locked")):
+            with self.assertRaises(self.privacy.PrivacyOperationFailed) as caught:
+                self.privacy.forget_memories("discord-1")
+        self.assertIsInstance(caught.exception.cause, RuntimeError)
+        self.assertIn("chroma is locked", str(caught.exception))
+
+    def test_an_absent_checkpoint_table_is_still_a_legitimate_zero(self):
+        """The one case that must NOT become a failure: a fresh deployment has
+        no checkpoint tables, and "nothing stored" is the honest answer."""
+        with patch.object(self.privacy.sqlite3, "connect",
+                          side_effect=sqlite3.OperationalError("no such table: checkpoints")):
+            self.assertEqual(self.privacy.forget_conversation("discord-1"), 0)
+            self.assertEqual(self.privacy.count_conversation_checkpoints("discord-1"), 0)
+
+    def test_a_broken_checkpoint_database_is_not_a_zero(self):
+        with patch.object(self.privacy.sqlite3, "connect",
+                          side_effect=RuntimeError("disk I/O error")):
+            for operation in ("forget_conversation", "count_conversation_checkpoints"):
+                with self.subTest(operation=operation):
+                    with self.assertRaises(self.privacy.PrivacyOperationFailed):
+                        getattr(self.privacy, operation)("discord-1")
+
+    def test_an_empty_store_still_answers_zero(self):
+        """The other half of the contract: 0 must still mean 0, or this has
+        only moved the lie."""
+        store = MagicMock()
+        store.delete_namespace.return_value = 0
+        store.export_namespace.return_value = []
+        with patch("storage.get_default_chroma_store", return_value=store):
+            self.assertEqual(self.privacy.forget_memories("discord-1"), 0)
+            self.assertEqual(self.privacy.export_memories("discord-1"), [])
+
+
+class TestTheAggregatesStayBestEffort(PrivacyCase):
+    """One store refusing must not abort the others — somebody asking to be
+    forgotten should have everything removable removed — but what stayed has to
+    be named."""
+
+    def _raises(self, operation):
+        def raise_it(*_args, **_kwargs):
+            raise self.privacy.PrivacyOperationFailed(operation, RuntimeError("down"))
+        return raise_it
+
+    def test_forget_all_runs_every_store_and_names_the_refusal(self):
+        with patch.multiple(self.privacy,
+                            forget_memories=self._raises("forget_memories"),
+                            forget_conversation=MagicMock(return_value=7),
+                            forget_schedules=MagicMock(return_value=2),
+                            forget_workspace=MagicMock(return_value=True),
+                            forget_alias=MagicMock(return_value=True),
+                            forget_relay=MagicMock(return_value=1)):
+            result = self.privacy.forget_all("discord-1", MagicMock())
+        self.assertEqual(result["failed"], ["forget_memories"])
+        self.assertEqual(result["memories"], 0)           # neutral, but labelled
+        self.assertEqual(result["conversation_rows"], 7)  # the rest still ran
+        self.assertEqual(result["relays"], 1)
+
+    def test_every_refusal_is_named_not_only_the_first(self):
+        with patch.multiple(self.privacy,
+                            forget_memories=self._raises("forget_memories"),
+                            forget_conversation=MagicMock(return_value=0),
+                            forget_schedules=MagicMock(return_value=0),
+                            forget_workspace=MagicMock(return_value=False),
+                            forget_alias=self._raises("forget_alias"),
+                            forget_relay=MagicMock(return_value=0)):
+            result = self.privacy.forget_all("discord-1", None)
+        self.assertEqual(result["failed"], ["forget_memories", "forget_alias"])
+
+    def test_export_user_data_names_the_section_it_could_not_read(self):
+        with patch.multiple(self.privacy,
+                            export_memories=self._raises("export_memories"),
+                            export_schedules=MagicMock(return_value=[]),
+                            count_conversation_checkpoints=MagicMock(return_value=4),
+                            get_workspace_for_export=MagicMock(return_value=None),
+                            export_relay=MagicMock(return_value={})):
+            data = self.privacy.export_user_data("discord-1", None)
+        self.assertEqual(data["failed"], ["export_memories"])
+        self.assertEqual(data["memories"], [])
+        self.assertEqual(data["conversation_checkpoint_count"], 4)
+
+    def test_a_complete_run_says_nothing_failed(self):
+        with patch.multiple(self.privacy,
+                            export_memories=MagicMock(return_value=[]),
+                            export_schedules=MagicMock(return_value=[]),
+                            count_conversation_checkpoints=MagicMock(return_value=0),
+                            get_workspace_for_export=MagicMock(return_value=None),
+                            export_relay=MagicMock(return_value={})):
+            self.assertEqual(self.privacy.export_user_data("discord-1", None)["failed"], [])
 
 
 if __name__ == "__main__":

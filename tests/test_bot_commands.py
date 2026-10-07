@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord  # noqa: E402
 import fritz_utils  # noqa: E402
+import privacy  # noqa: E402  - for PrivacyOperationFailed
 import bot_commands  # noqa: E402
 from bot_commands import FritzCommands, _require_admin  # noqa: E402
 
@@ -965,3 +966,105 @@ class TestForgetAllAnswersThePressItWasGiven(unittest.IsolatedAsyncioTestCase):
                                         MagicMock(return_value=self.RESULT)):
             with unittest.mock.patch.object(bot_commands, "audit_log"):
                 await view.confirm.callback(interaction)   # must not raise
+
+
+class TestARefusedForgetIsNotRecordedAsADeletion(unittest.IsolatedAsyncioTestCase):
+    """privacy.py raises now instead of returning 0, so these three have
+    something to report. Two things must not happen: the success copy, and an
+    audit line - the audit log is the record of what was deleted, and an entry
+    for a deletion that never happened is worse than no entry."""
+
+    SLASH = (
+        ("forget_memories_slash", "forget_memories", "memories"),
+        ("forget_conversation_slash", "forget_conversation", "conversation"),
+        ("forget_schedules_slash", "forget_schedules", "schedules"),
+    )
+
+    async def _refuse(self, command: str, target: str):
+        cog = _make_cog()
+        interaction = _fake_interaction("someone")
+        broken = MagicMock(side_effect=privacy.PrivacyOperationFailed(
+            target, RuntimeError("store is down")))
+        with unittest.mock.patch.object(bot_commands.privacy, target, broken):
+            with unittest.mock.patch.object(bot_commands, "audit_log") as audit:
+                await getattr(cog, command).callback(cog, interaction)
+        return interaction, audit
+
+    async def test_the_person_is_told_it_failed(self):
+        for command, target, _scope in self.SLASH:
+            with self.subTest(command=command):
+                interaction, _audit = await self._refuse(command, target)
+                said = interaction.followup.send.await_args.args[0]
+                self.assertIn("could not complete", said)
+                for success in ("Removed", "Cleared", "Cancelled"):
+                    self.assertNotIn(success, said)
+
+    async def test_no_audit_line_claims_a_deletion(self):
+        for command, target, _scope in self.SLASH:
+            with self.subTest(command=command):
+                _interaction, audit = await self._refuse(command, target)
+                audit.assert_not_called()
+
+    async def test_the_reply_is_still_ephemeral(self):
+        for command, target, _scope in self.SLASH:
+            with self.subTest(command=command):
+                interaction, _audit = await self._refuse(command, target)
+                self.assertIs(
+                    interaction.followup.send.await_args.kwargs["ephemeral"], True)
+
+    async def test_a_successful_run_still_records_one(self):
+        """The other side of it: the audit line must not have been lost."""
+        cog = _make_cog()
+        interaction = _fake_interaction("someone")
+        with unittest.mock.patch.object(bot_commands.privacy, "forget_memories",
+                                        MagicMock(return_value=4)):
+            with unittest.mock.patch.object(bot_commands, "audit_log") as audit:
+                await cog.forget_memories_slash.callback(cog, interaction)
+        audit.assert_called_once()
+        self.assertEqual(audit.call_args.kwargs["removed"], 4)
+        self.assertEqual(audit.call_args.kwargs["scope"], "memories")
+
+
+class TestAnIncompleteExportSaysSo(unittest.IsolatedAsyncioTestCase):
+    """An export that silently omits a section is worse than a partial one:
+    somebody checking what is held about them reads the absence as the answer.
+    """
+
+    COMPLETE = {"user_id": "discord-1", "display_name": "Nick", "memories": [],
+                "schedules": [], "conversation_checkpoint_count": 0,
+                "workspace_path": None, "relays": {}, "failed": []}
+
+    async def _export(self, data):
+        cog = _make_cog()
+        interaction = _fake_interaction("someone")
+        with unittest.mock.patch.object(bot_commands.privacy, "export_user_data",
+                                        MagicMock(return_value=data)):
+            with unittest.mock.patch.object(bot_commands, "audit_log"):
+                await cog.export_slash.callback(cog, interaction)
+        return interaction.followup.send.await_args
+
+    async def test_a_section_that_could_not_be_read_is_named(self):
+        sent = await self._export(dict(self.COMPLETE, failed=["export_memories"]))
+        note = sent.args[0]
+        self.assertIn("Incomplete", note)
+        self.assertIn("export_memories", note)
+        self.assertIn("missing, not empty", note)
+
+    async def test_every_failed_section_is_named(self):
+        sent = await self._export(dict(self.COMPLETE,
+                                       failed=["export_memories", "export_relay"]))
+        for section in ("export_memories", "export_relay"):
+            self.assertIn(section, sent.args[0])
+
+    async def test_a_complete_export_says_nothing_about_failures(self):
+        sent = await self._export(self.COMPLETE)
+        self.assertNotIn("Incomplete", sent.args[0])
+        self.assertIn("nothing was sent to a third party", sent.args[0])
+
+    async def test_the_file_is_still_attached_either_way(self):
+        """What was read is still worth having."""
+        for failed in ([], ["export_memories"]):
+            with self.subTest(failed=failed):
+                sent = await self._export(dict(self.COMPLETE, failed=failed))
+                self.assertIsNotNone(sent.kwargs.get("file"))
+                self.assertIs(sent.kwargs["ephemeral"], True)

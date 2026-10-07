@@ -237,17 +237,33 @@ async def users_list(request: Request) -> HTMLResponse:
     user_ids = _collect_users(schedule_manager)
     rows = []
     for uid in user_ids:
-        memories = privacy.export_memories(uid)
-        schedules = privacy.export_schedules(uid, schedule_manager)
+        # These raise now when a store refuses, rather than returning an empty
+        # list that reads as "this person has nothing". One unreadable store
+        # must not take down the whole listing, and a cell that cannot be
+        # counted says so: "?" is not 0.
+        def _count(read) -> object:
+            try:
+                return len(read())
+            except privacy.PrivacyOperationFailed as e:
+                logger.warning("users list: %s for %s", e, uid)
+                return "?"
+
+        memory_count = _count(lambda: privacy.export_memories(uid))
+        schedule_count = _count(lambda: privacy.export_schedules(uid, schedule_manager))
+        try:
+            workspace = privacy.get_workspace_for_export(uid)
+        except privacy.PrivacyOperationFailed as e:
+            logger.warning("users list: %s for %s", e, uid)
+            workspace = None
         platform, _bare = split_user_id(uid)
         rows.append({
             "user_id": uid,
             # The id is opaque now, so the list needs a name to be usable.
             "display_name": identity_store.display_name(uid, default=""),
             "platform": platform or "legacy",
-            "memory_count": len(memories),
-            "schedule_count": len(schedules),
-            "workspace": privacy.get_workspace_for_export(uid),
+            "memory_count": memory_count,
+            "schedule_count": schedule_count,
+            "workspace": workspace,
         })
     return templates.TemplateResponse(request, "users.html", {"users": rows})
 
@@ -325,7 +341,18 @@ async def forget_user_action(request: Request) -> Response:
 
 async def disable_workspace_action(request: Request) -> Response:
     user_id = request.path_params["user_id"]
-    removed = privacy.forget_workspace(user_id)
+    try:
+        removed = privacy.forget_workspace(user_id)
+    except privacy.PrivacyOperationFailed as e:
+        # The audit line is the record an operator goes back to, so a refusal
+        # belongs in it. Reporting removed=False would claim there was nothing
+        # to remove.
+        logger.error("admin disable workspace failed for %s: %s", user_id, e)
+        audit_log(
+            "admin_disable_workspace", admin=_admin(request),
+            target_user=user_id, error=str(e),
+        )
+        return RedirectResponse(url=f"/users/{user_id}", status_code=303)
     audit_log(
         "admin_disable_workspace", admin=_admin(request),
         target_user=user_id, removed=removed,
@@ -965,10 +992,15 @@ async def chat_forget(request: Request) -> Response:
     identity, _display = _chat_identity(request)
     if not identity:
         return RedirectResponse(url="/chat", status_code=303)
-    removed = await asyncio.get_running_loop().run_in_executor(
-        None, functools.partial(privacy.forget_conversation, identity,
-                                thread_id=_chat_thread_id(identity)),
-    )
+    try:
+        removed = await asyncio.get_running_loop().run_in_executor(
+            None, functools.partial(privacy.forget_conversation, identity,
+                                    thread_id=_chat_thread_id(identity)),
+        )
+    except privacy.PrivacyOperationFailed as e:
+        logger.error("chat forget conversation failed for %s: %s", identity, e)
+        audit_log("chat_forget_conversation", user_id=identity, error=str(e))
+        return RedirectResponse(url="/chat", status_code=303)
     audit_log("chat_forget_conversation", user_id=identity, removed=removed)
     return RedirectResponse(url="/chat", status_code=303)
 

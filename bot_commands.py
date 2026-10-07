@@ -273,22 +273,50 @@ class _ForgetConfirmView(discord.ui.View):
             logger.info("could not withdraw /forget all buttons: %s", type(e).__name__)
 
 
+# Each line of /forget all's report, tied to the operation that produces it, so
+# a store that refused renders as a refusal rather than as the neutral zero
+# forget_all keeps beside it. A table rather than one f-string is what makes
+# that possible per line.
+_FORGET_ALL_LINES = (
+    ("memories", "forget_memories", "memories", str),
+    ("conversation_rows", "forget_conversation", "conversation rows", str),
+    ("schedules", "forget_schedules", "schedules", str),
+    ("workspace_dropped", "forget_workspace", "workspace dropped", str),
+    # The display-name alias is personal data too, and it was deleted on every
+    # /forget all and reported to nobody.
+    ("alias_dropped", "forget_alias", "the name I knew you by",
+     lambda value: "forgotten" if value else "none held"),
+    ("relays", "forget_relay", "relayed messages, sent and received", str),
+)
+
+_FORGET_FAILED = (
+    "I could not complete that just now — the store refused, and I will not "
+    "report a deletion I did not make. Nothing has been lost; do try again, and "
+    "the log will say why if it fails once more."
+)
+
+
 def _forget_all_report(result: dict) -> str:
     """What /forget all removed — every key forget_all returns.
 
     alias_dropped was deleted on every /forget all and reported to nobody, the
     under-report a single assertEqual over the whole dict now guards against.
+
+    A store that refused used to arrive here as 0, False or [], which is
+    exactly what "there was nothing there" looks like: somebody whose memories
+    were all still present was told "memories: 0" under a green tick.
+    forget_all names refusals in `failed` now, and these lines render them.
     """
-    return (
-        "\u2705 Removed:\n"
-        f"\u2022 memories: {result['memories']}\n"
-        f"\u2022 conversation rows: {result['conversation_rows']}\n"
-        f"\u2022 schedules: {result['schedules']}\n"
-        f"\u2022 workspace dropped: {result['workspace_dropped']}\n"
-        f"\u2022 the name I knew you by: {'forgotten' if result['alias_dropped'] else 'none held'}\n"
-        f"\u2022 relayed messages, sent and received: {result['relays']}\n"
-        "\n" + _BLOCKS_KEPT + "\n" + _RELAY_KEPT
-    )
+    refused = set(result.get("failed") or ())
+    lines = []
+    for key, operation, label, render in _FORGET_ALL_LINES:
+        value = ("could NOT be removed" if operation in refused
+                 else render(result[key]))
+        lines.append(f"\u2022 {label}: {value}\n")
+    header = ("\u2705 Removed:\n" if not refused else
+              "\u26a0\ufe0f Partly removed. One or more stores refused, and I "
+              "will not pretend otherwise:\n")
+    return header + "".join(lines) + "\n" + _BLOCKS_KEPT + "\n" + _RELAY_KEPT
 
 
 _EXPORT_MAX_BYTES = 8 * 1024 * 1024
@@ -311,7 +339,8 @@ def _export_too_large(data: dict, size: int) -> str:
     """The refusal for an oversized export, naming what made it so."""
     def weight(value) -> int:
         return len(json.dumps(value, default=str, ensure_ascii=False).encode("utf-8"))
-    largest = max(data, key=lambda k: weight(data[k]))
+    # `failed` is bookkeeping, not a section somebody can trim.
+    largest = max((k for k in data if k != "failed"), key=lambda k: weight(data[k]))
     return (f"\u274c Export is too large ({size / 1024 / 1024:.1f} MB), mostly your "
             f"{largest}. " + _export_trim(largest))
 
@@ -691,45 +720,60 @@ class FritzCommands(commands.Cog):
 
     forget = app_commands.Group(name="forget", description="Delete data Fritz has stored about you")
 
+    async def _forget_one(self, interaction: discord.Interaction, scope: str,
+                          operation, *args, report) -> None:
+        """Run one /forget operation and say truthfully what happened.
+
+        Acknowledged BEFORE the store work, like /voice, /gen and /lore. These
+        deletes go through the shared blocking pool, which a long model turn can
+        fill, so the work can outlast Discord's three-second deadline — and
+        once the token has expired the reply fails, telling someone their
+        deletion did not happen when it already has. The error path copes
+        either way: _reply_error answers via followup once the interaction is
+        done.
+
+        One body rather than three, because the three used to differ only in
+        the wording and that is precisely where "a failure reads as a success"
+        would come back.
+        """
+        user_id = _identity(interaction)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            count = await run_blocking(operation, user_id, *args)
+        except privacy.PrivacyOperationFailed as e:
+            # No audit line: there is no outcome to record, and writing one
+            # would put a deletion in the log that never happened.
+            logger.error("/forget %s failed for %s: %s", scope, user_id, e)
+            await interaction.followup.send(_FORGET_FAILED, ephemeral=True)
+            return
+        audit_log("forget", user_id=user_id, scope=scope, removed=count)
+        await interaction.followup.send(report(count), ephemeral=True)
+
     @forget.command(name="memories", description="Delete every memory and profile entry Fritz has saved about you")
     async def forget_memories_slash(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.forget.memories")
-        user_id = _identity(interaction)
-        # Acknowledged BEFORE the store work, like /voice, /gen and /lore.
-        # These deletes go through the shared blocking pool, which a long model
-        # turn can fill, so the work can outlast Discord's three-second
-        # deadline — and once the token has expired the reply fails, telling
-        # someone their deletion did not happen when it already has. The error
-        # path copes either way: _reply_error answers via followup once the
-        # interaction is done.
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        count = await run_blocking(privacy.forget_memories, user_id)
-        audit_log("forget", user_id=user_id, scope="memories", removed=count)
-        await interaction.followup.send(
-            f"✅ Removed {count} memory entry(ies).", ephemeral=True,
+        await self._forget_one(
+            interaction, "memories", privacy.forget_memories,
+            report=lambda count: f"✅ Removed {count} memory entry(ies).",
         )
 
     @forget.command(name="conversation", description="Reset your conversation thread — next message starts fresh")
     async def forget_conversation_slash(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.forget.conversation")
-        user_id = _identity(interaction)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        count = await run_blocking(privacy.forget_conversation, user_id)
-        audit_log("forget", user_id=user_id, scope="conversation", removed=count)
-        await interaction.followup.send(
-            f"✅ Cleared {count} checkpoint row(s). Your next message starts a fresh thread.",
-            ephemeral=True,
+        await self._forget_one(
+            interaction, "conversation", privacy.forget_conversation,
+            report=lambda count: (
+                f"✅ Cleared {count} checkpoint row(s). Your next message "
+                "starts a fresh thread."),
         )
 
     @forget.command(name="schedules", description="Cancel every scheduled task you have")
     async def forget_schedules_slash(self, interaction: discord.Interaction):
         METRICS.increment("discord_commands.forget.schedules")
-        user_id = _identity(interaction)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        count = await run_blocking(privacy.forget_schedules, user_id, self.schedule_manager)
-        audit_log("forget", user_id=user_id, scope="schedules", removed=count)
-        await interaction.followup.send(
-            f"✅ Cancelled {count} schedule(s).", ephemeral=True,
+        await self._forget_one(
+            interaction, "schedules", privacy.forget_schedules,
+            self.schedule_manager,
+            report=lambda count: f"✅ Cancelled {count} schedule(s).",
         )
 
     @forget.command(
@@ -778,10 +822,16 @@ class FritzCommands(commands.Cog):
         attachment = discord.File(
             io.BytesIO(payload), filename=f"misterfritz_export_{user_id}.json",
         )
-        await interaction.followup.send(
-            "Here's your data. Stored locally on this server — nothing was sent to a third party.",
-            file=attachment, ephemeral=True,
-        )
+        note = ("Here's your data. Stored locally on this server — nothing was "
+                "sent to a third party.")
+        if data.get("failed"):
+            # An export that silently omits a section is worse than a partial
+            # one: somebody checking what is held about them would read the
+            # absence as an answer.
+            note += ("\n\n⚠️ Incomplete: I could not read "
+                     f"{', '.join(sorted(data['failed']))}. What is there is "
+                     "complete; that part is missing, not empty.")
+        await interaction.followup.send(note, file=attachment, ephemeral=True)
 
     # ── Card game ─────────────────────────────────────────────────────────────
 
