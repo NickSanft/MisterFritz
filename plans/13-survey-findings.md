@@ -128,6 +128,12 @@ Nothing serialises `ask_stuff` per thread. `thread_id_for` returns the bare iden
 
 **Risk:** low throughout. **Verify:** B1 and B3 each need a test that fails against the old code; B4 is observable by sending a silent clip.
 
+> **Closed.** Four commits, one per item. Three things worth carrying forward:
+>
+> - **B2 reached further than the table suggests.** Making the operations raise meant every caller had to decide what a refusal means, so it touched `privacy.py`, the three slash commands (now one shared body, because they differed only in wording and that is exactly where "a failure reads as a success" would return), `/forget all`'s report, `/export`, and the admin panel. The panel is handled deliberately more lightly: it is an operator's view, not a promise to the person whose data it is, so a refusal there is a `"?"` in a listing cell and an `error` field in the audit line. Four existing tests encoded the old silence, one of them named `test_a_store_failure_is_reported_as_nothing_removed` — which was the bug in a sentence.
+> - **B3 removed code rather than adding it, twice.** A reset-on-success for the retry counter turned out to be unreachable (a clean edit clears `pending_text`, so the loop ends), and the test written for it could not pass against correct code — which is how that came to light. B3 also goes slightly beyond the table: `final_update` now sends the reply to the channel when the placeholder is gone, because the point of the item is that a deleted placeholder must not cost the answer.
+> - **Two of my own tooling slips were caught by exit codes, not by me.** Piping `pytest` into `tail` masked its status and let B1's commit land with a failing test (amended), and an unbounded `str.replace` in a patch script rewrote two assertions it had no business touching. Both are why the suite is now run without a pipe before each commit.
+
 ---
 
 ## Batch C — exposure and workflow hygiene
@@ -230,7 +236,7 @@ Recorded so they are not re-proposed. Each was killed because the mechanism was 
 | Batch | Items | State |
 |---|---|---|
 | A | 7 (A4 split in two) | **CLOSED** — `15ef73f` (A1), `f165683` (A2), `79421a4` (A3), `e169057` + `00e58d0` (A4a/b), `21eafcf` (A5), `09cc25f` (A6) |
-| B | 4 | not started |
+| B | 4 | **CLOSED** — `07d5e51` (B1), `deb89ed` (B2), `c18128b` (B3), `f944a5c` (B4) |
 | C | 3 (+ queued symlink chip) | not started |
 | D | 3 | not started |
 | E | 3 | not started |
