@@ -40,7 +40,8 @@ from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import END, StateGraph, START
 
 from fritz_utils import CHROMA_DB_PATH, INDEXED_FILES_PATH, CHROMA_COLLECTION_NAME, DOC_FOLDER, FAST_OLLAMA_MODEL, \
-    OLLAMA_KEEP_ALIVE, OLLAMA_TIMEOUT, THINKING_OLLAMA_MODEL, EMBEDDING_MODEL, refuse_stored_embedders
+    OLLAMA_KEEP_ALIVE, OLLAMA_TIMEOUT, THINKING_OLLAMA_MODEL, EMBEDDING_MODEL, refuse_stored_embedders, \
+    DOC_MAX_FILE_MB
 from observability import init_logging, METRICS
 
 # Define supported file extensions
@@ -159,6 +160,25 @@ def load_document_by_extension(file_path: str) -> List[Document]:
     """
     # Safety check for watcher race conditions
     if not os.path.exists(file_path):
+        return []
+
+    # Bound what the parsers are handed. This is the only place in the app that
+    # reads a file format it did not write, and pypdf's advisory history is
+    # almost entirely malformed-input denial of service. Skipping leaves the
+    # file out of the manifest, so it is retried if it shrinks rather than being
+    # quietly treated as ingested.
+    try:
+        size = os.path.getsize(file_path)
+    except OSError:
+        return []
+    if size > DOC_MAX_FILE_MB * 1024 * 1024:
+        METRICS.increment("document_engine.skipped_too_large")
+        logger.warning(
+            "Skipping %s: %.1f MB exceeds DOC_MAX_FILE_MB=%d. Raise that knob "
+            "if the file is legitimate; it is there to bound what an unknown "
+            "document can make a parser allocate.",
+            os.path.basename(file_path), size / 1024 / 1024, DOC_MAX_FILE_MB,
+        )
         return []
 
     ext = os.path.splitext(file_path)[1].lower()

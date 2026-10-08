@@ -260,6 +260,7 @@ All settings can be set as environment variables or in a `.env` file. See `.env.
 | `DOC_STORAGE_DESCRIPTION` | `anything you don't know about.` | Hint for when the agent queries documents |
 | `DOC_FOLDER` | `./input` | Directory watched for RAG documents |
 | `CHROMA_DB_PATH` | `./chroma_store` | ChromaDB persistence path |
+| `DOC_MAX_FILE_MB` | `100` | Largest file the watched folder will hand to a document parser. The parsers are the only place Fritz reads a format he did not write, and pypdf's advisory history is almost entirely malformed-input denial of service — so this bounds what an unknown document can make one allocate. An over-sized file is skipped and logged, and is **not** recorded as indexed, so shrinking it is enough to have it picked up. It does not stop a small crafted file from sending a parser into a loop. |
 | `FFMPEG_PATH` | auto-detected | Override FFmpeg binary path |
 
 ---

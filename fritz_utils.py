@@ -215,6 +215,26 @@ AGENT_RECURSION_LIMIT: int = _at_least_one("AGENT_RECURSION_LIMIT", "40")
 # that keeps ask_stuff / STT / TTS work off the Discord event loop.
 BLOCKING_POOL_SIZE: int = _at_least_one("BLOCKING_POOL_SIZE", "8")
 
+# Largest file (megabytes) the watched folder will hand to a document parser.
+#
+# The parsers are the one place this app reads a file format it did not write,
+# and pypdf's advisory history is almost entirely malformed-input denial of
+# service: infinite loops on unterminated inline images, unbounded allocation on
+# crafted cross-reference tables. The pinned version fixes every known one;
+# this bounds the next one.
+#
+# Be clear about what it does and does not do. It bounds the input, so it
+# covers the allocation class — a 2GB "PDF" cannot be read into memory and
+# OCR'd page by page. It does NOT stop a small crafted file from sending a
+# parser into a loop; the thing that would is a timeout on the ingestion pool,
+# which does not have one.
+#
+# Generous on purpose: a scanned document really can run to tens of megabytes,
+# and a cap that rejects somebody's actual paperwork would be removed rather
+# than tuned. An over-sized file is skipped and logged, NOT recorded in the
+# manifest, so shrinking it is enough to have it picked up.
+DOC_MAX_FILE_MB: int = _at_least_one("DOC_MAX_FILE_MB", "100")
+
 # Concurrent SDXL renders permitted by the /gen semaphore. The pipeline is
 # GPU-bound — leave at 1 unless you have VRAM to burn.
 IMAGE_GEN_MAX_CONCURRENCY: int = _at_least_one("IMAGE_GEN_MAX_CONCURRENCY", "1")

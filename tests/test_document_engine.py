@@ -16,6 +16,9 @@ import threading
 import time
 import types
 import unittest
+import pathlib
+import tempfile
+import unittest.mock
 from unittest.mock import MagicMock, patch
 
 
@@ -252,3 +255,112 @@ class TestBurstCoalescing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheParsersAreNotHandedUnboundedInput(unittest.TestCase):
+    """load_document_by_extension is the single dispatch point both ingestion
+    paths go through — the watcher's inline call and the start-up process
+    pool — so the cap lives there.
+
+    pypdf's advisory history against the version this repo used to pin is
+    almost entirely malformed-input denial of service, and this folder holds
+    whatever somebody dropped in it.
+
+    Every loader is stubbed: these tests are about what reaches a parser, not
+    about what a parser does with it. (Without the stubs, the mutation that
+    removes the cap handed the real loaders 1.5MB of junk and the run hung —
+    the behaviour the cap exists to bound.)
+    """
+
+    LOADERS = ("UnstructuredWordDocumentLoader", "UnstructuredExcelLoader",
+               "CSVLoader", "TextLoader")
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp())
+        self.pdf = unittest.mock.MagicMock(return_value=["a pdf page"])
+        patcher = unittest.mock.patch.object(
+            document_engine, "load_pdf_with_ocr_fallback", self.pdf)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name in self.LOADERS:
+            instance = unittest.mock.MagicMock()
+            instance.load.return_value = ["a document"]
+            patcher = unittest.mock.patch.object(
+                document_engine, name, unittest.mock.MagicMock(return_value=instance))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _file(self, name: str, megabytes: float) -> str:
+        path = self.tmp / name
+        path.write_bytes(b"%PDF-1.7" + b"0" * int(megabytes * 1024 * 1024))
+        return str(path)
+
+    def test_an_oversized_file_is_skipped_before_any_parser_sees_it(self):
+        big = self._file("huge.pdf", 1.5)
+        with unittest.mock.patch.object(document_engine, "DOC_MAX_FILE_MB", 1):
+            self.assertEqual(document_engine.load_document_by_extension(big), [])
+        self.pdf.assert_not_called()
+
+    def test_the_log_names_the_knob_and_the_size(self):
+        """Somebody whose legitimate scan is being skipped has to be able to
+        find out why, and what to change."""
+        big = self._file("huge.pdf", 1.5)
+        with unittest.mock.patch.object(document_engine, "DOC_MAX_FILE_MB", 1):
+            with self.assertLogs("document_engine", level="WARNING") as caught:
+                document_engine.load_document_by_extension(big)
+        said = "; ".join(caught.output)
+        self.assertIn("DOC_MAX_FILE_MB", said)
+        self.assertIn("huge.pdf", said)
+
+    def test_a_file_within_the_cap_is_parsed_as_before(self):
+        small = self._file("fine.pdf", 0.1)
+        with unittest.mock.patch.object(document_engine, "DOC_MAX_FILE_MB", 1):
+            self.assertEqual(document_engine.load_document_by_extension(small),
+                             ["a pdf page"])
+        self.pdf.assert_called_once()
+
+    def test_the_cap_applies_to_every_format_not_only_pdf(self):
+        """A crafted xlsx or docx reaches a parser just as readily."""
+        for name in ("huge.docx", "huge.xlsx", "huge.csv", "huge.txt"):
+            with self.subTest(name=name):
+                big = self._file(name, 1.5)
+                with unittest.mock.patch.object(document_engine, "DOC_MAX_FILE_MB", 1):
+                    self.assertEqual(
+                        document_engine.load_document_by_extension(big), [])
+        for name in self.LOADERS:
+            getattr(document_engine, name).assert_not_called()
+
+    def test_every_format_within_the_cap_still_loads(self):
+        """The other direction, so the cap cannot be satisfied by refusing
+        everything."""
+        for name in ("small.docx", "small.xlsx", "small.csv", "small.txt"):
+            with self.subTest(name=name):
+                small = self._file(name, 0.01)
+                with unittest.mock.patch.object(document_engine, "DOC_MAX_FILE_MB", 1):
+                    self.assertEqual(
+                        document_engine.load_document_by_extension(small),
+                        ["a document"])
+
+    def test_a_skipped_file_is_not_recorded_as_indexed(self):
+        """So shrinking it is enough to have it picked up:
+        _process_one_ingestion only updates the manifest when the load produced
+        something."""
+        big = self._file("huge.pdf", 1.5)
+        vectorstore = unittest.mock.MagicMock()
+        with unittest.mock.patch.object(document_engine, "DOC_MAX_FILE_MB", 1):
+            with unittest.mock.patch.object(document_engine,
+                                            "_update_manifest") as manifest:
+                document_engine._process_one_ingestion(
+                    vectorstore, "add", big, unittest.mock.MagicMock())
+        manifest.assert_not_called()
+        vectorstore.add_documents.assert_not_called()
+
+    def test_a_vanished_file_is_still_handled_before_the_size_check(self):
+        gone = str(self.tmp / "never-existed.pdf")
+        self.assertEqual(document_engine.load_document_by_extension(gone), [])
+
+    def test_the_default_is_generous_enough_for_real_paperwork(self):
+        """A cap that rejected somebody's actual scanned documents would be
+        removed rather than tuned, which would leave nothing."""
+        import fritz_utils
+        self.assertGreaterEqual(fritz_utils.DOC_MAX_FILE_MB, 50)
