@@ -127,6 +127,9 @@ dataclasses-json==0.6.7
 dateparser==1.1.8
 ddgs==9.10.0
 decorator==5.2.1
+# New with nltk 3.10.3, and not incidental: the Downloader parses a remote XML
+# index, and parsing it defensively is part of how CVE-2026-33236 was closed.
+defusedxml==0.7.1
 diffusers==0.36.0
 discord.py==2.6.4
 docopt==0.6.2
@@ -236,7 +239,23 @@ multidict==6.7.0
 mypy_extensions==1.1.0
 networkx==3.6.1
 ninja==1.13.0
-nltk==3.9.2
+# 3.9.2 → 3.10.3. Forty-three unique CVEs apply to 3.9.2 and every one of
+# them is fixed by 3.10.3. Counted by walking OSV's introduced/fixed events
+# against the pinned version and deduplicating by CVE: OSV's own version filter
+# returns every advisory for a package whatever version you ask about, and it
+# lists the same CVE several times under GHSA and PYSEC ids.
+#
+# That matters for one of them. CVE-2026-33236, a path traversal in the
+# Downloader that lets a hostile package index overwrite arbitrary files, reads
+# as UNFIXED in its GHSA record (last_affected=3.9.2, no fix listed) and as
+# fixed=3.9.4 in the PYSEC record for the same CVE. The PYSEC record is the
+# accurate one; an earlier survey of this lock read the GHSA one and concluded
+# the bump could not clear it.
+#
+# nltk is not imported anywhere in this repo. It arrives under `unstructured`,
+# which the Word and Excel loaders use, and it is `unstructured` that reaches
+# for the corpora — see AUTO_DOWNLOAD_NLTK in .env.example.
+nltk==3.10.3
 num2words==0.5.14
 numba==0.63.1
 numpy==2.3.5
@@ -274,9 +293,35 @@ pydantic-settings==2.12.0
 pydantic_core==2.41.5
 Pygments==2.19.2
 PyMuPDF==1.26.7
-PyNaCl==1.6.1
+# 1.6.1 → 1.6.2, and ABOVE the ceiling discord.py declares, deliberately.
+#
+# discord.py 2.6.4's own metadata says `PyNaCl<1.6,>=1.5.0; extra == "voice"`.
+# pip never evaluates that, because this file asks for PyNaCl directly rather
+# than for discord.py[voice], so the constraint is invisible to the tooling
+# that would normally enforce it. Recorded here so it is not rediscovered
+# through a voice bug.
+#
+# Staying under the ceiling would not help anyway: CVE-2025-69277 (libsodium
+# accepting some ed25519 points outside the main group) is introduced=0,
+# fixed=1.6.2, so every release before 1.6.2 is affected, 1.5.x included. The
+# bug is in libsodium's crypto_core_ed25519_is_valid_point, which discord.py
+# never calls — its voice code uses only nacl.secret.Aead,
+# nacl.secret.SecretBox and nacl.utils.random, all unchanged across 1.5 and
+# 1.6 — so this is housekeeping rather than exposure. Verified by importing
+# those three against 1.6.2.
+PyNaCl==1.6.2
 pyparsing==3.3.0
-pypdf==6.4.2
+# 6.4.2 → 6.19.0. Forty-five unique CVEs apply to 6.4.2, every one of them
+# fixed, and 6.19.0 is the lowest release that clears the lot — counted the same
+# way as nltk above. There is no release in the 6.4.x line after 6.4.2, so this
+# cannot be taken as a patch bump.
+#
+# The cluster is homogeneous and reads like a fuzzing campaign against
+# malformed PDFs: infinite loops on unterminated inline images, unbounded
+# allocation on crafted cross-reference tables, recursion limits. Which is the
+# shape that matters here, because document_engine feeds this parser whatever
+# turns up in the watched folder — see DOC_MAX_FILE_MB.
+pypdf==6.19.0
 PyPika==0.48.9
 pyproject_hooks==1.2.0
 pyreadline3==3.5.4

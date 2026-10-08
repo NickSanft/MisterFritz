@@ -22,7 +22,11 @@ requires-python = ">=3.12"
 dependencies = [
     # chat surfaces
     "discord.py>=2.6",
-    "PyNaCl>=1.5",                 # discord voice channel support
+    # Discord voice. 1.6.2 is the first release without CVE-2025-69277, which
+    # is introduced=0 — every earlier release is affected. Deliberately above
+    # the `PyNaCl<1.6` ceiling discord.py's own voice extra declares; see the
+    # note at the pin in requirements.txt.
+    "PyNaCl>=1.6.2",
     # agent / LLM stack
     "langchain>=1.4",
     "langchain-core>=1.6.3",      # what langchain 1.4 requires
@@ -52,7 +56,9 @@ dependencies = [
     "openpyxl>=3.1",
     "unstructured>=0.18",
     "python-docx>=1.2",
-    "pypdf>=6.4",
+    # 6.19.0 is the lowest release clearing all forty-five CVEs that apply to
+    # 6.4.2, and there is no 6.4.x release after it. See requirements.txt.
+    "pypdf>=6.19",
     # pandas is required by unstructured[xlsx], which UnstructuredExcelLoader
     # imports lazily. It is ALSO a nipype dep — do not remove it while purging
     # that chain, or .xlsx ingestion breaks silently at load time.

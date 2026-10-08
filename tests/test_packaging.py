@@ -529,6 +529,126 @@ class TestNoEmbedderCanLoadAModelWhenAStoreIsOpened(unittest.TestCase):
                     "opened — see requirements.txt at the chromadb pin")
 
 
+class TestTheParsersAreNotTheVulnerableReleases(unittest.TestCase):
+    """Three pins carry advisory content rather than currency.
+
+    The counts below were derived by walking OSV's introduced/fixed events
+    against the pinned version and deduplicating by CVE, because OSV's own
+    version filter returns every advisory for a package whatever version you
+    ask about, and it lists the same CVE under both GHSA and PYSEC ids. One
+    consequence is recorded at the nltk pin: CVE-2026-33236 reads as unfixed in
+    its GHSA record and fixed=3.9.4 in the PYSEC record for the same CVE.
+    """
+
+    # package -> (lowest release clearing every CVE that applied to the old
+    #             pin, how many unique CVEs that was)
+    CLEARED = {
+        "pypdf": ((6, 19, 0), 45),
+        "nltk": ((3, 10, 3), 43),
+        "PyNaCl": ((1, 6, 2), 1),
+    }
+
+    @staticmethod
+    def _parts(version: str) -> tuple:
+        return tuple(int(p) for p in re.findall(r"\d+", version)[:3])
+
+    def test_the_lock_is_at_or_past_every_fix(self):
+        for package, (floor, count) in self.CLEARED.items():
+            with self.subTest(package=package, cves=count):
+                [line] = [ln for ln in (REPO / "requirements.txt")
+                          .read_text(encoding="utf-8").splitlines()
+                          if ln.lower().startswith(package.lower() + "==")]
+                pinned = self._parts(line.split("==", 1)[1])
+                self.assertGreaterEqual(
+                    pinned, floor,
+                    f"{package} is pinned below the release that clears "
+                    f"{count} CVEs")
+
+    def test_the_installed_versions_match_the_lock(self):
+        """The pin is the intent; this is the environment matching it."""
+        import importlib.metadata as md
+        for package, (floor, _count) in self.CLEARED.items():
+            with self.subTest(package=package):
+                self.assertGreaterEqual(self._parts(md.version(package)), floor)
+
+    def test_the_declared_floors_exclude_the_vulnerable_releases(self):
+        """A lock pin protects this checkout; the floor protects anyone
+        installing the package."""
+        declared = {d.split(">")[0].strip().lower(): d
+                    for d in _pyproject()["project"]["dependencies"]}
+        for package in ("pypdf", "PyNaCl"):
+            with self.subTest(package=package):
+                spec = declared[package.lower()]
+                self.assertIn(">=", spec)
+                self.assertGreaterEqual(self._parts(spec.split(">=", 1)[1]),
+                                        self.CLEARED[package][0][:2])
+
+    def test_nltk_arrives_with_what_its_fix_needs(self):
+        """defusedxml is new with nltk 3.10.3 and is part of how the Downloader
+        traversal was closed, so the lock has to carry it."""
+        self.assertIn("defusedxml", _requirements_names())
+
+    def test_nltk_is_nobody_in_this_repo_importing_it(self):
+        """It arrives under `unstructured`. If a module here starts importing
+        nltk directly, the corpora question (AUTO_DOWNLOAD_NLTK) becomes this
+        repo's own problem rather than a dependency's."""
+        offenders = []
+        for path in sorted(REPO.glob("*.py")):
+            source = path.read_text(encoding="utf-8")
+            for line in source.splitlines():
+                stripped = line.strip()
+                if stripped.startswith(("import nltk", "from nltk")):
+                    offenders.append(f"{path.name}: {stripped}")
+        self.assertEqual(offenders, [])
+
+
+class TestThePyNaClCeilingIsRecordedWhileItIsCrossed(unittest.TestCase):
+    """discord.py's voice extra declares `PyNaCl<1.6`, and this repo pins above
+    it on purpose: CVE-2025-69277 is introduced=0, so no release under the
+    ceiling avoids it.
+
+    pip never evaluates that constraint, because the lock asks for PyNaCl
+    directly rather than for discord.py[voice] — which is exactly why it needs
+    saying somewhere a reader will find it.
+    """
+
+    @staticmethod
+    def _declared_voice_ceiling():
+        import importlib.metadata as md
+        for requirement in md.requires("discord.py") or []:
+            if requirement.lower().startswith("pynacl"):
+                return requirement
+        return None
+
+    def test_the_pin_is_still_above_what_discord_py_declares(self):
+        from packaging.requirements import Requirement
+        declared = self._declared_voice_ceiling()
+        self.assertIsNotNone(declared, "discord.py no longer declares PyNaCl")
+        spec = Requirement(declared.split(";")[0]).specifier
+        import importlib.metadata as md
+        pinned = md.version("PyNaCl")
+        if pinned in spec:
+            self.fail(
+                f"discord.py now admits PyNaCl {pinned} ({declared}). The "
+                "explanation above the pin in requirements.txt is stale — "
+                "remove it, and this test with it.")
+
+    def test_the_crossing_is_explained_where_the_pin_lives(self):
+        note = (REPO / "requirements.txt").read_text(encoding="utf-8")
+        head = note[:note.index("PyNaCl==")]
+        self.assertIn("discord.py", head.rsplit("# ---", 1)[-1][-1600:])
+        self.assertIn("CVE-2025-69277", head[-1600:])
+
+    def test_the_three_symbols_discord_py_actually_uses_exist(self):
+        """The ceiling is only safe to cross while this holds. These are every
+        nacl name discord.py's voice code touches."""
+        import nacl.secret
+        import nacl.utils
+        self.assertTrue(hasattr(nacl.secret, "Aead"))
+        self.assertTrue(hasattr(nacl.secret, "SecretBox"))
+        self.assertTrue(hasattr(nacl.utils, "random"))
+
+
 class TestTheLockActuallyLocks(unittest.TestCase):
     """The file's stated job is "the pinned closure of those roots".
 
