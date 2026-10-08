@@ -158,6 +158,17 @@ Also here, for sequencing only: the queued **`file_tools` symlink hardening** �
 
 > OSV's version filter is unreliable for these packages — it returns every advisory for a package regardless of version. The counts above come from walking the `introduced`/`fixed` events in the full records. Re-verify the same way rather than trusting a filtered query.
 
+> **Closed, and re-verifying produced two corrections to this plan.**
+>
+> - **D2's premise was wrong.** CVE-2026-33236, the nltk Downloader path traversal, is not unfixed: its GHSA record says `last_affected=3.9.2` and lists no fix, while the PYSEC record for the **same CVE** says `fixed=3.9.4`. This plan read the GHSA one. nltk 3.10.3 clears all forty-three CVEs that applied to 3.9.2, not "all but a handful". The bump also brings `defusedxml`, which is new in the lock and not incidental — the Downloader parses a remote XML index, and parsing it defensively is part of how that traversal was closed.
+> - **D3 was bigger than a note.** PyNaCl 1.6.1 carries CVE-2025-69277 (libsodium accepting some ed25519 points outside the main group), which this plan did not mention. It is `introduced=0, fixed=1.6.2`, so dropping **under** discord.py's declared `PyNaCl<1.6` ceiling would not have avoided it either. The pin went to 1.6.2, still above that ceiling, deliberately; a test now fails if discord.py ever relaxes it, so the explanation gets removed rather than going stale.
+>
+> Counts after deduplicating by CVE: forty-five for pypdf 6.4.2 and forty-three for nltk 3.9.2, which matches this plan — the first pass, before dedup, read 89 and 85, because OSV lists the same CVE under both GHSA and PYSEC ids.
+>
+> The ingestion cap (`DOC_MAX_FILE_MB`) bounds the input, which covers the allocation class. It does **not** stop a small crafted file from sending a parser into a loop, and the thing that would — a timeout on the ingestion pool — does not exist: `future.result()` at `document_engine.py:465` has none, so one hung child blocks start-up indexing the way a dead placeholder used to block a turn. Raised as its own task rather than bolted onto a dependency bump.
+>
+> Two test-design notes worth carrying: the cap's tests had to stub every loader, because under the mutation that removes the cap the real parsers were handed 1.5MB of junk and the run hung — a test for a guard must not depend on what the guard prevents. And the venv was resynced for four packages only; three pre-existing lock/venv differences (`opencv-python-headless` behind, `setuptools` ahead, `python-telegram-bot` an uninstalled opt-in floor) were left alone rather than swept into a security bump.
+
 ---
 
 ## Batch E — the code that has never run in a test
@@ -238,7 +249,7 @@ Recorded so they are not re-proposed. Each was killed because the mechanism was 
 | A | 7 (A4 split in two) | **CLOSED** — `15ef73f` (A1), `f165683` (A2), `79421a4` (A3), `e169057` + `00e58d0` (A4a/b), `21eafcf` (A5), `09cc25f` (A6) |
 | B | 4 | **CLOSED** — `07d5e51` (B1), `deb89ed` (B2), `c18128b` (B3), `f944a5c` (B4) |
 | C | 3 (+ queued symlink chip) | not started |
-| D | 3 | not started |
+| D | 3 | **CLOSED** — `c076d0f` (versions), `39d1fa7` (ingestion cap), `5eac578` (corpora) |
 | E | 3 | not started |
 | F | 1 | not started |
 | G | 2 | not started |
