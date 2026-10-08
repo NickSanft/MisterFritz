@@ -57,6 +57,27 @@ ENV WHISPER_DEVICE=cpu
 ENV WHISPER_COMPUTE_TYPE=int8
 RUN python -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8')" || true
 
+# NLTK corpora — baked for the same reason as the Whisper model above, but
+# this one is not optional.
+#
+# `unstructured`, which the Word and Excel loaders use, downloads two corpora at
+# IMPORT time unless told otherwise: unstructured/nlp/tokenize.py runs
+# download_nltk_packages() at module scope whenever AUTO_DOWNLOAD_NLTK is unset
+# or "true". So ingesting one .docx reaches the network from an application whose
+# premise is that everything runs locally, and it does it through the nltk
+# Downloader — the component CVE-2026-33236's path traversal was in.
+#
+# Note the absence of `|| true`, unlike the Whisper line. Whisper degrades: no
+# model, no transcription, everything else works. These corpora do not — with
+# the download switched off at runtime and the files missing, the first .docx
+# raises LookupError from inside a loader. A build that cannot fetch them should
+# fail here, where somebody is watching.
+ENV NLTK_DATA=/usr/local/share/nltk_data
+RUN python -c "import nltk; \
+    nltk.download('punkt_tab', download_dir='/usr/local/share/nltk_data'); \
+    nltk.download('averaged_perceptron_tagger_eng', download_dir='/usr/local/share/nltk_data')"
+ENV AUTO_DOWNLOAD_NLTK=false
+
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 

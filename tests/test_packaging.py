@@ -5,6 +5,7 @@ something breaks in production: a security-critical package silently dropped
 from the lock, or the `fitz` pin coming back.
 """
 import importlib.metadata as md
+import ast
 import pathlib
 import re
 import tomllib
@@ -647,6 +648,100 @@ class TestThePyNaClCeilingIsRecordedWhileItIsCrossed(unittest.TestCase):
         self.assertTrue(hasattr(nacl.secret, "Aead"))
         self.assertTrue(hasattr(nacl.secret, "SecretBox"))
         self.assertTrue(hasattr(nacl.utils, "random"))
+
+
+class TestTheImageDoesNotFetchCorporaAtImport(unittest.TestCase):
+    """`unstructured` downloads two nltk corpora at IMPORT time unless told
+    otherwise, so ingesting one .docx reaches the network from an application
+    whose premise is that the models run locally — and it does it through the
+    nltk Downloader, which is where CVE-2026-33236's path traversal was.
+
+    Every assertion here is tied to the installed `unstructured`, not to a
+    string this repo invented: if upstream renames the switch or changes which
+    corpora it wants, these fail rather than leaving an image that silently
+    starts downloading again.
+    """
+
+    @staticmethod
+    def _tokenize_source() -> str:
+        import unstructured.nlp.tokenize as tokenize
+        return pathlib.Path(tokenize.__file__).read_text(encoding="utf-8")
+
+    @staticmethod
+    def _dockerfile() -> str:
+        return (REPO / "Dockerfile").read_text(encoding="utf-8")
+
+    def test_the_switch_is_the_one_unstructured_reads(self):
+        source = self._tokenize_source()
+        self.assertIn('os.getenv("AUTO_DOWNLOAD_NLTK"', source,
+                      "unstructured no longer reads AUTO_DOWNLOAD_NLTK; the "
+                      "Dockerfile is setting a variable nothing consults")
+        self.assertIn("download_nltk_packages()", source)
+
+    def test_the_download_still_happens_at_module_scope(self):
+        """The reason this cannot be fixed by a guard at a call site: it runs on
+        import, inside a module-level `if` on the environment variable, before
+        any code of ours gets a turn."""
+        import unstructured.nlp.tokenize as tokenize
+        tree = ast.parse(pathlib.Path(tokenize.__file__).read_text(encoding="utf-8"))
+        guarded = []
+        for node in tree.body:                      # module scope only
+            if not isinstance(node, ast.If):
+                continue
+            calls = [c for c in ast.walk(node) if isinstance(c, ast.Call)
+                     and getattr(c.func, "id", None) == "download_nltk_packages"]
+            names = [n.value for n in ast.walk(node)
+                     if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+            if calls and "AUTO_DOWNLOAD_NLTK" in names:
+                guarded.append(node)
+        self.assertTrue(
+            guarded,
+            "unstructured no longer downloads at import under an "
+            "AUTO_DOWNLOAD_NLTK check; re-read whether the Dockerfile's "
+            "bake-and-disable is still the right shape")
+
+    def test_the_image_switches_it_off(self):
+        self.assertIn("ENV AUTO_DOWNLOAD_NLTK=false", self._dockerfile())
+
+    def test_the_image_bakes_exactly_what_unstructured_asks_for(self):
+        """Whatever corpora unstructured downloads must be the ones baked, or
+        the image has the switch off and the files missing — which is a
+        LookupError from inside a loader on the first .docx."""
+        source = self._tokenize_source()
+        wanted = set(re.findall(r'nltk\.download\(\s*"([^"]+)"', source))
+        self.assertTrue(wanted, "could not read which corpora unstructured wants")
+        dockerfile = self._dockerfile()
+        for corpus in sorted(wanted):
+            with self.subTest(corpus=corpus):
+                self.assertIn(corpus, dockerfile)
+
+    def test_the_bake_is_not_allowed_to_fail_quietly(self):
+        """Unlike the Whisper model above it, which degrades to no
+        transcription. A missing corpus with the switch off is a crash in a
+        loader, so the build has to fail where somebody is watching."""
+        dockerfile = self._dockerfile()
+        bake = dockerfile[dockerfile.index("ENV NLTK_DATA"):
+                          dockerfile.index("ENV AUTO_DOWNLOAD_NLTK")]
+        self.assertIn("nltk.download", bake)
+        self.assertNotIn("|| true", bake)
+
+    def test_the_baked_location_is_one_nltk_will_look_in(self):
+        """unstructured's own check appends "nltk_data" to any path that does
+        not already end in it, so the download_dir and NLTK_DATA have to agree
+        with that."""
+        dockerfile = self._dockerfile()
+        [declared] = re.findall(r"ENV NLTK_DATA=(\S+)", dockerfile)
+        self.assertTrue(declared.endswith("nltk_data"), declared)
+        self.assertIn(f"download_dir='{declared}'", dockerfile)
+
+    def test_the_knob_is_documented_where_the_others_are(self):
+        """CONTRIBUTING asks for a README row per knob, and this one needs its
+        caveat recorded: setting it false without the corpora breaks ingestion."""
+        readme = (REPO / "README.md").read_text(encoding="utf-8")
+        row = [line for line in readme.splitlines()
+               if line.startswith("| `AUTO_DOWNLOAD_NLTK`")]
+        self.assertTrue(row, "AUTO_DOWNLOAD_NLTK has no README row")
+        self.assertIn("LookupError", row[0])
 
 
 class TestTheLockActuallyLocks(unittest.TestCase):
