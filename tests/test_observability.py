@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import observability
 from observability import (
     Metrics, _format_duration,
     get_health_snapshot, format_health_text,
@@ -309,3 +310,92 @@ class TestTestsDoNotWriteTheRealAuditLog(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheMetricsListenerStaysOffTheNetwork(unittest.TestCase):
+    """/metrics is the whole counter set and /health the status snapshot, both
+    unauthenticated. This used to bind 0.0.0.0 with no knob, so on a laptop or
+    a home server it was readable by anyone on the network.
+
+    HTTPServer is patched rather than really bound: the question is which
+    address it is asked for, and binding for real would leave a serve_forever
+    thread behind in every test.
+    """
+
+    def _started(self, env=None, **kwargs):
+        env = env or {}
+        with patch.object(observability, "HTTPServer") as server:
+            with patch.dict(os.environ, env, clear=False):
+                for name in ("METRICS_HOST", "METRICS_PORT"):
+                    if name not in env:
+                        os.environ.pop(name, None)
+                with patch.object(observability.threading, "Thread"):
+                    observability.start_metrics_server(**kwargs)
+        return server.call_args.args[0]
+
+    def test_the_default_is_localhost(self):
+        host, _port = self._started()
+        self.assertEqual(host, "127.0.0.1")
+
+    def test_the_default_port_is_unchanged(self):
+        _host, port = self._started()
+        self.assertEqual(port, 8000)
+
+    def test_the_environment_can_open_it_up(self):
+        host, _port = self._started(env={"METRICS_HOST": "0.0.0.0"})
+        self.assertEqual(host, "0.0.0.0")
+
+    def test_an_explicit_argument_wins_over_the_environment(self):
+        host, port = self._started(env={"METRICS_HOST": "0.0.0.0",
+                                        "METRICS_PORT": "9999"},
+                                   host="10.0.0.5", port=1234)
+        self.assertEqual((host, port), ("10.0.0.5", 1234))
+
+    def test_the_log_says_which_interface_it_took(self):
+        """An operator who set the knob should be able to confirm it, and one
+        who did not should be able to see that it is local."""
+        with patch.object(observability, "HTTPServer"):
+            with patch.object(observability.threading, "Thread"):
+                with self.assertLogs("observability", level="INFO") as caught:
+                    observability.start_metrics_server(host="127.0.0.1", port=8123)
+        self.assertIn("127.0.0.1:8123", "; ".join(caught.output))
+
+
+class TestTheContainerOpensItDeliberately(unittest.TestCase):
+    """A container has to bind every interface, and the reason belongs beside
+    the line that does it — otherwise it reads as the default being
+    overridden for nothing, and gets "fixed"."""
+
+    REPO = Path(__file__).resolve().parents[1]
+
+    def _dockerfile(self) -> str:
+        return (self.REPO / "Dockerfile").read_text(encoding="utf-8")
+
+    def test_the_image_binds_every_interface(self):
+        self.assertIn("ENV METRICS_HOST=0.0.0.0", self._dockerfile())
+
+    def test_the_image_says_why(self):
+        dockerfile = self._dockerfile()
+        above = dockerfile[:dockerfile.index("ENV METRICS_HOST")]
+        reason = above.rsplit(chr(10) + chr(10), 1)[-1]
+        self.assertIn("unauthenticated", reason)
+        for who in ("Prometheus", "probes"):
+            self.assertIn(who, reason)
+
+    def test_prometheus_still_scrapes_across_the_network(self):
+        """If the scrape target were loopback, the localhost default would be
+        enough and the override unnecessary. It is not."""
+        scrape = (self.REPO / "infra/prometheus/prometheus.yml").read_text(encoding="utf-8")
+        self.assertIn("misterfritz:8000", scrape)
+        self.assertNotIn("127.0.0.1:8000", scrape)
+
+    def test_the_kubernetes_probes_still_use_the_metrics_port(self):
+        import yaml
+        for document in yaml.safe_load_all(
+                (self.REPO / "infra/k8s/deployment.yaml").read_text(encoding="utf-8")):
+            if not document or document.get("kind") != "Deployment":
+                continue
+            for container in document["spec"]["template"]["spec"]["containers"]:
+                for probe in ("livenessProbe", "readinessProbe"):
+                    with self.subTest(probe=probe):
+                        self.assertEqual(container[probe]["httpGet"]["port"], 8000)

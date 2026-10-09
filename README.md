@@ -262,6 +262,7 @@ All settings can be set as environment variables or in a `.env` file. See `.env.
 | `CHROMA_DB_PATH` | `./chroma_store` | ChromaDB persistence path |
 | `DOC_MAX_FILE_MB` | `100` | Largest file the watched folder will hand to a document parser. The parsers are the only place Fritz reads a format he did not write, and pypdf's advisory history is almost entirely malformed-input denial of service — so this bounds what an unknown document can make one allocate. An over-sized file is skipped and logged, and is **not** recorded as indexed, so shrinking it is enough to have it picked up. It does not stop a small crafted file from sending a parser into a loop. |
 | `AUTO_DOWNLOAD_NLTK` | unset (`unstructured` treats that as true) | Read by `unstructured`, not by Fritz. Importing its tokenizer downloads two nltk corpora, so ingesting one `.docx` reaches the network. The Docker image bakes the corpora and sets this to `false`. Set it `false` natively only if you already have `punkt_tab` and `averaged_perceptron_tagger_eng` — without them, ingesting a `.docx` or `.xlsx` raises `LookupError`. |
+| `METRICS_HOST` | `127.0.0.1` | Interface the metrics/health server binds. Both endpoints are unauthenticated, so the default keeps them off the network. The Docker image sets `0.0.0.0` — Prometheus and the Kubernetes probes cannot reach a loopback listener inside a container. |
 | `FFMPEG_PATH` | auto-detected | Override FFmpeg binary path |
 
 ---
@@ -371,12 +372,14 @@ CI runs on every push via GitHub Actions (see `.github/workflows/ci.yml`).
 
 ## Observability
 
-The bot exposes a metrics server on port `8000` (configurable via `METRICS_PORT`):
+The bot exposes a metrics server on port `8000` (configurable via `METRICS_PORT`), bound to `127.0.0.1`:
 
 | Endpoint | Description |
 |---|---|
 | `GET :8000/health` | JSON health snapshot (uptime, error rate, p99 latency) |
 | `GET :8000/metrics` | Prometheus text format |
+
+> Both endpoints are unauthenticated, which is why the listener binds localhost by default — it used to bind every interface with no way to change it. Nothing anybody wrote is in there, but it is a readable map of what the bot is doing and how often it fails. Set `METRICS_HOST` only where something off-host has to reach them; the Docker image already sets `0.0.0.0`, because Prometheus scrapes across the compose network and the Kubernetes probes reach `/health` on the pod IP, neither of which can see a listener inside the container's loopback.
 
 ### Available Prometheus metrics
 

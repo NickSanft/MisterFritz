@@ -78,6 +78,12 @@ RUN python -c "import nltk; \
     nltk.download('averaged_perceptron_tagger_eng', download_dir='/usr/local/share/nltk_data')"
 ENV AUTO_DOWNLOAD_NLTK=false
 
+# /metrics and /health are unauthenticated, so they bind localhost by default.
+# In a container they must not: Prometheus scrapes misterfritz:8000 across the
+# compose network, and the kubelet's liveness and readiness probes reach /health
+# on the pod IP. Here the container boundary is what limits reach.
+ENV METRICS_HOST=0.0.0.0
+
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 

@@ -212,17 +212,32 @@ class _MetricsHandler(BaseHTTPRequestHandler):
         pass
 
 
-def start_metrics_server(port: int | None = None) -> int:
+def start_metrics_server(port: int | None = None,
+                         host: str | None = None) -> int:
     """Start a background HTTP server for Prometheus scraping and health checks.
 
     Serves:
       GET /metrics  — Prometheus text format
       GET /health   — JSON health payload
 
+    Both are unauthenticated, and this used to bind 0.0.0.0 with no way to
+    change it: on a laptop or a home server that put the whole counter set and
+    the health snapshot on every interface, for anyone on the network. Nothing
+    anybody wrote is in there, but it is a readable map of what this bot is
+    doing and how often it fails, served to whoever asks.
+
+    So the default is localhost. A container sets METRICS_HOST=0.0.0.0, and has
+    to: Prometheus scrapes it across the compose network, and the kubelet's
+    liveness and readiness probes reach /health on the pod IP — neither can
+    see a listener bound inside the container's loopback. There the container
+    boundary is what limits reach, which is the thing a bare 0.0.0.0 on a
+    laptop does not have.
+
     Returns the port the server is listening on.
     """
     port = port or int(os.getenv("METRICS_PORT", "8000"))
-    server = HTTPServer(("0.0.0.0", port), _MetricsHandler)
+    host = host or os.getenv("METRICS_HOST", "127.0.0.1")
+    server = HTTPServer((host, port), _MetricsHandler)
 
     def _run() -> None:
         if _PROMETHEUS_AVAILABLE:
@@ -237,9 +252,9 @@ def start_metrics_server(port: int | None = None) -> int:
     t = threading.Thread(target=_run, name="metrics-server", daemon=True)
     t.start()
     logger.info(
-        "Metrics server started on port %d  "
+        "Metrics server started on %s:%d  "
         "(/metrics for Prometheus, /health for status)",
-        port,
+        host, port,
     )
     return port
 
