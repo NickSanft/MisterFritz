@@ -2115,3 +2115,128 @@ class TestCodeBlockLabelsStayAligned(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAnotherSiteCannotDriveThePanel(unittest.TestCase):
+    """Nothing stopped it. The destructive routes are plain POSTs with no
+    token, and the panel authenticates with HTTP Basic, which has no SameSite
+    attribute - once a browser has cached the credentials for
+    http://127.0.0.1:8001 it replays them on any request to that origin,
+    including one caused by a page on another port or another site.
+
+    Sec-Fetch-Site is what the guard reads, because a page cannot forge it:
+    browsers set it themselves and script cannot change it.
+    """
+
+    DESTRUCTIVE = (
+        ("/users/alice/forget", {}),
+        ("/users/alice/workspace/disable", {}),
+        ("/schedules/abc123/cancel", {}),
+        ("/documents/reindex", {"name": "notes.pdf"}),
+    )
+
+    def setUp(self):
+        self.client = _build_client(schedule_manager=MagicMock())
+
+    def _post(self, path, data=None, site=None, origin=None, host=None):
+        headers = dict(_auth_header())
+        if site is not None:
+            headers["Sec-Fetch-Site"] = site
+        if origin is not None:
+            headers["Origin"] = origin
+        if host is not None:
+            headers["Host"] = host
+        return self.client.post(path, data=data or {}, headers=headers,
+                                follow_redirects=False)
+
+    def test_a_cross_site_post_is_refused_on_every_destructive_route(self):
+        with patch.object(privacy, "forget_all", return_value={}) as forget, \
+                patch.object(privacy, "forget_workspace", return_value=True) as workspace:
+            for path, data in self.DESTRUCTIVE:
+                with self.subTest(path=path):
+                    response = self._post(path, data, site="cross-site")
+                    self.assertEqual(response.status_code, 403)
+            forget.assert_not_called()
+            workspace.assert_not_called()
+
+    def test_a_same_site_post_is_refused_too(self):
+        """The local case this is really for: on localhost a page served from
+        another port is same-SITE but a different origin."""
+        with patch.object(privacy, "forget_all", return_value={}) as forget:
+            response = self._post("/users/alice/forget", site="same-site")
+        self.assertEqual(response.status_code, 403)
+        forget.assert_not_called()
+
+    def test_the_panels_own_form_still_works(self):
+        with patch.object(privacy, "forget_all", return_value={}) as forget, \
+                patch.object(admin_panel, "audit_log"):
+            response = self._post("/users/alice/forget", site="same-origin")
+        self.assertEqual(response.status_code, 303)
+        forget.assert_called_once()
+
+    def test_a_typed_url_or_bookmark_still_works(self):
+        """Sec-Fetch-Site: none is a user-initiated request with no initiator
+        site, so there is no other site to be acting on behalf of."""
+        with patch.object(privacy, "forget_all", return_value={}) as forget, \
+                patch.object(admin_panel, "audit_log"):
+            response = self._post("/users/alice/forget", site="none")
+        self.assertEqual(response.status_code, 303)
+        forget.assert_called_once()
+
+    def test_reading_the_panel_from_anywhere_is_still_allowed(self):
+        """Only state-changing methods are gated; a cross-site GET cannot
+        change anything, and refusing it would break nothing useful."""
+        response = self.client.get("/users", headers={
+            **_auth_header(), "Sec-Fetch-Site": "cross-site"})
+        self.assertEqual(response.status_code, 200)
+
+    def test_a_scripted_client_with_the_password_is_still_allowed(self):
+        """Deliberate, not a gap: no browser omits Sec-Fetch-Site on a POST,
+        so a header-less request is curl or a script — the operator, who
+        already has the password."""
+        with patch.object(privacy, "forget_all", return_value={}) as forget, \
+                patch.object(admin_panel, "audit_log"):
+            response = self._post("/users/alice/forget")
+        self.assertEqual(response.status_code, 303)
+        forget.assert_called_once()
+
+    def test_an_older_browser_is_covered_by_the_origin_compare(self):
+        with patch.object(privacy, "forget_all", return_value={}) as forget:
+            response = self._post("/users/alice/forget",
+                                  origin="http://evil.example")
+        self.assertEqual(response.status_code, 403)
+        forget.assert_not_called()
+
+    def test_an_origin_matching_the_host_is_allowed(self):
+        with patch.object(privacy, "forget_all", return_value={}) as forget, \
+                patch.object(admin_panel, "audit_log"):
+            response = self._post("/users/alice/forget",
+                                  origin="http://testserver", host="testserver")
+        self.assertEqual(response.status_code, 303)
+        forget.assert_called_once()
+
+    def test_the_refusal_is_audited(self):
+        """An operator going back through the log should see that something
+        tried, and from where."""
+        with patch.object(admin_panel, "audit_log") as audit:
+            self._post("/users/alice/forget", site="cross-site")
+        audit.assert_called_once()
+        self.assertEqual(audit.call_args.args[0], "admin_cross_origin_refused")
+        self.assertIn("cross-site", audit.call_args.kwargs["detail"])
+
+    def test_authentication_is_still_checked_first(self):
+        """The guard sits INSIDE the auth middleware: a cross-origin POST with
+        no credentials must be told it is unauthenticated, not handed a verdict
+        about its origin."""
+        response = self.client.post("/users/alice/forget",
+                                    headers={"Sec-Fetch-Site": "cross-site"},
+                                    follow_redirects=False)
+        self.assertEqual(response.status_code, 401)
+
+    def test_the_chat_surface_is_gated_the_same_way(self):
+        """It has its own cookie identity and is exempt from the admin
+        password, which would make it the obvious way round this."""
+        response = self.client.post("/chat/forget",
+                                    headers={"Sec-Fetch-Site": "cross-site"},
+                                    follow_redirects=False)
+        self.assertEqual(response.status_code, 403)

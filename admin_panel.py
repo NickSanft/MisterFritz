@@ -29,7 +29,8 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from starlette.responses import (HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse,
+                                 Response, StreamingResponse)
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 from starlette.templating import Jinja2Templates
@@ -82,6 +83,66 @@ templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 
 # ── Auth ────────────────────────────────────────────────────────────────────
+
+class _SameOriginMiddleware(BaseHTTPMiddleware):
+    """Refuse a state-changing request that another site initiated.
+
+    Nothing stopped one. The destructive routes — forget a user, disable a
+    workspace, cancel a schedule, reindex, upload — are plain POSTs with no
+    token, and the admin surface authenticates with HTTP **Basic**, which has no
+    SameSite attribute to lean on. Once a browser has cached the credentials
+    for http://127.0.0.1:8001 it replays them on any request to that origin,
+    including one a page on some other port or site caused. A form on a page
+    the operator happened to be reading could delete somebody's data.
+
+    The check is Fetch metadata, which a page cannot forge: browsers set
+    Sec-Fetch-Site themselves and script has no way to change it.
+
+      same-origin  the panel's own forms, and the chat UI's POSTs. Allowed.
+      none         the operator typed it or used a bookmark. Allowed.
+      same-site    a DIFFERENT origin on the same site — on localhost that
+                   means another port, which is exactly the local attack this
+                   is for. Refused.
+      cross-site   refused.
+
+    A request with no Sec-Fetch-Site at all is allowed, and that is deliberate
+    rather than a gap: no browser omits it on a POST, so the header-less case
+    is curl, a script, or the test client — the operator themselves, already
+    holding the password. Where an Origin IS present without Fetch metadata it
+    is compared to the Host, so an older browser is still covered.
+    """
+
+    SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+    ALLOWED_SITES = frozenset({"same-origin", "none"})
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method in self.SAFE_METHODS:
+            return await call_next(request)
+
+        site = request.headers.get("sec-fetch-site")
+        if site is not None:
+            if site.lower() not in self.ALLOWED_SITES:
+                return self._refuse(request, f"Sec-Fetch-Site: {site}")
+            return await call_next(request)
+
+        origin = request.headers.get("origin")
+        if origin:
+            host = request.headers.get("host", "")
+            expected = {f"http://{host}", f"https://{host}"}
+            if origin not in expected:
+                return self._refuse(request, f"Origin: {origin}")
+        return await call_next(request)
+
+    @staticmethod
+    def _refuse(request: Request, why: str) -> Response:
+        audit_log("admin_cross_origin_refused", path=request.url.path,
+                  method=request.method, detail=why)
+        logger.warning("Refused a cross-origin %s to %s (%s)",
+                       request.method, request.url.path, why)
+        return PlainTextResponse(
+            "This request did not come from the panel itself, so it was not "
+            "carried out.", status_code=403)
+
 
 class _BasicAuthMiddleware(BaseHTTPMiddleware):
     """HTTP Basic auth keyed by ADMIN_PANEL_PASSWORD.
@@ -1265,6 +1326,10 @@ def create_app(password: str, schedule_manager=None, chat_password: str | None =
             # template, and the headers apply to auth failures too.
             Middleware(_SecurityHeadersMiddleware),
             Middleware(_BasicAuthMiddleware, password=password),
+            # INSIDE the auth check, deliberately. A refusal here is a
+            # statement about an authenticated request, and running it first
+            # would answer 403 to requests that have not proved who they are.
+            Middleware(_SameOriginMiddleware),
         ],
     )
     app.state.schedule_manager = schedule_manager
