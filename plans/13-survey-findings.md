@@ -146,6 +146,10 @@ Nothing serialises `ask_stuff` per thread. `thread_id_for` returns the bare iden
 
 Also here, for sequencing only: the queued **`file_tools` symlink hardening** — `os.path.normpath` collapses `..` textually without following links, so a symlink inside a workspace that points outside it passes containment at `file_tools.py:108-110`, `:506`, `:524`. It has its own chip.
 
+> **Closed.** Three commits. Two notes:
+>
+> - **C1 is not simply "bind localhost".** A container has to bind every interface, and for good reasons that are now asserted rather than assumed: Prometheus scrapes `misterfritz:8000` across the compose network, and the kubelet's liveness and readiness probes reach `/health` on the pod IP. So the default is `127.0.0.1` and the image sets `0.0.0.0`, with the reasoning beside the line that does it — otherwise it reads as an override for nothing and gets "fixed". Two tests fail if the scrape target becomes loopback or the probes stop using the metrics port, either of which would make the override unnecessary.
+> - **C3's `permissions: {}` only fits one of the two jobs.** The smoke test checks out code, so it gets `contents: read` rather than `{}` — `{}` would break it the day this repository is private. `canary-deploy` genuinely needs nothing from the repository: no checkout, no action, and it talks to the cluster with `KUBECONFIG_B64`. The job holding credentials is the one that can now do least. Pinning actions to commits also costs something, said out loud in each file: they no longer update themselves.
 ---
 
 ## Batch D — dependency moves with real advisory content
@@ -248,7 +252,7 @@ Recorded so they are not re-proposed. Each was killed because the mechanism was 
 |---|---|---|
 | A | 7 (A4 split in two) | **CLOSED** — `15ef73f` (A1), `f165683` (A2), `79421a4` (A3), `e169057` + `00e58d0` (A4a/b), `21eafcf` (A5), `09cc25f` (A6) |
 | B | 4 | **CLOSED** — `07d5e51` (B1), `deb89ed` (B2), `c18128b` (B3), `f944a5c` (B4) |
-| C | 3 (+ queued symlink chip) | not started |
+| C | 3 (+ queued symlink chip) | **CLOSED** — `9b528c0` (C1), `48ade51` (C2), `aa8492d` (C3). The symlink chip is still queued |
 | D | 3 | **CLOSED** — `c076d0f` (versions), `39d1fa7` (ingestion cap), `5eac578` (corpora) |
 | E | 3 | not started |
 | F | 1 | not started |
