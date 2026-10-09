@@ -12,14 +12,27 @@ on:
     - cron: "0 6 * * *"
   workflow_dispatch:
 
+# The default token for this repository is whatever the repository settings say,
+# and this workflow runs code from the pull request head: `pip install -e` runs
+# the PR's build backend and pytest imports its conftest. Neither needs to write
+# anything, so neither may.
+permissions:
+  contents: read
+
+# Actions are pinned to commit SHAs, with the version they were resolved from
+# in the comment. A tag like `v4` is a moving pointer: whoever controls the
+# action's repository can re-point it, and this workflow would run whatever it
+# pointed at next — with the token below, and in release.yml with credentials.
+# The cost is that these do not update themselves; bump them deliberately, or
+# let a dependency bot propose it.
 jobs:
   test:
     name: core + dev
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: "3.12"
           # Was absent, so every run re-downloaded the whole closure.
@@ -70,9 +83,9 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: "3.12"
           cache: pip
