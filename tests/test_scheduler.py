@@ -1,8 +1,9 @@
 import os
 import sqlite3
 import tempfile
+import sys
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -360,3 +361,235 @@ class TestAOneShotCanBeCancelledAndForgotten(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunTaskCase(unittest.IsolatedAsyncioTestCase):
+    """_run_task is what a schedule actually DOES, and almost none of it ran.
+
+    Its recovery paths are the ones that matter: a reminder booked months ago
+    fires into whatever the channel is now, which may be gone, or private, or
+    hand back something too long to post. Each of those used to be reasoned
+    about rather than executed.
+    """
+
+    def _manager(self):
+        import scheduler
+        manager = scheduler.ScheduleManager.__new__(scheduler.ScheduleManager)
+        manager.bot = MagicMock()
+        manager.scheduler = MagicMock()
+        return manager, scheduler
+
+    @staticmethod
+    def _channel():
+        channel = MagicMock()
+        status = MagicMock()
+        status.edit = AsyncMock()
+        channel.send = AsyncMock(return_value=status)
+        return channel, status
+
+    @staticmethod
+    def _discord_error(cls, status: int):
+        response = MagicMock()
+        response.status = status
+        return cls(response, {"code": 0, "message": "no"})
+
+    async def _run(self, manager, scheduler_module, *, answer="the reminder",
+                   raises=None):
+        ask = MagicMock(side_effect=raises) if raises else MagicMock(
+            return_value={"text": answer, "image_paths": []})
+        with patch.dict(sys.modules,
+                        {"mister_fritz": MagicMock(ask_stuff=ask)}):
+            with patch.object(scheduler_module.identity_store, "display_name",
+                              return_value="Nick"):
+                await manager._run_task("sid1", "discord-1", 4242, "stand up")
+        return ask
+
+
+class TestAReminderFiresIntoWhateverTheChannelIsNow(RunTaskCase):
+    async def test_a_channel_the_cache_has_lost_is_fetched(self):
+        """get_channel only sees what is cached, and a bot restarted since the
+        schedule was made has nothing cached."""
+        manager, module = self._manager()
+        channel, status = self._channel()
+        manager.bot.get_channel.return_value = None
+        manager.bot.fetch_channel = AsyncMock(return_value=channel)
+        await self._run(manager, module)
+        manager.bot.fetch_channel.assert_awaited_once_with(4242)
+        status.edit.assert_awaited_once()
+        self.assertIn("the reminder", status.edit.await_args.kwargs["content"])
+
+    async def test_a_deleted_channel_is_skipped_not_raised(self):
+        """An exception here would escape into APScheduler's job runner, which
+        logs it and moves on — so the reminder is lost either way, but the
+        skip says which channel in the log."""
+        import discord
+        manager, module = self._manager()
+        manager.bot.get_channel.return_value = None
+        manager.bot.fetch_channel = AsyncMock(
+            side_effect=self._discord_error(discord.NotFound, 404))
+        with self.assertLogs("scheduler", level="WARNING") as caught:
+            ask = await self._run(manager, module)
+        ask.assert_not_called()
+        self.assertIn("4242", "; ".join(caught.output))
+
+    async def test_a_channel_it_may_no_longer_read_is_skipped(self):
+        import discord
+        manager, module = self._manager()
+        manager.bot.get_channel.return_value = None
+        manager.bot.fetch_channel = AsyncMock(
+            side_effect=self._discord_error(discord.Forbidden, 403))
+        with self.assertLogs("scheduler", level="WARNING"):
+            ask = await self._run(manager, module)
+        ask.assert_not_called()
+
+    async def test_a_turn_that_fails_is_reported_in_the_channel(self):
+        """Rather than vanishing: somebody asked to be reminded, and silence
+        is indistinguishable from the reminder never having been set."""
+        manager, module = self._manager()
+        channel, status = self._channel()
+        manager.bot.get_channel.return_value = channel
+        with self.assertLogs("scheduler", level="ERROR"):
+            await self._run(manager, module, raises=RuntimeError("ollama is down"))
+        said = status.edit.await_args.kwargs["content"]
+        self.assertIn("failed", said)
+        self.assertIn("ollama is down", said)
+
+    async def test_an_empty_answer_still_posts_something(self):
+        manager, module = self._manager()
+        channel, status = self._channel()
+        manager.bot.get_channel.return_value = channel
+        await self._run(manager, module, answer="")
+        self.assertIn("No response generated",
+                      status.edit.await_args.kwargs["content"])
+
+    async def test_a_long_answer_is_chunked_across_follow_up_sends(self):
+        """Discord refuses anything over 2000 characters, and the placeholder
+        can only hold the first chunk."""
+        manager, module = self._manager()
+        channel, status = self._channel()
+        manager.bot.get_channel.return_value = channel
+        await self._run(manager, module, answer="y" * 4500)
+        first = status.edit.await_args.kwargs["content"]
+        self.assertEqual(len(first), 2000)
+        # The placeholder send is call one; the rest are the extra chunks.
+        extra = [c.args[0] for c in channel.send.await_args_list[1:]]
+        self.assertEqual(len(first) + sum(len(c) for c in extra), 4500)
+
+
+class TestRemovalSurvivesAJobThatIsAlreadyGone(unittest.TestCase):
+    """The schedules table and APScheduler's job store can disagree — a
+    restart that failed partway, or a job already fired. Removal has to be
+    about the row, with the job detached best-effort."""
+
+    def setUp(self):
+        fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.manager, self.sched_mod = _make_manager(self.db_path)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.unlink(self.db_path + suffix)
+            except OSError:
+                pass
+
+    def test_remove_schedule_still_reports_the_row_it_deleted(self):
+        sid = self.manager.add_schedule("discord-1", 111, 4242, "ping", "30m")
+        self.manager.scheduler.remove_job.side_effect = Exception("no such job")
+        self.assertTrue(self.manager.remove_schedule(sid, "discord-1"))
+        self.assertEqual(self.manager.list_schedules("discord-1"), [])
+
+    def test_remove_all_still_counts_the_rows_it_deleted(self):
+        self.manager.add_schedule("discord-1", 111, 4242, "a", "30m")
+        self.manager.add_schedule("discord-1", 111, 4242, "b", "30m")
+        self.manager.scheduler.remove_job.side_effect = Exception("no such job")
+        self.manager.scheduler.get_jobs.return_value = []
+        self.assertEqual(self.manager.remove_all_for_user("discord-1"), 2)
+
+    def test_a_one_shot_that_vanishes_mid_sweep_is_not_counted(self):
+        """The count is what /forget reports, so it must not include a job the
+        store refused to remove."""
+        job = MagicMock()
+        job.id = "oneshot1"
+        job.args = ["oneshot1", "discord-1", 4242, "later"]
+        self.manager.scheduler.get_jobs.return_value = [job]
+        self.manager.scheduler.remove_job.side_effect = Exception("gone")
+        self.assertEqual(self.manager.remove_all_for_user("discord-1"), 0)
+
+    def test_a_delay_under_the_minimum_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            self.manager.schedule_once(4242, "discord-1", 0, "now please")
+        self.assertIn("at least", str(caught.exception))
+
+
+class TestTheInternalUpkeepJob(unittest.TestCase):
+    """The WAL checkpoint and stop() had never run. The checkpoint is the thing
+    keeping fritz.db's write-ahead log from growing into hundreds of MB."""
+
+    def setUp(self):
+        fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.manager, self.sched_mod = _make_manager(self.db_path)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.unlink(self.db_path + suffix)
+            except OSError:
+                pass
+
+    def _wal_size(self) -> int:
+        path = self.db_path + "-wal"
+        return os.path.getsize(path) if os.path.exists(path) else 0
+
+    def test_the_checkpoint_truncates_the_write_ahead_log(self):
+        """Asserted on the file, not on the log line. The whole point of this
+        job is that the WAL stops growing: under WAL mode with heavy writes it
+        reaches hundreds of MB before SQLite checkpoints on its own, and a log
+        line saying "complete" is equally available to a PRAGMA that truncates
+        nothing.
+
+        The writer connection stays open, because the WAL is what a closed
+        connection has already checkpointed away.
+        """
+        writer = sqlite3.connect(self.db_path)
+        self.addCleanup(writer.close)
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("CREATE TABLE IF NOT EXISTS t (x TEXT)")
+        writer.executemany("INSERT INTO t VALUES (?)", [("y" * 400,)] * 2000)
+        writer.commit()
+        self.assertGreater(self._wal_size(), 100_000,
+                           "no write-ahead log to checkpoint")
+
+        with self.assertLogs("scheduler", level="INFO") as caught:
+            self.manager._wal_checkpoint()
+
+        self.assertEqual(self._wal_size(), 0,
+                         "the write-ahead log was not truncated")
+        self.assertIn("WAL checkpoint", "; ".join(caught.output))
+
+    def test_a_checkpoint_failure_is_logged_not_raised(self):
+        """It runs from inside APScheduler; raising would only land in its job
+        log, and the next run would try again anyway."""
+        with patch.object(self.sched_mod.sqlite3, "connect",
+                          side_effect=RuntimeError("disk gone")):
+            with self.assertLogs("scheduler", level="WARNING") as caught:
+                self.manager._wal_checkpoint()      # must not raise
+        self.assertIn("disk gone", "; ".join(caught.output))
+
+    def test_a_scheduler_that_refuses_the_upkeep_job_still_starts(self):
+        """The checkpoint is upkeep. Failing to register it must not stop the
+        schedules themselves from being restored."""
+        self.manager.scheduler.add_job.side_effect = [
+            Exception("refused"), None]
+        with self.assertLogs("scheduler", level="WARNING"):
+            self.manager.start()
+        self.manager.scheduler.start.assert_called_once()
+
+    def test_stop_shuts_the_scheduler_down_without_waiting(self):
+        """Called when on_ready replaces a manager. Waiting would block the
+        event loop on whatever job happened to be running."""
+        self.manager.stop()
+        self.manager.scheduler.shutdown.assert_called_once_with(wait=False)
