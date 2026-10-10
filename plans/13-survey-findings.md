@@ -185,6 +185,14 @@ Also here, for sequencing only: the queued **`file_tools` symlink hardening** �
 
 **Note:** E1 and E2 are not coverage theatre — each covers a path a user's data actually travels. Do them after batch A so they test the fixed behaviour, not the broken behaviour.
 
+> **Closed.** `storage.py` 69% → 100%, `scheduler.py` 87% → 100%, `observability.py` 80% → 99%. Three things worth keeping:
+>
+> - **E1 caught the failure mode it exists to prevent, in its own first draft.** The round-trip test patched only `storage.get_default_chroma_store`, and `agent_tools` binds that name at module scope — so the test passed while both halves quietly used the real singleton. Both bindings are redirected now, and each production-path test asserts the write landed in the temp store before going on. The invariant that needed real storage is the one a mock agrees with unconditionally: `put` writes the `namespace` field that `search`, `delete_namespace` and `export_namespace` all filter on, and those two sides agreeing is exactly what failed once before (see privacy.py's module docstring).
+> - **Two tests were too weak until a mutation said so.** The WAL checkpoint test asserted a log line that a PRAGMA truncating nothing also produces; it now holds a writer connection open and asserts the write-ahead log goes from ~927KB to zero. Measured before asserting.
+> - **One branch is deliberately left off the report.** `observability.py`'s `except ImportError` for a missing prometheus_client cannot run in-process, and reloading the module to force it would hand every other module a different `METRICS` object than the one it imported. It is asserted in a subprocess instead.
+>
+> `pytest-cov` was installed into the venv for this batch. It is a declared dev dependency (`pyproject`'s `[dev]` extra) that the local venv was missing, and CI already gates on `--cov-fail-under=60`.
+
 ---
 
 ## Batch F — CI never builds or boots the image
@@ -254,7 +262,7 @@ Recorded so they are not re-proposed. Each was killed because the mechanism was 
 | B | 4 | **CLOSED** — `07d5e51` (B1), `deb89ed` (B2), `c18128b` (B3), `f944a5c` (B4) |
 | C | 3 (+ queued symlink chip) | **CLOSED** — `9b528c0` (C1), `48ade51` (C2), `aa8492d` (C3). The symlink chip is still queued |
 | D | 3 | **CLOSED** — `c076d0f` (versions), `39d1fa7` (ingestion cap), `5eac578` (corpora) |
-| E | 3 | not started |
+| E | 3 | **CLOSED** — `eac8f13` (E1), `4073378` (E2), `36d8a91` (E3) |
 | F | 1 | not started |
 | G | 2 | not started |
 | Decisions | 4 | awaiting answers in [DECISIONS.md](DECISIONS.md) |
