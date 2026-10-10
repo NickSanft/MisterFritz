@@ -1,10 +1,13 @@
 import json
+import logging
 import os
+import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import observability
 from observability import (
@@ -399,3 +402,290 @@ class TestTheContainerOpensItDeliberately(unittest.TestCase):
                 for probe in ("livenessProbe", "readinessProbe"):
                     with self.subTest(probe=probe):
                         self.assertEqual(container[probe]["httpGet"]["port"], 8000)
+
+
+class TestTheEndpointsAnOperatorActuallyHits(unittest.TestCase):
+    """_MetricsHandler had never served a request. README documents both
+    endpoints, Prometheus scrapes one and the Kubernetes probes hit the other,
+    and nothing had ever asked either of them for anything.
+
+    A real HTTPServer on port 0 in a thread, shut down afterwards: the handler
+    is HTTP machinery, and asserting against a fake request object would be
+    asserting against my own idea of one.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        cls.server = http.server.HTTPServer(("127.0.0.1", 0), observability._MetricsHandler)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+
+    def _get(self, path: str):
+        import urllib.request
+        import urllib.error
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{self.port}{path}", timeout=5) as response:
+                return response.status, response.headers, response.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers, e.read()
+
+    def test_health_answers_with_the_snapshot_the_probes_read(self):
+        status, headers, body = self._get("/health")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "application/json")
+        payload = json.loads(body)
+        self.assertEqual(payload["status"], "ok")
+        for key in ("uptime_sec", "discord_messages", "total_errors"):
+            self.assertIn(key, payload)
+
+    def test_healthz_is_the_same_endpoint(self):
+        """Kubernetes conventions vary and the manifests could use either."""
+        self.assertEqual(self._get("/healthz")[0], 200)
+
+    def test_health_counts_the_errors_it_has_been_told_about(self):
+        before = json.loads(self._get("/health")[2])["total_errors"]
+        observability.METRICS.record_error("e3_probe", RuntimeError("boom"))
+        after = json.loads(self._get("/health")[2])["total_errors"]
+        self.assertEqual(after, before + 1)
+
+    def test_metrics_answers_in_the_format_prometheus_parses(self):
+        status, headers, body = self._get("/metrics")
+        self.assertEqual(status, 200)
+        self.assertIn("text/plain", headers["Content-Type"])
+        self.assertIn(b"misterfritz", body)
+
+    def test_metrics_says_so_rather_than_lying_when_prometheus_is_absent(self):
+        """A 200 with an empty body would read to a scrape as "no metrics",
+        which is indistinguishable from a healthy, idle bot."""
+        with patch.object(observability, "_PROMETHEUS_AVAILABLE", False):
+            status, _headers, body = self._get("/metrics")
+        self.assertEqual(status, 503)
+        self.assertIn(b"prometheus_client not installed", body)
+
+    def test_anything_else_is_a_404(self):
+        status, _headers, body = self._get("/../secrets")
+        self.assertEqual(status, 404)
+        self.assertEqual(body, b"not found")
+
+    def test_the_content_length_matches_the_body(self):
+        """_respond sets it by hand, and a wrong one makes a client hang
+        waiting for bytes that never arrive."""
+        for path in ("/health", "/metrics"):
+            with self.subTest(path=path):
+                _status, headers, body = self._get(path)
+                self.assertEqual(int(headers["Content-Length"]), len(body))
+
+    def test_requests_are_not_written_to_the_access_log(self):
+        """log_message is overridden to silence BaseHTTPRequestHandler, which
+        otherwise writes a line to stderr per scrape — every fifteen seconds,
+        forever."""
+        import io
+        import contextlib
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self._get("/health")
+        self.assertEqual(stderr.getvalue(), "")
+
+
+class TestTheServerThreadIsStarted(unittest.TestCase):
+    """start_metrics_server's own body: the serving thread, and the side thread
+    that keeps the uptime gauge current. Both are closures, so the targets are
+    taken from where production hands them to Thread()."""
+
+    class _FakeThread:
+        """Runs the server thread inline and records the rest."""
+
+        made = []
+
+        def __init__(self, target=None, name=None, daemon=None):
+            self.target, self.name = target, name
+            type(self).made.append(self)
+
+        def start(self):
+            if self.name == "metrics-server":
+                self.target()
+
+    def setUp(self):
+        self._FakeThread.made = []
+        self.server = MagicMock()
+        patcher = patch.object(observability, "HTTPServer", return_value=self.server)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = patch.object(observability.threading, "Thread", self._FakeThread)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_server_is_told_to_serve(self):
+        observability.start_metrics_server(host="127.0.0.1", port=8321)
+        self.server.serve_forever.assert_called_once()
+
+    def test_the_serving_thread_is_a_daemon_named_for_itself(self):
+        """A non-daemon thread here would keep the process alive after the bot
+        has stopped."""
+        observability.start_metrics_server(host="127.0.0.1", port=8321)
+        names = [t.name for t in self._FakeThread.made]
+        self.assertIn("metrics-server", names)
+
+    def test_the_uptime_gauge_is_kept_current(self):
+        """The gauge is a snapshot, so without this side thread it reports the
+        uptime at the moment the server started, forever."""
+        observability.start_metrics_server(host="127.0.0.1", port=8321)
+        updaters = [t for t in self._FakeThread.made if t.name != "metrics-server"]
+        self.assertTrue(updaters, "no uptime updater was started")
+
+        # Run one iteration of the updater's loop, taking the target from where
+        # start_metrics_server handed it over, and break out of the `while
+        # True` the way nothing in production does.
+        class _Stop(Exception):
+            pass
+
+        with patch.object(observability, "_PROM_UPTIME") as gauge:
+            with patch.object(observability.time, "sleep", side_effect=_Stop):
+                with self.assertRaises(_Stop):
+                    updaters[0].target()
+        gauge.set.assert_called_once()
+        self.assertGreaterEqual(gauge.set.call_args.args[0], 0)
+
+    def test_no_uptime_thread_without_prometheus(self):
+        with patch.object(observability, "_PROMETHEUS_AVAILABLE", False):
+            observability.start_metrics_server(host="127.0.0.1", port=8321)
+        self.assertEqual([t.name for t in self._FakeThread.made], ["metrics-server"])
+
+
+class TestItDegradesWithoutPrometheus(unittest.TestCase):
+    """prometheus-client is a core dependency, so this branch cannot run in
+    this process - and reloading observability to force it would hand every
+    other module a different METRICS object than the one it imported. A
+    subprocess instead, which means the two lines stay off the coverage report
+    while the property they carry is still asserted.
+    """
+
+    def test_the_module_still_imports_and_says_so(self):
+        import subprocess
+        program = (
+            "import sys; sys.modules['prometheus_client'] = None; "
+            "import observability; "
+            "print(observability._PROMETHEUS_AVAILABLE)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", program],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        self.assertEqual(result.stdout.strip().splitlines()[-1], "False")
+
+
+class TestTheJsonLogFormat(unittest.TestCase):
+    """LOG_FORMAT=json is what the container runs on, and the formatter had
+    never formatted anything. A broken one is not a cosmetic problem: it is a
+    log pipeline that drops or mangles every line it is given."""
+
+    def _record(self, **kwargs):
+        return logging.LogRecord(
+            name=kwargs.get("name", "fritz.test"),
+            level=kwargs.get("level", logging.INFO),
+            pathname=__file__, lineno=1,
+            msg=kwargs.get("msg", "hello %s"), args=kwargs.get("args", ("world",)),
+            exc_info=kwargs.get("exc_info"),
+        )
+
+    def test_a_record_is_one_line_of_json(self):
+        formatted = observability._JsonFormatter().format(self._record())
+        self.assertNotIn(chr(10), formatted)
+        payload = json.loads(formatted)
+        self.assertEqual(payload["level"], "INFO")
+        self.assertEqual(payload["logger"], "fritz.test")
+        self.assertEqual(payload["msg"], "hello world")
+        self.assertIn("ts", payload)
+
+    def test_the_message_is_interpolated_not_left_as_a_template(self):
+        """%-style args are the whole house style of this codebase's logging."""
+        payload = json.loads(observability._JsonFormatter().format(
+            self._record(msg="removed %d rows for %s", args=(3, "discord-1"))))
+        self.assertEqual(payload["msg"], "removed 3 rows for discord-1")
+
+    def test_a_traceback_travels_with_the_record(self):
+        try:
+            raise ValueError("the actual cause")
+        except ValueError:
+            record = self._record(exc_info=sys.exc_info(), level=logging.ERROR)
+        payload = json.loads(observability._JsonFormatter().format(record))
+        self.assertIn("the actual cause", payload["exc"])
+        self.assertIn("ValueError", payload["exc"])
+
+    def test_stack_info_travels_too(self):
+        record = self._record()
+        record.stack_info = "Stack (most recent call last):\n  fake frame"
+        payload = json.loads(observability._JsonFormatter().format(record))
+        self.assertIn("fake frame", payload["stack"])
+
+
+class TestLoggingIsInitialisedOnce(unittest.TestCase):
+    """init_logging touches the ROOT logger, so each test here puts it back."""
+
+    def setUp(self):
+        root = logging.getLogger()
+        self.saved = (root.handlers[:], root.level)
+        self.addCleanup(self._restore)
+        root.handlers = []
+
+    def _restore(self):
+        root = logging.getLogger()
+        root.handlers, root.level = self.saved
+
+    def test_json_format_installs_the_json_formatter(self):
+        with patch.dict(os.environ, {"LOG_FORMAT": "json"}):
+            observability.init_logging()
+        [handler] = logging.getLogger().handlers
+        self.assertIsInstance(handler.formatter, observability._JsonFormatter)
+
+    def test_the_default_is_the_human_readable_format(self):
+        with patch.dict(os.environ, {"LOG_FORMAT": ""}):
+            observability.init_logging()
+        [handler] = logging.getLogger().handlers
+        self.assertNotIsInstance(handler.formatter, observability._JsonFormatter)
+
+    def test_the_level_comes_from_the_environment(self):
+        with patch.dict(os.environ, {"LOG_LEVEL": "DEBUG"}):
+            observability.init_logging()
+        self.assertEqual(logging.getLogger().level, logging.DEBUG)
+
+    def test_a_nonsense_level_falls_back_to_info(self):
+        with patch.dict(os.environ, {"LOG_LEVEL": "LOUD"}):
+            observability.init_logging()
+        self.assertEqual(logging.getLogger().level, logging.INFO)
+
+    def test_calling_it_again_does_not_double_every_line(self):
+        """Every module calls it, so without the guard one log line would be
+        emitted once per import that got there first."""
+        observability.init_logging()
+        observability.init_logging()
+        self.assertEqual(len(logging.getLogger().handlers), 1)
+
+
+class TestAnAuditLineThatCannotBeEncoded(unittest.TestCase):
+    """audit_log is the record /forget and /export leave behind, and it is
+    best-effort by design: it must never raise into a deletion that already
+    happened."""
+
+    def test_an_unencodable_field_is_logged_and_dropped(self):
+        circular: dict = {}
+        circular["self"] = circular
+        with self.assertLogs("observability", level="WARNING") as caught:
+            observability.audit_log("forget", user_id="discord-1", detail=circular)
+        self.assertIn("audit_log JSON encode failed", "; ".join(caught.output))
+
+    def test_it_does_not_raise(self):
+        circular: dict = {}
+        circular["self"] = circular
+        observability.audit_log("forget", detail=circular)      # must not raise
