@@ -257,8 +257,12 @@ TTS_MAX_CONCURRENCY: int = _at_least_one("TTS_MAX_CONCURRENCY", "1")
 # plan calls that a ship blocker. Setting RELAY_ENABLED=true early is possible
 # and deliberate; it is not the default.
 RELAY_ENABLED: bool = os.environ.get("RELAY_ENABLED", "false").lower() in ("1", "true", "yes")
-# Phase 2. Ships FALSE so the agent tool can land in the tree, under test,
-# while the model provably cannot DM anyone until an operator flips it.
+# Reserved for the phase 2 agent tool ("tell Alice I'll be late", with the
+# model choosing the wording). That tool is NOT BUILT: nothing in the tree
+# reads this value except validate_config below, which warns that setting it
+# does nothing. The name is kept so the switch exists before the capability
+# does — flipping it must never be what introduces the ability for a model to
+# DM somebody.
 RELAY_AGENT_TOOL_ENABLED: bool = os.environ.get("RELAY_AGENT_TOOL_ENABLED", "false").lower() in ("1", "true", "yes")
 RELAY_MAX_BODY_CHARS: int = _at_least_one("RELAY_MAX_BODY_CHARS", "1000")
 RELAY_MAX_PER_SENDER_PER_HOUR: int = _at_least_one("RELAY_MAX_PER_SENDER_PER_HOUR", "10")
@@ -811,14 +815,20 @@ def validate_config() -> None:
             "the relay, set RELAY_ENABLED=false.", knob, requested,
         )
 
-    # The agent tool is gated twice on purpose, so flipping the Phase 2 knob
-    # can't quietly hand the model a DM channel. Turning it on while the
-    # master switch is off is a no-op that looks like it worked.
-    if RELAY_AGENT_TOOL_ENABLED and not RELAY_ENABLED:
+    # The knob exists; the tool it was reserved for does not. It used to warn
+    # only when the master switch was ALSO off, which meant the one
+    # configuration that looks like it works — both set to true — was
+    # accepted in silence, while .env.example advertised the feature. An
+    # operator who set it deliberately deserves to be told that nothing
+    # happened.
+    if RELAY_AGENT_TOOL_ENABLED:
         logging.getLogger(__name__).warning(
-            "RELAY_AGENT_TOOL_ENABLED=true has no effect while "
-            "RELAY_ENABLED=false — the relay is off, so the agent tool is "
-            "not registered. Set RELAY_ENABLED=true to use it."
+            "RELAY_AGENT_TOOL_ENABLED=true does nothing: the agent-facing "
+            "relay tool is not built, and no code reads this setting. It is "
+            "reserved so the switch exists before the capability does. "
+            "Nothing is registered, and the model cannot send a direct "
+            "message%s.",
+            "" if RELAY_ENABLED else " (the relay itself is off as well)",
         )
 
     # purge_expired keeps a relay past retention while it can still be

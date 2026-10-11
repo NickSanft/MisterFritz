@@ -336,14 +336,17 @@ class TestConcurrencyKnobsCannotDeadlock(unittest.TestCase):
                         if ln.startswith(name + ":"))
             self.assertIn("_at_least_one", line, name)
 
-    def test_validate_config_warns_when_agent_tool_on_but_relay_off(self):
+    def test_validate_config_warns_when_the_agent_tool_knob_is_set(self):
         with patch.object(fu, "DISCORD_BOT_TOKEN", "x"),              patch.object(fu, "ROOT_USER", "discord-1"),              patch.object(fu, "_CLAMPED_KNOBS", []),              patch.object(fu, "RELAY_ENABLED", False),              patch.object(fu, "RELAY_AGENT_TOOL_ENABLED", True):
             with self.assertLogs("fritz_utils", level="WARNING") as logs:
                 fu.validate_config()
         self.assertTrue(any("RELAY_AGENT_TOOL_ENABLED" in m for m in logs.output))
 
     def test_validate_config_quiet_when_relay_knobs_are_coherent(self):
-        for enabled, tool in ((True, True), (True, False), (False, False)):
+        # (True, True) is deliberately NOT here any more. It is the one
+        # combination that reads as "the agent tool is on", and the tool does
+        # not exist, so it warns — see the class below.
+        for enabled, tool in ((True, False), (False, False)):
             with self.subTest(relay=enabled, tool=tool):
                 with patch.object(fu, "DISCORD_BOT_TOKEN", "x"),                      patch.object(fu, "ROOT_USER", "discord-1"),                      patch.object(fu, "ADMIN_USERS", frozenset()),                      patch.object(fu, "_CLAMPED_KNOBS", []),                      patch.object(fu, "RELAY_ENABLED", enabled),                      patch.object(fu, "RELAY_AGENT_TOOL_ENABLED", tool):
                     with self.assertNoLogs("fritz_utils", level="WARNING"):
@@ -356,3 +359,76 @@ class TestConcurrencyKnobsCannotDeadlock(unittest.TestCase):
             with self.assertLogs("fritz_utils", level="WARNING") as logs:
                 fu.validate_config()
         self.assertTrue(any("IMAGE_GEN_MAX_CONCURRENCY" in m for m in logs.output))
+
+
+class TestAKnobThatGatesNothingSaysSo(unittest.TestCase):
+    """RELAY_AGENT_TOOL_ENABLED is reserved for an agent-facing relay tool that
+    is not built. Nothing reads it except validate_config.
+
+    It used to warn only when RELAY_ENABLED was ALSO false, which meant the one
+    configuration that looks like it works — both set to true — was
+    accepted in silence, while .env.example described the feature as shipping
+    and merely off. An operator who set it deliberately got no sign that
+    nothing had happened.
+    """
+
+    def _validate(self, relay: bool, tool: bool):
+        with patch.object(fu, "DISCORD_BOT_TOKEN", "x"), \
+             patch.object(fu, "ROOT_USER", "discord-1"), \
+             patch.object(fu, "ADMIN_USERS", frozenset()), \
+             patch.object(fu, "_CLAMPED_KNOBS", []), \
+             patch.object(fu, "RELAY_ENABLED", relay), \
+             patch.object(fu, "RELAY_AGENT_TOOL_ENABLED", tool):
+            with self.assertLogs("fritz_utils", level="WARNING") as logs:
+                fu.validate_config()
+        return "; ".join(logs.output)
+
+    def test_it_warns_even_when_the_relay_itself_is_on(self):
+        """The case that used to pass in silence."""
+        said = self._validate(relay=True, tool=True)
+        self.assertIn("RELAY_AGENT_TOOL_ENABLED", said)
+        self.assertIn("does nothing", said)
+
+    def test_it_still_warns_when_the_relay_is_off(self):
+        said = self._validate(relay=False, tool=True)
+        self.assertIn("RELAY_AGENT_TOOL_ENABLED", said)
+
+    def test_it_mentions_the_relay_being_off_only_when_it_is(self):
+        """Two different situations, and an operator debugging one should not
+        be told about the other."""
+        self.assertIn("relay itself is off", self._validate(relay=False, tool=True))
+        self.assertNotIn("relay itself is off", self._validate(relay=True, tool=True))
+
+    def test_the_warning_says_the_tool_does_not_exist(self):
+        """Rather than only that the setting had no effect, which reads as a
+        configuration mistake the operator could fix."""
+        said = self._validate(relay=True, tool=True)
+        for claim in ("not built", "reserved"):
+            with self.subTest(claim=claim):
+                self.assertIn(claim, said)
+
+    def test_nothing_in_the_tree_reads_the_knob_except_this_check(self):
+        """The warning's central claim. If a module starts reading it, the
+        warning becomes the lie instead."""
+        import pathlib
+        repo = pathlib.Path(__file__).resolve().parents[1]
+        readers = []
+        for path in sorted(repo.glob("*.py")):
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if "RELAY_AGENT_TOOL_ENABLED" not in line or line.strip().startswith("#"):
+                    continue
+                readers.append(f"{path.name}:{number}")
+        self.assertEqual(
+            [r.split(":")[0] for r in readers], ["fritz_utils.py"] * len(readers),
+            f"something outside fritz_utils reads the knob: {readers}. The "
+            "startup warning says nothing does, so either it is wrong or the "
+            "tool has landed and the warning should go.")
+
+    def test_env_example_no_longer_advertises_it_as_shipping(self):
+        import pathlib
+        env = (pathlib.Path(__file__).resolve().parents[1] / ".env.example"
+               ).read_text(encoding="utf-8")
+        section = env[env.index("RELAY_AGENT_TOOL_ENABLED") - 600:
+                      env.index("RELAY_AGENT_TOOL_ENABLED")]
+        self.assertIn("does nothing today", section)
+        self.assertNotIn("Ships off; turn on only", section)
