@@ -212,6 +212,40 @@ Also here, for sequencing only: the queued **`file_tools` symlink hardening** �
 | G1 | `README.md:7-22`, `:26-44`, `:221-245` | The relay shipped in six PRs and is **invisible** in every document a user or operator would read: zero occurrences of "relay" or "/tell" in the README — not in Features, not in the slash-command table (which does list `/forget` and `/export`), and not one row for any of the seven `RELAY_*` knobs, including `RELAY_ENABLED`, which defaults to false. The Tunables table is 41 rows short overall. |
 | G2 | `fritz_utils.py:242`, `:797-801`, `.env.example:111-112` | `RELAY_AGENT_TOOL_ENABLED` gates nothing: plan 12's PRs 8-9 are unbuilt, and the knob's only consumer warns solely when it is true *and* `RELAY_ENABLED` is false. So `true`+`true` is accepted silently and does nothing, while `.env.example` advertises it as a working feature. Either build phase 2 or make the knob say it is inert — the ten-line version is the warning plus a comment clause. |
 
+> **Closed.** `abbab8c` (G1), `5b6cf37` (G2).
+>
+> - **G1's count was wrong, and re-deriving it mattered.** The survey said the
+>   configuration table was 41 rows short; it was 49 of 77. `.env.example`,
+>   which I had previously measured as complete, was missing four — `LOG_LEVEL`,
+>   `LOG_FORMAT`, `METRICS_PORT` and `CHROMA_PATH`. My first audit could not see
+>   them because it scanned for the helper names the audit itself knew about. The
+>   rule in `tests/test_docs_match_the_code.py` is blunter on purpose: any
+>   SCREAMING_CASE string in a call's first argument position, four false
+>   positives listed with reasons.
+>
+> - **Three of G1's relay assertions passed with the section deleted.**
+>   `index("## Direct-message relay")` also matched inside the
+>   `### Direct-message relay` sub-heading of the configuration table, so the
+>   slice began at the table and ran 10,477 characters through Identity. The
+>   tests slice on line-exact headings now and the sub-table is renamed
+>   `### Relay settings`. Found by mutating the section away and watching the
+>   tests hold — which is the whole argument for doing that before committing.
+>
+> - **G2 chose "say it is inert" over building phase 2.** The item offered
+>   either. Building an agent-facing DM tool is a capability decision, not a
+>   documentation fix, and it does not belong in a batch about documents. What
+>   shipped is the warning firing whenever the knob is set — it previously
+>   needed `RELAY_ENABLED` to be false as well, so `true`+`true`, the one
+>   configuration that reads as working, was accepted in silence. The knob's
+>   name is kept so the switch exists before the capability does.
+>
+> - **The warning's central claim is now a test.** It says no code reads the
+>   setting, so `test_nothing_in_the_tree_reads_the_knob_except_this_check` greps
+>   every top-level module. The day phase 2 lands, that test fails and asks for
+>   the warning to go — rather than the warning quietly becoming the lie.
+>
+> 21 mutations RED across the two commits.
+
 ---
 
 ## Needs a decision before it can be planned
@@ -264,5 +298,5 @@ Recorded so they are not re-proposed. Each was killed because the mechanism was 
 | D | 3 | **CLOSED** — `c076d0f` (versions), `39d1fa7` (ingestion cap), `5eac578` (corpora) |
 | E | 3 | **CLOSED** — `eac8f13` (E1), `4073378` (E2), `36d8a91` (E3) |
 | F | 1 | not started |
-| G | 2 | not started |
+| G | 2 | **CLOSED** — `abbab8c` (G1), `5b6cf37` (G2) |
 | Decisions | 4 | awaiting answers in [DECISIONS.md](DECISIONS.md) |
