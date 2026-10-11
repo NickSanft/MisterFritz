@@ -16,6 +16,8 @@ Mister Fritz is an AI-powered Discord bot with a sophisticated, sardonic persona
 | Voice Synthesis | Text-to-speech via Coqui XTTS v2 (plays in voice channel or uploads as file) |
 | Vision Analysis | Analyze user-attached images via LLaVA |
 | File Operations | Sandboxed file read/write/edit/search/execute for the configured root user |
+| Scheduled tasks | Recurring prompts and one-shot reminders via `/schedule`, delivered in the channel they were set in |
+| Direct-message relay | `/tell @user` carries your exact words to another member by DM, attributed to you; they can reply through Fritz, or refuse with `/relay block`. Off by default — see [Direct-message relay](#direct-message-relay) |
 | Card Game | Built-in deck system with success/failure mechanics for tabletop-style play |
 | Observability | Prometheus metrics on `:8000/metrics`, health on `:8000/health`, pre-built Grafana dashboard |
 | Canary deployment | Argo Rollouts canary steps with Prometheus-based promotion gates |
@@ -42,9 +44,17 @@ Mister Fritz is an AI-powered Discord bot with a sophisticated, sardonic persona
 | `/workspace set <path>` | (Admin only) Register an arbitrary host path as your workspace |
 | `/forget memories` / `conversation` / `schedules` / `all` | Delete stored data Fritz has about you |
 | `/export` | Download a JSON snapshot of everything Fritz has stored about you |
+| `/schedule add <cron\|interval> <prompt>` | Schedule a recurring prompt in this channel |
+| `/schedule list` / `remove <id>` | See or cancel your schedules |
+| `/schedule list_all` | (Admin only) Schedules across all users |
+| `/tell <member> <message>` | Carry your exact words to that member by DM, attributed to you. Off unless `RELAY_ENABLED=true` |
+| `/relay block <member>` / `block-everyone` | Refuse messages relayed to you, from one person or from everyone |
+| `/relay unblock <member>` / `status` / `forget-blocks` | Manage whom you are refusing |
 
 Direct messages or `@mentions` trigger the full agent with all tools.
 Attach images or Discord voice messages — Fritz can analyze both.
+
+A relayed DM also carries **Apps → Block this sender** and `[Reply]` / `[Not now]` / `[Block sender]` buttons, so a recipient never has to learn a command to answer it or to stop it.
 
 ---
 
@@ -238,7 +248,9 @@ Also set `CHAT_COOKIE_SECRET` in `.env` for any containerised run. Left unset, t
 
 ## Configuration Reference
 
-All settings can be set as environment variables or in a `.env` file. See `.env.example` for the full list.
+All settings can be set as environment variables or in a `.env` file. `.env.example` carries the same list with the longer reasoning behind each default; this table is the index.
+
+### Identity and access
 
 | Variable | Default | Description |
 |---|---|---|
@@ -248,22 +260,124 @@ All settings can be set as environment variables or in a `.env` file. See `.env.
 | `THREADS_PER_CHANNEL` | `false` | One conversation thread per channel instead of one per person. Turning it on branches every existing conversation — see [Identity](#identity). |
 | `ADMIN_LEGACY_NAME_MATCH` | `false` | Also match `ROOT_USER`/`ADMIN_USERS` against display names. Compatibility shim only; with it on, taking your username takes your admin rights. |
 | `IDENTITY_LINKS` | — | `web-alice=discord-123,…` — treat one identity as another, so memories and conversation follow you across surfaces. |
-| `WORKSPACES_ROOT` | `./workspaces` | Parent directory for per-user sandboxed workspaces created via `/workspace enable`. |
-| `AUDIT_LOG_PATH` | `audit.log` | Path to the append-only NDJSON audit log. Captures `/forget`, `/export`, admin-panel mutations, and every file-tool write / edit / shell-exec. |
-| `ADMIN_PANEL_PASSWORD` | — | Set to enable the read-only web admin panel. Leave unset to disable. |
+| `ADMIN_PANEL_PASSWORD` | — | Set to enable the web admin panel. Leave unset to disable. |
 | `ADMIN_PANEL_PORT` | `8001` | Port for the admin panel. Bound to `127.0.0.1` only — use SSH port forwarding for remote access. |
+
+### Models and Ollama
+
+| Variable | Default | Description |
+|---|---|---|
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama API endpoint |
 | `THINKING_OLLAMA_MODEL` | `gpt-oss` | Primary reasoning model |
 | `FAST_OLLAMA_MODEL` | `llama3.2` | Fast model for quick tasks |
 | `EMBEDDING_MODEL` | `mxbai-embed-large` | Embedding model for ChromaDB |
 | `VISION_MODEL` | `llava` | Vision model for image analysis |
+| `OLLAMA_TIMEOUT` | `120` | Hard cap in seconds on a single Ollama request. Hung-model protection; it bounds one request, not a whole turn. |
+| `OLLAMA_KEEP_ALIVE` | `5m` | How long Ollama keeps a model resident after the last request. `-1` pins models forever — fastest, but the VRAM stays consumed. Accepts `30s`, `5m`, `1h`, `-1`. |
+
+### Conversation, memory and streaming
+
+| Variable | Default | Description |
+|---|---|---|
+| `SUMMARIZE_THRESHOLD` | `30` | Messages in a conversation before the agent summarises and trims. This is what bounds the history window in practice: the window never holds more than `SUMMARIZE_THRESHOLD`+1 messages. |
+| `SUMMARIZE_ASYNC` | `true` | Run summarisation on a background thread rather than blocking the reply that crossed the threshold. |
+| `HISTORY_TOKEN_BUDGET` | `4096` | Token budget for the conversation history fed to the agent each turn. `0` disables the window and sends only the latest message. |
+| `AGENT_RECURSION_LIMIT` | `40` | Super-steps allowed in one agent turn; a tool call costs two, so this allows about 19. It is the stop on a model that has started looping — LangGraph's own default is 10007. |
+| `MEMORY_INJECT_MAX_CHARS` | `4000` | Cap on the memory blob auto-injected into the system prompt. Uncapped it can evict everything else. |
+| `MEMORY_EXTRACT_MIN_USER_CHARS` | `20` | Shortest user message that triggers automatic memory extraction. Short turns are skipped to save an LLM call. |
+| `MEMORY_EXTRACT_MIN_REPLY_CHARS` | `40` | The same floor for Fritz's reply. |
+| `SCRAPE_MAX_CHARS` | `8000` | Cap on what `scrape_web` returns to the agent, for the same reason as the memory blob. |
+| `STREAM_MIN_CHARS` | `1` | Characters buffered before the streaming callback fires. Raise to coalesce deltas. |
+| `DISCORD_STREAM_MIN_INTERVAL` | `1.5` | Minimum seconds between Discord message edits while a reply streams. |
+| `BLOCKING_POOL_SIZE` | `8` | Workers in the shared pool that keeps LLM, STT and TTS work off the Discord event loop. One turn occupies one worker for its whole duration. |
+| `IMAGE_GEN_MAX_CONCURRENCY` | `1` | Concurrent SDXL renders. GPU-bound; keep at 1 unless you have VRAM to spare. |
+| `TTS_MAX_CONCURRENCY` | `1` | Concurrent XTTS syntheses, same reasoning. |
+
+### Documents, memory store and databases
+
+| Variable | Default | Description |
+|---|---|---|
 | `DOC_STORAGE_DESCRIPTION` | `anything you don't know about.` | Hint for when the agent queries documents |
 | `DOC_FOLDER` | `./input` | Directory watched for RAG documents |
-| `CHROMA_DB_PATH` | `./chroma_store` | ChromaDB persistence path |
 | `DOC_MAX_FILE_MB` | `100` | Largest file the watched folder will hand to a document parser. The parsers are the only place Fritz reads a format he did not write, and pypdf's advisory history is almost entirely malformed-input denial of service — so this bounds what an unknown document can make one allocate. An over-sized file is skipped and logged, and is **not** recorded as indexed, so shrinking it is enough to have it picked up. It does not stop a small crafted file from sending a parser into a loop. |
 | `AUTO_DOWNLOAD_NLTK` | unset (`unstructured` treats that as true) | Read by `unstructured`, not by Fritz. Importing its tokenizer downloads two nltk corpora, so ingesting one `.docx` reaches the network. The Docker image bakes the corpora and sets this to `false`. Set it `false` natively only if you already have `punkt_tab` and `averaged_perceptron_tagger_eng` — without them, ingesting a `.docx` or `.xlsx` raises `LookupError`. |
+| `CHROMA_DB_PATH` | `./chroma_store` | ChromaDB persistence path. Treat it as code rather than data: Chroma builds an embedding function named in a collection's own schema and calls it on every write, so a store from somewhere else can decide where your text is sent. Fritz refuses one that names an embedder. |
+| `CHROMA_COLLECTION_NAME` | `word_docs_rag` | Collection holding the document index. |
+| `ANONYMIZED_TELEMETRY` | `FALSE` (set in `.env.example`) | Chroma's own product telemetry, read by Chroma directly. The pinned chromadb cannot send anything — its telemetry client is a no-op and the `posthog` dependency is gone — so this matters only if you pin an older one yourself. |
+| `DB_NAME` | `fritz.db` | The unified database: conversation checkpoints, schedules, relay rows and blocks, identity aliases. |
+| `CHAT_DB_NAME` | `DB_NAME` | Override to split conversation history into its own file. |
+| `SCHEDULE_DB` | `DB_NAME` | Override to split schedules into their own file. |
+| `WORKSPACES_ROOT` | `./workspaces` | Parent directory for per-user sandboxed workspaces created via `/workspace enable`. |
+| `CHROMA_PATH` | `chroma_store` | Read only by `migrate_identity.py`, as the default for its `--chroma` argument. |
+
+### Relay settings (`/tell`)
+
+See [Direct-message relay](#direct-message-relay) for what the feature does.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RELAY_ENABLED` | `false` | Master switch for `/tell` and everything around it. Off by default: it sends a DM to somebody who did not ask for it, so turning it on is a deliberate decision about your server. Turn the feature off here rather than by zeroing a count. |
+| `RELAY_AGENT_TOOL_ENABLED` | `false` | Reserved for the agent-facing relay tool ("tell Alice I'll be late"), which is **not built**. Setting it does nothing today, and Fritz warns at startup if you set it. |
+| `RELAY_MAX_BODY_CHARS` | `1000` | Longest message `/tell` will carry. |
+| `RELAY_MAX_PER_SENDER_PER_HOUR` | `10` | Per-sender rate limit — stops one person nagging. |
+| `RELAY_MAX_INBOUND_PER_RECIPIENT_PER_HOUR` | `10` | Per-recipient inbound limit — the only one that constrains many senders targeting one person. |
+| `RELAY_REPLY_WINDOW_MIN` | `1440` | How long a delivered message stays answerable, in minutes. |
+| `RELAY_RETENTION_DAYS` | `30` | How long relay rows, message bodies included, are kept before the retention sweep deletes them. Keep this longer than the reply window, or a message can still be answerable after its body is gone. |
+
+### Scheduling
+
+| Variable | Default | Description |
+|---|---|---|
+| `SCHEDULE_MIN_DELAY_MIN` | `1` | Minimum delay in minutes for a one-shot reminder. |
+| `MAX_SCHEDULES_PER_USER` | `10` | Recurring schedules per person. An abuse cap; raise it for a trusted server. |
+
+### File tools and `execute_command`
+
+| Variable | Default | Description |
+|---|---|---|
+| `MAX_READ_LINES` | `500` | Lines returned by `read_file` per call. |
+| `MAX_FILE_SIZE_BYTES` | `1048576` | Largest file the file tools will read or search. |
+| `EXEC_ALLOWED_COMMANDS` | see `.env.example` | Allowlist of program names `execute_command` may invoke, matched on the bare `argv[0]` basename. The default list keeps interpreters, which means `execute_command` **is** arbitrary code execution for whoever can reach it — contained by the admin gate below rather than by argument parsing. |
+| `EXEC_REQUIRE_ADMIN` | `true` | Restricts `execute_command`, and only that tool, to admins. The other five file tools stay open to every workspace holder, confined by path resolution. |
+| `EXEC_ENV_PASSTHROUGH` | platform-specific | Environment variables passed to child processes. Everything else — the bot token, panel password, cookie secret — is dropped. Think twice about proxy and index URLs, which often carry credentials. |
+| `EXEC_OUTPUT_TRUNCATE` | `10000` | Truncation length for `execute_command` output passed back to the model. |
+| `EXEC_TIMEOUT_MAX` | `30` | Ceiling in seconds on the per-command timeout. Requests are clamped to `[1, this]`. |
+
+### Voice and transcription
+
+| Variable | Default | Description |
+|---|---|---|
+| `WHISPER_MODEL` | `small` | `tiny` / `base` / `small` / `medium` / `large-v2` / `large-v3`. |
+| `WHISPER_DEVICE` | `cpu` | Set `cuda` if a GPU is available. |
+| `WHISPER_COMPUTE_TYPE` | `int8` | `int8` (fastest CPU), `float16` (best GPU), `float32` (accurate CPU). |
+| `WHISPER_LANGUAGE` | — | Force a language (e.g. `en`) to skip auto-detection. Blank auto-detects. |
+| `WHISPER_BEAM_SIZE` | `5` | Higher is more accurate and slower. |
+| `WHISPER_INITIAL_PROMPT` | see `.env.example` | Seeds transcription with context, which helps with proper nouns and domain vocabulary. |
+| `FFMPEG_PATH` | auto-detected | Override the FFmpeg binary path. |
+| `FFPROBE_PATH` | auto-detected | Override the ffprobe binary path. |
+
+### Observability and audit
+
+| Variable | Default | Description |
+|---|---|---|
 | `METRICS_HOST` | `127.0.0.1` | Interface the metrics/health server binds. Both endpoints are unauthenticated, so the default keeps them off the network. The Docker image sets `0.0.0.0` — Prometheus and the Kubernetes probes cannot reach a loopback listener inside a container. |
-| `FFMPEG_PATH` | auto-detected | Override FFmpeg binary path |
+| `METRICS_PORT` | `8000` | Port for `/metrics` and `/health`. |
+| `LOG_LEVEL` | `INFO` | Root log level. An unrecognised value falls back to `INFO`. |
+| `LOG_FORMAT` | — | Set `json` for single-line JSON records, which is what the container runs on. |
+| `AUDIT_LOG_PATH` | `audit.log` | Append-only NDJSON audit log. Captures `/forget`, `/export`, admin-panel mutations, and every file-tool write, edit and shell exec. |
+| `AUDIT_LOG_MAX_BYTES` | `5242880` | Size-based rotation threshold. There is no "off": `0` or a non-number falls back to the default, because unbounded growth is what this prevents. |
+| `AUDIT_LOG_BACKUPS` | `5` | Rotated files kept. Worst case on disk is `(BACKUPS + 1) x MAX_BYTES`. |
+
+### Other surfaces and development
+
+| Variable | Default | Description |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | — | Enables the Telegram surface (`main_telegram.py`). Opt-in and not covered by CI. |
+| `DISCORD_ERROR_DETAIL` | `0` | Append the exception type and text to user-facing Discord errors. Development only — normally users get butler copy plus a log reference, and the traceback stays in the log. |
+| `FRITZ_WRITE_DIAGRAMS` | `1` | Set `0` to skip writing the graph-diagram PNGs at import. `tests/conftest.py` sets it so a test run does not dirty the tracked images. |
+
+The web chat has its own settings, documented under [Chat UI](#chat-ui).
+
 
 ---
 
@@ -310,6 +424,24 @@ Then set `ROOT_USER` to the canonical form in `.env` — **before restarting, or
 Off by default, because **turning it on branches every existing conversation**: the identity-only thread stays in the database untouched, but new messages start a fresh per-channel thread and the old context is no longer read. Flip it once, deliberately.
 
 `/forget conversation` sweeps the identity thread and every channel thread under it, and cannot catch a sibling that shares a prefix — `discord-1` does not touch `discord-10`.
+
+---
+
+## Direct-message relay
+
+`/tell @user <message>` has Fritz carry your exact words to another member of the server by DM, attributed to you. It is the one feature that makes Fritz message somebody who has not spoken to him, which is why it is **off by default**: set `RELAY_ENABLED=true` deliberately, as a decision about your server.
+
+A recipient gets a DM naming you, your message verbatim, and three buttons: `[Reply]`, `[Not now]` and `[Block sender]`. Replying opens a form, and the answer is carried back to you the same way, so neither of you needs the other's DMs open. **Apps → Block this sender** on the message does the same as the button, and `/relay block` does it by name.
+
+The parts worth knowing before turning it on:
+
+- **Consent belongs to the recipient, not the sender.** `/relay block @someone` refuses that person, `/relay block-everyone` refuses the whole feature, and a block is resolved at the gate — before anything is sent, and without telling the sender. `/tell` answers the same way whether or not you are blocked, so it cannot be used to detect one.
+- **Blocks survive `/forget all`.** Deleting your own data does not re-arm somebody you refused, because a privacy command must not become a safety regression. `/relay forget-blocks` is the explicit way to clear them, and the only way.
+- **Bodies are kept, then deleted.** A relayed message is stored so a reply can route back to it, for `RELAY_RETENTION_DAYS` (30 by default). `RELAY_REPLY_WINDOW_MIN` (24h) is how long it stays answerable. Keep retention longer than the window, or a message can still be answerable after its body has gone — `validate_config` warns if you invert them.
+- **What `/forget` and `/export` cover.** Both reach relayed messages you sent or received. Fritz cannot unsend a DM already delivered, and the recipient keeps a text-free anchor so they can still block you; `/forget all` says so rather than implying otherwise.
+- **Rate limits are per sender and per recipient.** `RELAY_MAX_PER_SENDER_PER_HOUR` stops one person nagging; `RELAY_MAX_INBOUND_PER_RECIPIENT_PER_HOUR` is the only one that constrains many senders targeting one person.
+
+The agent-facing version of this ("tell Alice I'll be late", with the model choosing the wording) is **not built**. `RELAY_AGENT_TOOL_ENABLED` is reserved for it and does nothing today; Fritz warns at startup if you set it.
 
 ---
 
