@@ -197,11 +197,104 @@ Also here, for sequencing only: the queued **`file_tools` symlink hardening** �
 
 ## Batch F — CI never builds or boots the image
 
-**Where:** `.github/workflows/ci.yml:33`, `release.yml:45`, `:71-72`, `Dockerfile:63`
+**Where:** `.github/workflows/ci.yml` (no docker step at all), `release.yml:75-86` (the smoke test), `:108-109` (the canary's reference), `Dockerfile:90` (the entrypoint)
+
+*The citations above were wrong when this was written and are corrected here: `ci.yml:33` is a checkout pin, `release.yml:45` a metadata action, `:71-72` a permissions key, and `Dockerfile:63` a comment. A reviewer following them landed on none of the things described.*
 
 `Dockerfile`'s `ENTRYPOINT ["python", "main_discord.py"]` is never executed anywhere in CI. `ci.yml` has no docker step, so the image is first built on a `v*` tag. Four gaps compound: the dependency set the image uses is never installed in CI (`ci.yml` installs `-e ".[dev]"` from pyproject's floors, the Dockerfile installs pinned `requirements.txt`, and `test_packaging.py` only parses that file as text); the release smoke test runs a different program from the entrypoint; and it pulls a tag that may never have been pushed.
 
 **Fix:** build the image in `ci.yml` and boot it with a fail-fast command that exercises the real entrypoint's imports. **Verify:** break a pinned version deliberately and confirm CI goes red.
+
+> **Closed.** `d970b0c` (the floors/pins split), `3c2bfbe` (the unstructured bound), `9129658` (buildx), `81a2848` + `219eb38` (preflight), `1fc9e7f` (the smoke test), `c00da3f` (the canary), `2cd9cd6` (the image build in CI), `6be15cd` (action pins), `4ec1b49` (the README).
+>
+> Batch F was larger and worse than this entry says, and verifying it before
+> changing anything is what found the difference. Ten agents, six on
+> independent questions with adversarial skeptics on the three that would have
+> cost the most if wrong.
+>
+> - **The release workflow has NEVER completed a run.** Four tags, four
+>   failures, and this entry did not know it. Cause, settled rather than
+>   guessed: `cache-to: type=gha` with no `docker/setup-buildx-action` step, so
+>   buildx ran on its default `docker` driver, which reports `CacheExport=false`
+>   without the containerd image store, and aborted in `toSolveOpt` before
+>   reading the Dockerfile. The logs are expired, so it was pinned down from
+>   what survives — the jobs API gives step durations of 1-3s, and the
+>   annotation's docs URL is passed by exactly one of five `notSupported()` call
+>   sites in the whole buildx tree, vendor included.
+>
+> - **CI was already red, and had been since batch D closed.** Four tests in
+>   `test_packaging.py`, passing here and failing there, and the reason is this
+>   entry's own first gap: CI resolved pyproject's floors, `unstructured>=0.18`
+>   resolved to 0.27.25, and unstructured 0.21.0 replaced nltk with spaCy eight
+>   months ago. The tests were right; the environment was never the one they
+>   were written about. I shipped two commits on top of that red while
+>   reporting the suite green from this machine.
+>
+> - **Three more faults in the smoke test, none of them in this entry.** The
+>   image reference was built by hand from `github.repository`, so it asked for
+>   `ghcr.io/NickSanft/MisterFritz` — not a tag that was missing, but not a
+>   parseable reference at all, since an OCI repository name is lowercase-only.
+>   The tag was the full 40-character sha where `type=sha` publishes seven. And
+>   the program it asked for was appended to an exec-form `ENTRYPOINT` rather
+>   than replacing it, so `docker run <image> python local-sim/mock_fritz.py`
+>   ran `python main_discord.py python local-sim/mock_fritz.py` and
+>   `main_discord` read no arguments at all. The canary job had the same
+>   reference defect, and that is the job holding cluster credentials.
+>
+> - **What the entry framed as one fix became nine commits**, because "boot the
+>   image" needs something to boot: `preflight.py`, reached as
+>   `python main_discord.py --preflight`, running what a boot runs minus
+>   Discord. The check worth most is the one only an in-image run can make: the
+>   Dockerfile bakes two nltk corpora and separately sets
+>   `AUTO_DOWNLOAD_NLTK=false`, two build steps that nothing checked agree, and
+>   tokenising one sentence proves they do.
+>
+> **Not done, deliberately, and measured rather than assumed.** The Dockerfile
+> has no CPU index, so `pip install -r requirements.txt` pulls the CUDA torch
+> wheels and fifteen `nvidia-*` packages: ~4.5 GiB downloaded, ~8.5 GiB
+> installed, ~57% of the closure, for libraries an image with no GPU anywhere
+> in `infra/` cannot use. Adding `--extra-index-url https://download.pytorch.org/whl/cpu`
+> (which `ci.yml`'s full-deps job already passes, with a comment warning about
+> exactly this) takes it to ~0.85 GiB down and ~2.7 GiB installed and the pip
+> layer from ~7 minutes to ~1.5. It is left alone because xformers
+> 0.0.33.post2's wheel is CUDA-built and wants `torch==2.9.1`, and whether
+> `import xformers.ops` survives against `2.9.1+cpu` needs one real run nobody
+> here can do. **This is the first thing to pick up after batch F**, and it
+> makes the nightly build cheap enough to reconsider per-push.
+>
+> **Still true after all nine commits: none of the release path is verified.**
+> There is no green build in this repository's history, and the local-sim
+> canary that advertises itself as a full pipeline simulation builds a
+> thirteen-line mock. The next `v*` tag is the first real test of it. Three
+> things to know before pushing one: `infra/k8s/*` still carries literal
+> `OWNER` placeholders so the canary cannot reach a cluster; those manifests'
+> probes work only because the Dockerfile bakes `METRICS_HOST=0.0.0.0`, which
+> no manifest records; and `ubuntu-latest` migrates to Ubuntu 26 from
+> 2026-10-19, which will confound a first run attempted around then.
+>
+> Smaller things found and left for their own commits: `.dockerignore`'s
+> patterns are root-anchored, so a developer's local `docker build` ships
+> `.claude/` — 2.3 MB including a second copy of `tests/` — straight past
+> the `tests/` exclusion, and `__pycache__` should be `**/__pycache__`. CI
+> checkouts only take tracked files, so this is not a defect in the build this
+> batch added. `*.exe` in `.dockerignore` is now dead. The image has no
+> `EXPOSE` and no `HEALTHCHECK`, while `Dockerfile.mock` has the former. And
+> three more tests in `test_packaging.py` make assertions about the installed
+> environment that pass today by luck rather than design — the constrained
+> install is what makes them meaningful, and it is now in place.
+>
+> 72 mutations RED across the nine commits, counted from the specs rather
+> than added up from the commit messages, two of which overstate their own
+> run by one. Four guards were blind until a
+> mutation said so. Two asserted over every CI run-script joined together, so
+> the real boot could be changed to anything while a later step kept the word
+> `--preflight` in the file. One asserted an advisory was NAMED but not that
+> the release fixing it was, so the sentence the floor rests on could be
+> deleted. And one checked the README against a hardcoded list of CI triggers
+> rather than against the triggers the file declares, so a new one slipped
+> past. One mutation stayed GREEN and is recorded as not a degradation:
+> removing a sentence of prose about `--preflight` while both the flag and a
+> runnable command for it remain.
 
 ---
 
@@ -297,6 +390,6 @@ Recorded so they are not re-proposed. Each was killed because the mechanism was 
 | C | 3 (+ queued symlink chip) | **CLOSED** — `9b528c0` (C1), `48ade51` (C2), `aa8492d` (C3). The symlink chip is still queued |
 | D | 3 | **CLOSED** — `c076d0f` (versions), `39d1fa7` (ingestion cap), `5eac578` (corpora) |
 | E | 3 | **CLOSED** — `eac8f13` (E1), `4073378` (E2), `36d8a91` (E3) |
-| F | 1 | not started |
+| F | 1, which became 9 | **CLOSED** — see the note under batch F. The item understated it: the release workflow had never once succeeded, CI was red, and three faults in the smoke test were not in the entry at all |
 | G | 2 | **CLOSED** — `abbab8c` (G1), `5b6cf37` (G2) |
 | Decisions | 4 | awaiting answers in [DECISIONS.md](DECISIONS.md) |
