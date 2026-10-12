@@ -32,6 +32,22 @@ def _os_environ() -> dict:
     return dict(os.environ)
 
 
+def _corpora_present() -> bool:
+    """Whether the two corpora the Dockerfile bakes are findable here.
+
+    They are an image artefact, not a dependency: `pip install` does not bring
+    them, and ci.yml's `core + dev` job runs with AUTO_DOWNLOAD_NLTK=false and
+    no download step. So a check that needs them is a check about the image.
+    """
+    try:
+        import nltk
+        nltk.data.find("tokenizers/punkt_tab")
+        nltk.data.find("taggers/averaged_perceptron_tagger_eng")
+    except Exception:
+        return False
+    return True
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -171,18 +187,40 @@ class TestTheChecksThemselves(unittest.TestCase):
             with self.assertRaises(ValueError):
                 preflight.check_the_configuration_is_usable()
 
+    @unittest.skipUnless(_corpora_present(),
+                         "the nltk corpora are not installed here — they are "
+                         "baked by the Dockerfile, so this check belongs to "
+                         "the image and runs in ci.yml's build-image job")
     def test_the_corpora_check_tokenises_for_real(self):
         """Offline: with the corpora present this needs no network, which is
-        the whole point of the Dockerfile baking them."""
+        the whole point of the Dockerfile baking them.
+
+        Skipped rather than faked when they are absent, following
+        tests/test_packaging.py's `find_spec -> skipTest` idiom. Asserting the
+        real tokenizer here without that guard is what turned CI red on the
+        commit that added this file: this machine has the corpora and a
+        `core + dev` runner does not."""
         detail = preflight.check_the_document_corpora_are_present()
         self.assertIn("punkt_tab", detail)
 
     def test_the_corpora_check_fails_when_the_tokenizer_misbehaves(self):
         """What a missing corpus looks like once nltk's own LookupError is out
-        of the way: a tokenizer that returns the wrong shape."""
-        with patch("unstructured.nlp.tokenize.sent_tokenize", return_value=["one"]):
+        of the way: a tokenizer that returns the wrong shape. Both functions
+        are patched so this needs no corpora anywhere."""
+        with patch("unstructured.nlp.tokenize.sent_tokenize", return_value=["one"]), \
+             patch("unstructured.nlp.tokenize.pos_tag", return_value=[("a", "DT")]):
             with self.assertRaises(AssertionError):
                 preflight.check_the_document_corpora_are_present()
+
+    def test_the_corpora_check_lets_a_missing_corpus_through_as_itself(self):
+        """nltk raises LookupError with a long diagnostic naming the resource
+        and where it looked. preflight must not swallow or reshape it: that
+        message is how an operator finds out the bake did not happen."""
+        with patch("unstructured.nlp.tokenize.sent_tokenize",
+                   side_effect=LookupError("Resource 'punkt_tab' not found")):
+            with self.assertRaises(LookupError) as caught:
+                preflight.check_the_document_corpora_are_present()
+        self.assertIn("punkt_tab", str(caught.exception))
 
     def test_the_command_surface_check_builds_every_command(self):
         detail = preflight.check_the_command_surface_builds()
