@@ -21,6 +21,8 @@ import re
 import unittest
 from pathlib import Path
 
+import yaml
+
 REPO = Path(__file__).resolve().parents[1]
 SCREAMING = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
 
@@ -57,6 +59,16 @@ def _settings_the_code_reads() -> dict:
             if name and SCREAMING.match(name) and name not in NOT_SETTINGS:
                 found.setdefault(name, set()).add(path.name)
     return found
+
+
+def _prose(text: str) -> str:
+    """Markdown prose with its line wrapping collapsed.
+
+    An assertion on a sentence must not depend on where the paragraph happened
+    to wrap: "does not build or run the real image" was split across a newline
+    and the test read as a missing claim rather than a formatting detail.
+    """
+    return " ".join(text.split())
 
 
 def _documented_in_readme() -> set:
@@ -244,6 +256,92 @@ class TestTheRelayIsDiscoverable(unittest.TestCase):
         yet". Both shipped."""
         env = (REPO / ".env.example").read_text(encoding="utf-8")
         self.assertNotIn("have not landed yet", env)
+
+
+class TestTheReadmeDescribesThePipelineThatExists(unittest.TestCase):
+    """It described one that has never run.
+
+    "The CI workflow (.github/workflows/release.yml) builds the image on tag
+    push, runs a smoke test, and triggers a canary rollout with a manual
+    approval gate." All three clauses were false: four tags, four failures,
+    every one in the build step, with jobs 2 and 3 skipped every time. "CI runs
+    on every push" was false too — ci.yml restricts pushes to master. And
+    local-sim was called a full canary pipeline simulation while building a
+    thirteen-line mock image.
+
+    Prose rots, so these tie the claims to the files. Not word-counting: each
+    one is something a reader would act on and get wrong.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.readme = (REPO / "README.md").read_text(encoding="utf-8")
+        cls.ci = yaml.safe_load(
+            (REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+
+    def test_the_triggers_it_names_are_the_triggers_ci_declares(self):
+        """`on:` is the whole claim. Saying "every push" when pushes are
+        filtered to one branch sends somebody looking for a run that was never
+        going to happen."""
+        # yaml parses a bare `on` key as the boolean True.
+        triggers = self.ci.get("on") or self.ci.get(True)
+        for branch in triggers["push"]["branches"]:
+            with self.subTest(branch=branch):
+                self.assertIn(f"`{branch}`", self.readme)
+        # Derived from the keys rather than a list written here, which is what
+        # let a mutation add `issue_comment:` with the README none the wiser.
+        for event in triggers:
+            with self.subTest(event=event):
+                self.assertTrue(
+                    event in _prose(self.readme)
+                    or event.replace("_", " ") in _prose(self.readme),
+                    f"ci.yml runs on `{event}` and the README does not say so")
+
+    def test_every_job_in_ci_is_named_in_the_readme(self):
+        """Including the nightly image build, which is the only thing in this
+        repository that builds the Dockerfile at all."""
+        for job in self.ci["jobs"].values():
+            with self.subTest(job=job["name"]):
+                self.assertIn(job["name"], self.readme)
+
+    def test_it_says_which_dependency_set_each_job_installs(self):
+        """The distinction that cost four days of red: one job resolves the
+        floors, the other is constrained to the lock, and which is which is the
+        only thing that makes a failure in either interpretable."""
+        self.assertIn("-c requirements.txt", self.readme)
+        self.assertIn("UNCONSTRAINED", self.readme)
+
+    def test_the_boot_check_is_documented_because_it_is_runnable_by_hand(self):
+        main = (REPO / "main_discord.py").read_text(encoding="utf-8")
+        self.assertIn('"--preflight"', main, "the flag has gone")
+        self.assertIn("--preflight", self.readme,
+                      "an operator can run this against any build and nothing "
+                      "tells them so")
+        # A runnable invocation, not just the word. Prose about a flag nobody
+        # can copy is how `/schedule` ended up documented everywhere except
+        # where somebody would look for it.
+        blocks = re.findall(r"```bash\n(.*?)```", self.readme, re.DOTALL)
+        self.assertTrue(
+            any("--preflight" in block and "docker run" in block
+                for block in blocks),
+            "the README mentions --preflight but shows no command that runs it")
+
+    def test_it_does_not_claim_the_release_pipeline_has_worked(self):
+        """It has not, once, and somebody debugging a failed tag push needs to
+        know that before they start bisecting their own change."""
+        section = self.readme[self.readme.index("release.yml`"):]
+        section = section[:section.index("## Troubleshooting")]
+        self.assertIn("never completed a run", _prose(section))
+
+    def test_the_local_simulation_says_what_it_builds(self):
+        """It builds local-sim/Dockerfile.mock. Read as a simulation of the
+        deployment, that is honest; read as de-risking the release of this
+        bot, it is not, and the name invited the second reading."""
+        section = self.readme[self.readme.index("## Local DevOps Simulation"):]
+        section = section[:section.index("### Production Kubernetes")]
+        self.assertIn("Dockerfile.mock", section)
+        self.assertIn("does not build or run the real image", _prose(section))
+        self.assertNotIn("Full canary pipeline simulation", _prose(self.readme))
 
 
 if __name__ == "__main__":                    # pragma: no cover

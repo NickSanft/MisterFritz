@@ -21,7 +21,7 @@ Mister Fritz is an AI-powered Discord bot with a sophisticated, sardonic persona
 | Card Game | Built-in deck system with success/failure mechanics for tabletop-style play |
 | Observability | Prometheus metrics on `:8000/metrics`, health on `:8000/health`, pre-built Grafana dashboard |
 | Canary deployment | Argo Rollouts canary steps with Prometheus-based promotion gates |
-| Local DevOps sim | Full canary pipeline simulation via Docker Compose — no cloud cluster required |
+| Local DevOps sim | Canary rollout simulation via Docker Compose — weighted routing, Prometheus gates, auto-rollback, against a mock service rather than the real image |
 
 ---
 
@@ -498,7 +498,36 @@ The test suite covers:
 - `mister_fritz` — history window trimming, executor inputs, token-delta streaming, off-path summarisation, memory-key slugs
 - `document_engine` — `VECTORSTORE_LOCK` held during ingest, `_SHUTDOWN_SENTINEL` exits worker, `shutdown()` idempotency
 
-CI runs on every push via GitHub Actions (see `.github/workflows/ci.yml`).
+`.github/workflows/ci.yml` runs on pushes to `master` (or `main`, which it also
+lists), on every pull request,
+on a nightly `schedule`, and on `workflow_dispatch` — not on every push to
+every branch, which is what this said before.
+
+Three jobs, and which dependency set each installs is the point:
+
+| Job | Installs | Runs on |
+|---|---|---|
+| `core + dev` | `pip install -c requirements.txt -e ".[dev]"` — pyproject's floors constrained to the lock, so the job tests the versions the image ships | pushes, pull requests |
+| `all extras (CPU wheels)` | `-e ".[all]"` UNCONSTRAINED, so the declared floors resolve freely | nightly, manual |
+| `the image builds, and its entrypoint boots` | the Dockerfile, then `docker run <image> --preflight` | nightly, manual |
+
+The split is deliberate. Resolving the floors freely is how you find out that a
+bare floor has drifted to a package you do not ship — which is exactly what
+happened with `unstructured>=0.18`, and it made the push path red for four days
+before anyone looked. So the drift signal lives in the nightly job, where it
+blocks nobody, and the gating job installs what ships.
+
+`--preflight` is the image's boot check: the real `ENTRYPOINT`, doing
+everything a boot does except connecting to Discord — validate_config, the
+two modules a boot never reaches, every slash command built onto a tree, the
+nltk corpora the Dockerfile bakes, and the metrics server probed in-process for
+`/health`, `/metrics` and a 404. It exits non-zero with a diagnosis, and you
+can run it against any build:
+
+```bash
+docker run --rm -e DISCORD_BOT_TOKEN=placeholder \
+  -e ROOT_USER=discord-000000000000000000 misterfritz:ci --preflight
+```
 
 ---
 
@@ -618,7 +647,15 @@ ssh -L 8001:127.0.0.1:8001 you@your-bot-host
 
 ## Local DevOps Simulation
 
-Simulate the full canary deployment pipeline **without a Discord token or cloud cluster** using Docker Compose and synthetic traffic:
+Exercise the canary machinery — weighted routing, Prometheus gates, automatic
+promotion and rollback — **without a Discord token or cloud cluster**, using
+Docker Compose and synthetic traffic.
+
+What it builds is `local-sim/Dockerfile.mock`: thirteen lines, one dependency,
+serving synthetic metrics under the same names the application uses. It is a
+simulation of the *rollout*, not of the bot, and it does not build or run the
+real image at all — `.github/workflows/ci.yml`'s nightly `build-image` job is
+the only thing that does.
 
 ```bash
 cd local-sim
@@ -647,7 +684,24 @@ kubectl argo rollouts set image misterfritz misterfritz=<image> -n misterfritz
 kubectl argo rollouts status misterfritz -n misterfritz --watch
 ```
 
-The CI workflow (`.github/workflows/release.yml`) builds the image on tag push, runs a smoke test, and triggers a canary rollout with a manual approval gate.
+`.github/workflows/release.yml` is meant to build the image on a `v*` tag,
+boot it, and then trigger the canary rollout behind a manual approval gate.
+
+**It has never completed a run.** Four tags, four failures, every one of them in
+the build step within three seconds: `cache-to: type=gha` was being validated
+against buildx's default `docker` driver, which cannot export a cache, so the
+build aborted before reading the Dockerfile. No image has ever been pushed, and
+the smoke-test and canary jobs have therefore never executed at all. Three
+further faults were found behind that one and fixed in the same batch — the
+smoke test asked for a mixed-case repository name that no registry can parse, a
+tag that `type=sha` never produces, and a program the exec-form `ENTRYPOINT`
+silently appended its arguments to rather than running.
+
+All four are fixed, and none of it is verified: there is no green build in this
+repository's history to compare against. The next `v*` tag is the first real
+test, so push one deliberately and watch it. `infra/k8s/*` still carries
+`OWNER` placeholders, so the canary step cannot reach a cluster until those are
+filled in.
 
 ---
 
