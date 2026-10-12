@@ -101,6 +101,64 @@ jobs:
           # parses a real .docx, so no corpus is needed.
           AUTO_DOWNLOAD_NLTK: "false"
 
+  build-image:
+    name: the image builds, and its entrypoint boots
+    # Nothing in this repository has ever built the real Dockerfile. ci.yml had
+    # no docker step, release.yml's build has failed on all four tagged
+    # releases, and the local-sim canary that README calls a full pipeline
+    # simulation builds a thirteen-line mock image with one dependency. So the
+    # ENTRYPOINT, the apt layer, the Whisper bake and the nltk corpora bake
+    # have never run anywhere except on somebody's laptop.
+    #
+    # Scheduled and manual only, like full-deps and for a measured reason: the
+    # lock resolves CUDA torch wheels from PyPI (~4.5 GiB downloaded, ~8.5 GiB
+    # installed, 57% of the closure, on an image with no GPU anywhere in
+    # infra/) and bakes a 464 MiB Whisper model, which is 15-30 minutes. On the
+    # push path that would dominate every commit, and the failure batch F was
+    # really about — the pinned closure differing from the floors closure —
+    # is caught in three minutes by the constrained install in `test` above.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      # No buildx setup and no cache on purpose. buildx's default `docker`
+      # driver builds straight into the local image store, which is what the
+      # next step needs; and `cache-to: type=gha` would not fit anyway — the
+      # layer set is ~9-10 GiB against a 10 GB per-repository cache limit, so
+      # it would evict itself and the pip cache with it.
+      - name: Build the image
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25  # v5
+        with:
+          context: .
+          push: false
+          tags: misterfritz:ci
+
+      # The real ENTRYPOINT, with everything a boot does except connecting to
+      # Discord: the two modules a boot never reaches, validate_config, the
+      # whole slash-command surface on a tree, the nltk corpora the build
+      # baked, and the metrics server probed in-process for /health, /metrics
+      # and a 404. See preflight.py.
+      - name: Boot it through its real entrypoint
+        run: |
+          docker run --rm \
+            -e DISCORD_BOT_TOKEN=ci-placeholder-token \
+            -e ROOT_USER=discord-000000000000000000 \
+            misterfritz:ci --preflight
+
+      # .dockerignore excludes .env and config.json, so inside the image the
+      # environment is the only source of configuration and validate_config
+      # must refuse to boot without it. If this passes, something baked a
+      # config.json in and every container is carrying somebody's token.
+      - name: The image carries no configuration of its own
+        run: |
+          if docker run --rm misterfritz:ci --preflight; then
+            echo "::error::preflight passed with no DISCORD_BOT_TOKEN and no" \
+                 "ROOT_USER, so the image carries configuration of its own." \
+                 "Check .dockerignore."
+            exit 1
+          fi
+
   full-deps:
     name: all extras (CPU wheels)
     # Scheduled and manual only. Installing every extra pulls torch and

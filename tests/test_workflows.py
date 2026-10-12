@@ -315,8 +315,13 @@ class TestTheSmokeTestCouldEverHavePassed(unittest.TestCase):
         self.assertEqual(build.get("id"), "push")
 
     def test_the_smoke_test_boots_the_image_through_its_own_entrypoint(self):
+        """The step that SUPPLIES configuration, specifically: asserting over
+        every run script joined together let the real boot be changed while the
+        no-configuration check kept the word `--preflight` in the file."""
+        [boot] = [step for step in self.runs
+                  if "-e DISCORD_BOT_TOKEN" in step["run"]]
+        self.assertIn("--preflight", boot["run"])
         commands = " ".join(step["run"] for step in self.runs)
-        self.assertIn("--preflight", commands)
         self.assertNotIn("--entrypoint", commands,
                          "overriding the entrypoint tests a program the image "
                          "does not start with")
@@ -424,6 +429,61 @@ class TestNothingBuildsAnImageReferenceByHand(unittest.TestCase):
                     if "kubectl" in str(step.get("run", ""))]
         self.assertIn("needs.build.outputs.image", str(deploy["env"]))
         self.assertIn('misterfritz="$IMAGE"', deploy["run"])
+
+
+class TestTheImageIsBuiltAndBootedSomewhere(unittest.TestCase):
+    """Batch F's actual finding: `ENTRYPOINT ["python", "main_discord.py"]` was
+    never executed by any automation at all.
+
+    ci.yml had no docker step, so the image was first built on a `v*` tag —
+    where the build has failed every time, four for four. The local-sim canary
+    the README calls a full pipeline simulation builds local-sim/Dockerfile.mock,
+    thirteen lines with one dependency. Nothing ever ran the thing that ships.
+    """
+
+    CI = REPO / ".github/workflows/ci.yml"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.job = _jobs(cls.CI)["build-image"]
+
+    def test_the_real_dockerfile_is_what_gets_built(self):
+        [build] = [step for step in self.job["steps"]
+                   if "build-push-action" in str(step.get("uses", ""))]
+        self.assertEqual(build["with"]["context"], ".")
+        self.assertNotIn("file", build["with"],
+                         "a `file:` here would point at something other than "
+                         "the Dockerfile the release builds")
+        self.assertIs(build["with"]["push"], False)
+
+    def test_it_boots_the_image_through_the_entrypoint(self):
+        """The step that SUPPLIES configuration, specifically. Asserting over
+        every run script joined together let the real boot be gutted while the
+        no-configuration check below kept the word `--preflight` in the file —
+        found by mutating this step's argument to `--version`."""
+        [boot] = [step for step in self.job["steps"]
+                  if "-e DISCORD_BOT_TOKEN" in str(step.get("run", ""))]
+        self.assertIn("--preflight", boot["run"])
+        self.assertNotIn("--entrypoint", boot["run"])
+
+    def test_it_proves_the_image_carries_no_configuration(self):
+        [negative] = [step for step in self.job["steps"]
+                      if "if docker run" in str(step.get("run", ""))]
+        self.assertNotIn("-e DISCORD_BOT_TOKEN", negative["run"])
+        self.assertIn("exit 1", negative["run"])
+
+    def test_it_is_not_on_the_push_path(self):
+        """Measured, not assumed: the lock pulls CUDA wheels from PyPI, about
+        4.5 GiB down and 8.5 GiB installed, plus a 464 MiB Whisper model. That
+        is 15-30 minutes, which would dominate every push for a signal the
+        constrained install in `test` gives in three minutes."""
+        condition = self.job["if"]
+        self.assertIn("schedule", condition)
+        self.assertIn("workflow_dispatch", condition)
+
+    def test_the_dockerfile_still_has_the_entrypoint_this_all_assumes(self):
+        dockerfile = (REPO / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn('ENTRYPOINT ["python", "main_discord.py"]', dockerfile)
 
 
 
