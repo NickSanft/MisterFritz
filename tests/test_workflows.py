@@ -263,6 +263,109 @@ class TestABuildThatExportsACacheCanExportACache(unittest.TestCase):
         self.assertEqual(found, [("release.yml", "build")], found)
 
 
+class TestTheSmokeTestCouldEverHavePassed(unittest.TestCase):
+    """It could not, for three independent reasons, and it has never run —
+    the build job has failed on every tagged release, so job 2 was skipped
+    every time.
+
+    1. It asked for `ghcr.io/NickSanft/MisterFritz`, built by hand from
+       `IMAGE_NAME: ${{ github.repository }}`. metadata-action lowercases the
+       names it pushes, so the registry holds `nicksanft/misterfritz`; and an
+       OCI repository name may not contain uppercase at all, so docker rejects
+       that string before contacting the registry.
+    2. It asked for tag `sha-<40 characters>`, while `type=sha` produces the
+       SHORT sha. That tag has never existed.
+    3. It passed `python local-sim/mock_fritz.py` to an image whose exec-form
+       ENTRYPOINT APPENDS arguments rather than replacing them, so the command
+       was `python main_discord.py python local-sim/mock_fritz.py` and
+       main_discord read none of it. It booted the real bot, failed the Discord
+       login on a placeholder token, and was gone before the curl.
+    """
+
+    RELEASE = REPO / ".github/workflows/release.yml"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.jobs = _jobs(cls.RELEASE)
+        cls.smoke = cls.jobs["test-image"]
+        cls.runs = [step for step in cls.smoke["steps"] if "run" in step]
+
+    def test_the_build_publishes_a_reference_rather_than_a_list_of_tags(self):
+        """`steps.meta.outputs.tags` is newline-separated — four tags for a
+        semver push — so it could never be interpolated into a shell
+        command. Nothing read it, which is the only reason that was not a
+        fourth bug."""
+        image = self.jobs["build"]["outputs"]["image"]
+        self.assertNotIn("meta.outputs.tags", image)
+        self.assertIn("steps.reference.outputs.image", image)
+
+    def test_the_reference_is_lowercased_and_pinned_to_a_digest(self):
+        [step] = [s for s in self.jobs["build"]["steps"]
+                  if s.get("id") == "reference"]
+        self.assertIn("tr '[:upper:]'", step["run"],
+                      "github.repository is mixed case and a repository name "
+                      "may not be")
+        self.assertIn("steps.push.outputs.digest", str(step["env"]),
+                      "pin the digest, so the job that boots the image and the "
+                      "job that deploys it get the same bytes")
+
+    def test_the_build_step_is_identified_so_its_digest_can_be_read(self):
+        [build] = [s for s in self.jobs["build"]["steps"]
+                   if "build-push-action" in str(s.get("uses", ""))]
+        self.assertEqual(build.get("id"), "push")
+
+    def test_the_smoke_test_boots_the_image_through_its_own_entrypoint(self):
+        commands = " ".join(step["run"] for step in self.runs)
+        self.assertIn("--preflight", commands)
+        self.assertNotIn("--entrypoint", commands,
+                         "overriding the entrypoint tests a program the image "
+                         "does not start with")
+        self.assertNotIn("mock_fritz", commands,
+                         "the mock shares nothing with the application except "
+                         "metric names, so it can pass against a broken image")
+
+    def test_it_names_the_image_the_build_job_published(self):
+        for step in self.runs:
+            with self.subTest(step=step.get("name")):
+                self.assertIn("needs.build.outputs.image", str(step.get("env") or {}))
+                self.assertNotIn("IMAGE_NAME", step["run"])
+                self.assertNotIn("github.sha", step["run"])
+
+    def test_the_reference_reaches_the_shell_through_the_environment(self):
+        """Not interpolated into the script. A value with a newline in it
+        would otherwise become additional shell commands."""
+        for step in self.runs:
+            with self.subTest(step=step.get("name")):
+                self.assertIn('"$IMAGE"', step["run"])
+
+    def test_it_proves_the_image_carries_no_configuration_of_its_own(self):
+        """.dockerignore excludes .env and config.json, so with neither
+        variable set validate_config must refuse to boot. A pass there means
+        somebody baked a config.json in, and every container is carrying a
+        token."""
+        [negative] = [step for step in self.runs
+                      if "exit 1" in step["run"] and "if docker run" in step["run"]]
+        self.assertNotIn("-e DISCORD_BOT_TOKEN", negative["run"],
+                         "the point is that it runs with NO configuration")
+        self.assertIn("dockerignore", negative["run"].lower())
+
+    def test_it_is_allowed_to_pull_what_the_build_job_pushed(self):
+        """An explicit permissions block sets every scope it does not name to
+        none, and a newly published GHCR package is private by default."""
+        self.assertEqual(self.smoke["permissions"], {"packages": "read"})
+        self.assertTrue(any("login-action" in str(step.get("uses", ""))
+                            for step in self.smoke["steps"]),
+                        "nothing logs in, so a private package cannot be pulled")
+
+    def test_there_is_no_waiting_on_a_sleep(self):
+        """`sleep 5` was shorter than the image's own import time, so even a
+        working container might not have been listening yet. preflight probes
+        in-process and needs no window at all."""
+        for step in self.runs:
+            with self.subTest(step=step.get("name")):
+                self.assertNotIn("sleep", step["run"])
+
+
 
 if __name__ == "__main__":                    # pragma: no cover
     unittest.main()

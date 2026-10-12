@@ -24,7 +24,10 @@ jobs:
       contents: read
       packages: write
     outputs:
-      image: ${{ steps.meta.outputs.tags }}
+      # A digest, lowercased, single-line. The old value was
+      # steps.meta.outputs.tags, which is a NEWLINE-SEPARATED LIST of four
+      # tags — unusable in a shell command, and nothing read it anyway.
+      image: ${{ steps.reference.outputs.image }}
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
@@ -69,6 +72,7 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
 
       - name: Build and push
+        id: push
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25  # v5
         with:
           context: .
@@ -78,30 +82,93 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Two things were wrong with how the later jobs named this image, and
+      # each on its own was fatal.
+      #
+      # IMAGE_NAME is ${{ github.repository }} — `NickSanft/MisterFritz`.
+      # metadata-action lowercases the names it PUSHES, so the registry holds
+      # `ghcr.io/nicksanft/misterfritz`, but the smoke test and the canary
+      # built their references by hand from IMAGE_NAME and asked for
+      # `ghcr.io/NickSanft/MisterFritz`. An OCI repository name may not contain
+      # uppercase at all, so that is not a tag that was missing — it is not
+      # a parseable reference, and docker rejects it before contacting GHCR.
+      #
+      # And the tag they asked for could not exist either: `type=sha` defaults
+      # to the SHORT sha (7 characters), while the step wrote the full 40 from
+      # github.sha.
+      #
+      # A digest avoids both and is immutable, so the job that boots the image
+      # and the job that deploys it get the same bytes rather than the same
+      # moving tag.
+      - name: Compose the reference the other jobs will use
+        id: reference
+        env:
+          BASE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          lowercased="$(printf '%s' "$BASE" | tr '[:upper:]' '[:lower:]')"
+          echo "image=${lowercased}@${DIGEST}" >> "$GITHUB_OUTPUT"
+
   # ── 2. Run full test suite against built image ─────────────────────────────
   test-image:
     name: Smoke-test image
     runs-on: ubuntu-latest
     needs: build
-    # Checks out and pulls; writes nothing. `contents: read` rather than `{}`
-    # because the checkout step needs it the day this repository is private.
+    # Pulls and runs; writes nothing. An explicit block sets every scope it
+    # does not name to none, and a newly published GHCR package is private by
+    # default — so without `packages: read` the pull is denied even though
+    # this workflow is what pushed it. There is no checkout any more, so
+    # `contents` is not needed at all.
     permissions:
-      contents: read
+      packages: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      # No checkout: everything this job runs comes from inside the image, and
+      # the old one existed only because the step named a script by path.
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull image and run health check
+      # What this step used to be: `docker run <image> python
+      # local-sim/mock_fritz.py`. An exec-form ENTRYPOINT APPENDS what docker
+      # run is given rather than replacing it, so the real command was
+      # `python main_discord.py python local-sim/mock_fritz.py` — and
+      # main_discord read no arguments, so it booted the actual bot, failed
+      # the Discord login on a placeholder token and exited. The curl five
+      # seconds later could only ever fail. It also tested the mock's
+      # lookalike /health and /metrics rather than the application's.
+      #
+      # `--preflight` is the real entrypoint, with everything a boot does
+      # except connecting to Discord: the two modules a boot never reaches,
+      # validate_config, the whole slash-command surface on a tree, the nltk
+      # corpora the Dockerfile bakes, and the metrics server probed in-process
+      # for /health, /metrics and a 404. See preflight.py.
+      - name: Boot the image through its real entrypoint
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
         run: |
-          docker run -d --name fritz-smoke \
-            -e DISCORD_BOT_TOKEN=ci-placeholder \
-            -e ROOT_USER=ci-root \
-            -p 8000:8000 \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }} \
-            python local-sim/mock_fritz.py
-          sleep 5
-          curl -f http://localhost:8000/health || (docker logs fritz-smoke && exit 1)
-          curl -f http://localhost:8000/metrics | grep misterfritz
-          docker rm -f fritz-smoke
+          docker run --rm \
+            -e DISCORD_BOT_TOKEN=smoke-test-placeholder \
+            -e ROOT_USER=discord-000000000000000000 \
+            "$IMAGE" --preflight
+
+      # .dockerignore excludes .env and config.json, so inside the image the
+      # environment is the only source of configuration. With neither variable
+      # set, validate_config MUST refuse to start. If this passes, something
+      # baked a config.json into the image and every container is carrying
+      # somebody's token.
+      - name: The image carries no configuration of its own
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          if docker run --rm "$IMAGE" --preflight; then
+            echo "::error::preflight passed with no DISCORD_BOT_TOKEN and no" \
+                 "ROOT_USER, which means the image carries configuration of" \
+                 "its own. Check .dockerignore."
+            exit 1
+          fi
 
   # ── 3. Canary deployment (requires self-hosted runner or manual trigger) ───
   # In real environments: update Argo Rollouts image tag, which triggers the
