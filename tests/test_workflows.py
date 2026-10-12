@@ -366,6 +366,66 @@ class TestTheSmokeTestCouldEverHavePassed(unittest.TestCase):
                 self.assertNotIn("sleep", step["run"])
 
 
+class TestNothingBuildsAnImageReferenceByHand(unittest.TestCase):
+    """`IMAGE_NAME: ${{ github.repository }}` is `NickSanft/MisterFritz`, and
+    an OCI repository name is lowercase-only — `path-component` is
+    `alpha-numeric [separator alpha-numeric]*` where `alpha-numeric` is
+    `[a-z0-9]+`, and the reference parser returns "repository name must be
+    lowercase" rather than looking anything up.
+
+    metadata-action lowercases the names it pushes, so the registry is right
+    and every hand-built reference was wrong. Two jobs did it: the smoke test,
+    which has never run, and the canary, which hands the result to `kubectl
+    argo rollouts set image`. The second is the one that would have reached a
+    cluster.
+
+    The rule is about the shape, because the next reference somebody writes by
+    hand will have the same defect: a script that mentions IMAGE_NAME must
+    lowercase it.
+    """
+
+    @staticmethod
+    def _run_steps():
+        for path in WORKFLOWS:
+            for job, definition in _jobs(path).items():
+                for step in definition.get("steps") or []:
+                    if "run" in step:
+                        yield path.name, job, step
+
+    def test_the_rule_has_something_to_check(self):
+        self.assertGreater(len(list(self._run_steps())), 5)
+
+    def test_a_script_that_names_the_repository_lowercases_it(self):
+        for workflow, job, step in self._run_steps():
+            script = step["run"]
+            mentioned = "IMAGE_NAME" in script or "IMAGE_NAME" in str(step.get("env") or {})
+            if not mentioned:
+                continue
+            with self.subTest(workflow=workflow, job=job, step=step.get("name")):
+                self.assertIn(
+                    "tr '[:upper:]'", script,
+                    f"{workflow}:{job} builds a registry reference from "
+                    "github.repository without lowercasing it, which is not a "
+                    "parseable reference at all")
+
+    def test_no_script_asks_for_a_tag_named_after_the_full_commit_sha(self):
+        """`type=sha` publishes the SHORT sha. `sha-${{ github.sha }}` names a
+        tag that has never existed and cannot."""
+        for workflow, job, step in self._run_steps():
+            with self.subTest(workflow=workflow, job=job):
+                self.assertNotIn("sha-${{ github.sha }}", step["run"])
+
+    def test_the_canary_deploys_what_the_smoke_test_booted(self):
+        """Not the same version tag — the same digest. Otherwise the two
+        jobs can disagree about which bytes they mean, and the one that
+        reaches the cluster is the one nobody tested."""
+        canary = _jobs(REPO / ".github/workflows/release.yml")["canary-deploy"]
+        [deploy] = [step for step in canary["steps"]
+                    if "kubectl" in str(step.get("run", ""))]
+        self.assertIn("needs.build.outputs.image", str(deploy["env"]))
+        self.assertIn('misterfritz="$IMAGE"', deploy["run"])
+
+
 
 if __name__ == "__main__":                    # pragma: no cover
     unittest.main()

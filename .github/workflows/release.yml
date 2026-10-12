@@ -186,12 +186,17 @@ jobs:
       - name: Update rollout image tag
         env:
           KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+          # Was built by hand as REGISTRY/IMAGE_NAME:VERSION, and IMAGE_NAME is
+          # ${{ github.repository }} — `NickSanft/MisterFritz`. An OCI
+          # repository name may not contain uppercase, so kubectl was being
+          # handed a string no registry can parse, while the image that was
+          # actually pushed is `ghcr.io/nicksanft/misterfritz`. Now it deploys
+          # the digest the smoke test booted, which is also what makes the
+          # canary and the thing that passed the smoke test the same bytes.
+          IMAGE: ${{ needs.build.outputs.image }}
         run: |
           echo "$KUBECONFIG_B64" | base64 -d > /tmp/kubeconfig
           export KUBECONFIG=/tmp/kubeconfig
-
-          VERSION="${{ needs.build.outputs.version }}"
-          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
 
           echo "Setting rollout image to $IMAGE"
           kubectl argo rollouts set image misterfritz \
@@ -203,7 +208,11 @@ jobs:
 
       - name: Post deployment summary
         if: always()
+        env:
+          # Same hand-built reference as above, with the same defect.
+          IMAGE: ${{ needs.build.outputs.image }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
-          echo "## Deployment ${{ needs.build.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Image: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Deployment $VERSION" >> "$GITHUB_STEP_SUMMARY"
+          echo "Image: \`$IMAGE\`" >> "$GITHUB_STEP_SUMMARY"
           echo "Status: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
