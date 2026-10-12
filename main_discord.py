@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import sys
 import time
 import uuid
 
@@ -611,6 +612,22 @@ async def speech_to_text(file_path: str) -> str | None:
 
 
 if __name__ == '__main__':
+    # Arguments used to vanish here. The release smoke test ran
+    # `docker run <image> python local-sim/mock_fritz.py`, and an exec-form
+    # ENTRYPOINT APPENDS what docker run is given rather than replacing it —
+    # so the real command was `python main_discord.py python
+    # local-sim/mock_fritz.py` and this block read none of it. The container
+    # booted the actual bot, failed the Discord login on a placeholder token
+    # and died, while the step that asked for a mock server looked reasonable.
+    # Unknown arguments are an error now, so that mistake cannot be silent.
+    args = sys.argv[1:]
+    if args == ["--preflight"]:
+        # Prove this image boots: everything the entrypoint does except
+        # connecting to Discord. See preflight.py for what and why.
+        import preflight
+        sys.exit(preflight.main())
+    if args:
+        sys.exit(f"main_discord.py takes --preflight or nothing, not {args}")
     validate_config()
     start_metrics_server()
     client.run(DISCORD_BOT_TOKEN)

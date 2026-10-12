@@ -45,6 +45,7 @@ CORE = [
     "migrate_identity",
     "mister_fritz",
     "observability",
+    "preflight",
     "prewarm",
     "privacy",
     "scheduler",

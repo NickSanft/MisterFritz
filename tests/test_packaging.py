@@ -839,11 +839,27 @@ class TestTheUnstructuredCeilingIsAChoiceWithACost(unittest.TestCase):
     once in a comment and trusted forever.
     """
 
+    # The one part of unstructured this repo may touch directly, and why it
+    # does not weaken the argument above: nlp.tokenize is punkt_tab and a POS
+    # tagger over a string already in memory. It takes no URL and opens no
+    # socket. preflight.py imports it to prove the Dockerfile's corpora bake
+    # worked, which is the one thing only an in-image run can establish.
+    MAY_IMPORT = {"unstructured.nlp.tokenize"}
+
     @staticmethod
     def _declaration() -> str:
         [spec] = [d for d in _pyproject()["project"]["dependencies"]
                   if d.lower().startswith("unstructured")]
         return spec
+
+    @staticmethod
+    def _imported_modules(node):
+        """Every module an Import / ImportFrom node names, dotted."""
+        if isinstance(node, ast.Import):
+            return [alias.name for alias in node.names]
+        if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            return [node.module]
+        return []
 
     def test_the_declaration_is_bounded(self):
         from packaging.requirements import Requirement
@@ -879,27 +895,29 @@ class TestTheUnstructuredCeilingIsAChoiceWithACost(unittest.TestCase):
         — which is the point: the exposure would be new, not the test."""
         offenders = []
         for path in sorted(REPO.glob("*.py")):
-            source = path.read_text(encoding="utf-8")
-            tree = ast.parse(source)
+            tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
-                if not isinstance(node, ast.Call):
+                if isinstance(node, ast.Call):
+                    # ast.Name only: a bare `partition(...)`, which is how
+                    # unstructured's entry points are used. `x.partition(":")`
+                    # is str.partition and appears all over identity parsing.
+                    name = getattr(node.func, "id", None)
+                    if name in ("partition", "partition_html", "partition_md"):
+                        offenders.append(f"{path.name}:{node.lineno} {name}()")
                     continue
-                # ast.Name only: a bare `partition(...)`, which is how
-                # unstructured's entry points are used. `x.partition(":")` is
-                # str.partition and appears all over identity parsing.
-                name = getattr(node.func, "id", None)
-                if name not in ("partition", "partition_html", "partition_md"):
-                    continue
-                offenders.append(f"{path.name}:{node.lineno} {name}()")
-            for line in source.splitlines():
-                if "unstructured" in line and not line.strip().startswith("#"):
-                    offenders.append(f"{path.name}: {line.strip()}")
+                for module in self._imported_modules(node):
+                    if module.split(".")[0] != "unstructured":
+                        continue
+                    if module in self.MAY_IMPORT:
+                        continue
+                    offenders.append(f"{path.name}:{node.lineno} imports {module}")
         self.assertEqual(
             offenders, [],
-            "something here now reaches unstructured directly. Re-read the "
-            "ceiling on it in pyproject: CVE-2026-71428 is fixed only in "
-            "0.24.0, and the argument for not having that fix was that no code "
-            "here can reach it.")
+            "something here now reaches unstructured's partitioning API. "
+            "Re-read the ceiling on it in pyproject: CVE-2026-71428 is fixed "
+            "only in 0.24.0, and the argument for not having that fix was that "
+            "no code here can reach it. Add the module to MAY_IMPORT with a "
+            "reason if it has no network path.")
 
     def test_the_loaders_are_still_called_with_a_path(self):
         """The other half of the same claim, about the two call sites that do
