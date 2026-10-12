@@ -107,16 +107,28 @@ class TestEveryActionIsPinnedToACommit(unittest.TestCase):
                         "owns that action can re-point")
         self.assertGreater(found, 0, "no `uses:` lines found at all")
 
-    def test_each_pin_says_which_version_it_is(self):
+    # vMAJOR.MINOR at least. `# v4` was what every pin here carried, and it
+    # cannot answer the only question a reader has — is this current? —
+    # because the major has not moved in two years while the actions behind it
+    # went from Node 20 to Node 24.
+    EXACT = re.compile(r"^v\d+\.\d+(\.\d+)?$")
+
+    def test_each_pin_says_exactly_which_version_it_is(self):
         """A bare 40-character hash tells a reader nothing about whether it is
-        current. The comment is how the pin stays reviewable."""
+        current, and `# v4` tells them almost nothing: it is a moving major,
+        so it stays true while the pin rots underneath it. The comment is the
+        only thing that makes these reviewable."""
         for path in WORKFLOWS:
             for number, spec in self._uses(path):
-                with self.subTest(workflow=path.name, line=number):
+                with self.subTest(workflow=path.name, line=number, uses=spec):
                     self.assertIn("#", spec,
                                   "pinned with no version comment beside it")
-                    self.assertTrue(spec.split("#", 1)[1].strip(),
-                                    "empty version comment")
+                    comment = spec.split("#", 1)[1].strip()
+                    self.assertRegex(
+                        comment, self.EXACT,
+                        f"{path.name}:{number} says {comment!r}. Give the exact "
+                        "release the SHA came from, so the next reader can tell "
+                        "whether it has moved.")
 
     def test_the_convention_is_explained_once_per_workflow(self):
         """Otherwise the next person to add a step copies a tag, and the pins
