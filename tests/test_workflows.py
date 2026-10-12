@@ -188,6 +188,14 @@ class TestTheTestedEnvironmentIsTheShippedOne(unittest.TestCase):
             with self.subTest(file=name):
                 self.assertIn(name, key)
 
+    def test_the_corpora_download_is_off_in_the_nightly_job_too(self):
+        """It resolves the floors, and the floors are now bounded to the nltk
+        era (see the note at the declaration in pyproject), so it lands on an
+        unstructured that downloads at import just like the pinned one."""
+        [step] = [s for s in self.jobs["full-deps"]["steps"]
+                  if "pytest" in str(s.get("run", ""))]
+        self.assertEqual(step["env"].get("AUTO_DOWNLOAD_NLTK"), "false")
+
     def test_the_corpora_download_is_off_where_the_lock_is_installed(self):
         """unstructured 0.18.21 calls nltk.download() at module scope unless
         AUTO_DOWNLOAD_NLTK is false, and tests/test_packaging.py imports that

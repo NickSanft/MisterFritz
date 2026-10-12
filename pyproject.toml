@@ -54,7 +54,40 @@ dependencies = [
     "watchdog>=6.0",
     "msoffcrypto-tool>=5.4",
     "openpyxl>=3.1",
-    "unstructured>=0.18",
+    # Bounded, and the bound is a choice between two bad options rather than
+    # housekeeping. unstructured 0.21.0 (2026-02-22) replaced the nltk
+    # tokenizer with spaCy, and from 0.21.2 unstructured/nlp/tokenize.py
+    # downloads a spaCy model WHEEL from github.com and moves it into
+    # site-packages on first use — no switch of any kind, and a RuntimeError
+    # wherever site-packages is read-only. For an application whose premise is
+    # that the models run locally that is worse than the import-time corpora
+    # download the Dockerfile bakes against, which at least HAS an off switch.
+    #
+    # The ceiling is at 0.19 rather than 0.21 because 0.20.x narrows wrapt to
+    # <2.0.0 while the lock pins wrapt==2.0.1. 0.19 and 0.20 are nltk-era too;
+    # nothing needs them, and admitting them would make the floors resolve a
+    # wrapt this project does not ship, which is the whole failure this batch
+    # is about.
+    #
+    # What the ceiling COSTS, written down rather than discovered later:
+    # CVE-2026-71428, an unauthenticated full-read SSRF through the `url=`
+    # argument of partition() / partition_html() / partition_md(), is fixed
+    # only in 0.24.0 — so this bound forecloses that fix for good. It is not
+    # reachable here. No module in this repo names `unstructured` at all; the
+    # package arrives under two langchain_community loaders, both called with a
+    # path and nothing else (document_engine.py:189, :192), and .msg is not in
+    # SUPPORTED_EXTENSIONS. tests/test_packaging.py fails if URL partitioning
+    # ever appears, which is the condition under which this ceiling would have
+    # to be revisited.
+    #
+    # Upstream's own reason for moving was CVE-2025-14009, nltk's Downloader
+    # unpacking a zip without validating paths. nltk 3.9.3 patched that two
+    # days later, and this lock carries 3.10.3.
+    #
+    # The FLOOR moves for its own reason: CVE-2025-64712, an arbitrary file
+    # write from a crafted .msg attachment, is fixed in 0.18.18, and a bare
+    # `>=0.18` admitted thirteen releases below that.
+    "unstructured>=0.18.21,<0.19",
     "python-docx>=1.2",
     # 6.19.0 is the lowest release clearing all forty-five CVEs that apply to
     # 6.4.2, and there is no 6.4.x release after it. See requirements.txt.

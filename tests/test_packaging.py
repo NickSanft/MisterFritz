@@ -822,6 +822,100 @@ class TestTheTwoDeclarationsDescribeTheSameSoftware(unittest.TestCase):
             "with a reason.")
 
 
+class TestTheUnstructuredCeilingIsAChoiceWithACost(unittest.TestCase):
+    """`unstructured>=0.18` was a bare floor, and bare floors resolve.
+
+    It resolved to 0.27.25 while the lock pins 0.18.21, and the two are
+    different software: 0.21.0 replaced nltk with spaCy, and from 0.21.2 the
+    tokenizer downloads a spaCy model wheel from github.com into site-packages
+    on first use, with no switch to stop it. That is what made four tests red.
+
+    The ceiling that fixes it is not free, and this class is the record of the
+    price. CVE-2026-71428 — an unauthenticated full-read SSRF through the
+    `url=` argument of partition(), partition_html() and partition_md() — is
+    fixed only in 0.24.0, so staying under 0.19 forecloses the fix. The reason
+    that is acceptable is reachability, and reachability is a property of THIS
+    code, not of the dependency. So it is asserted here rather than asserted
+    once in a comment and trusted forever.
+    """
+
+    @staticmethod
+    def _declaration() -> str:
+        [spec] = [d for d in _pyproject()["project"]["dependencies"]
+                  if d.lower().startswith("unstructured")]
+        return spec
+
+    def test_the_declaration_is_bounded(self):
+        from packaging.requirements import Requirement
+        from packaging.version import Version
+        specifier = Requirement(self._declaration()).specifier
+        self.assertIn(Version("0.18.21"), specifier, "the lock's pin must be admitted")
+        for excluded, why in (
+                ("0.18.15", "below the CVE-2025-64712 file-write fix in 0.18.18"),
+                ("0.21.0", "the spaCy rewrite"),
+                ("0.27.25", "what the bare floor was resolving"),
+        ):
+            with self.subTest(version=excluded, why=why):
+                self.assertNotIn(Version(excluded), specifier)
+
+    def test_the_price_of_the_ceiling_is_written_beside_it(self):
+        """A reader looking at a dependency report will find a 9.x SSRF behind
+        a ceiling this project installed on purpose. The comment is where they
+        find out that was known."""
+        text = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+        note = text[:text.index('"unstructured>=')]
+        tail = note[-2600:]
+        # Each advisory WITH the release that fixes it: the id alone does not
+        # tell a reader whether the bound is the reason they still have it.
+        # Found by mutating the floor's sentence away and watching this hold.
+        for claim in ("CVE-2026-71428", "0.24.0", "CVE-2025-64712", "0.18.18"):
+            with self.subTest(claim=claim):
+                self.assertIn(claim, tail)
+
+    def test_nothing_in_this_repo_partitions_a_url(self):
+        """The condition the ceiling rests on. unstructured's SSRF needs a URL
+        to fetch, and every call here hands it a path from the watched folder.
+        If URL partitioning ever lands, this fails and the ceiling has to go
+        — which is the point: the exposure would be new, not the test."""
+        offenders = []
+        for path in sorted(REPO.glob("*.py")):
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                # ast.Name only: a bare `partition(...)`, which is how
+                # unstructured's entry points are used. `x.partition(":")` is
+                # str.partition and appears all over identity parsing.
+                name = getattr(node.func, "id", None)
+                if name not in ("partition", "partition_html", "partition_md"):
+                    continue
+                offenders.append(f"{path.name}:{node.lineno} {name}()")
+            for line in source.splitlines():
+                if "unstructured" in line and not line.strip().startswith("#"):
+                    offenders.append(f"{path.name}: {line.strip()}")
+        self.assertEqual(
+            offenders, [],
+            "something here now reaches unstructured directly. Re-read the "
+            "ceiling on it in pyproject: CVE-2026-71428 is fixed only in "
+            "0.24.0, and the argument for not having that fix was that no code "
+            "here can reach it.")
+
+    def test_the_loaders_are_still_called_with_a_path(self):
+        """The other half of the same claim, about the two call sites that do
+        reach unstructured, through langchain_community."""
+        source = (REPO / "document_engine.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and str(getattr(node.func, "id", "")).startswith("Unstructured")]
+        self.assertEqual(len(calls), 2, "expected exactly the Word and Excel loaders")
+        for call in calls:
+            with self.subTest(line=call.lineno):
+                self.assertTrue(call.args, "called with no positional argument")
+                self.assertEqual(getattr(call.args[0], "id", None), "file_path")
+                self.assertEqual([k.arg for k in call.keywords if k.arg == "url"], [])
+
+
 class TestTheLockActuallyLocks(unittest.TestCase):
     """The file's stated job is "the pinned closure of those roots".
 

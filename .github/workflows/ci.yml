@@ -145,6 +145,10 @@ jobs:
       - name: Run tests
         run: pytest tests/ --tb=short -q
         env:
+          # Same reason as the job above, and now it applies here too: with the
+          # floor bounded to the nltk era, resolving the floors freely still
+          # lands on an unstructured that downloads corpora at import.
+          AUTO_DOWNLOAD_NLTK: "false"
           DISCORD_BOT_TOKEN: "ci-placeholder-token"
           ROOT_USER: "discord-000000000000000000"
           OLLAMA_HOST: "http://127.0.0.1:11434"
