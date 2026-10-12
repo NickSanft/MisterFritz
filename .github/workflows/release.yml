@@ -50,6 +50,24 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-
 
+      # Without this step buildx uses its default `docker` driver — the
+      # BuildKit built into dockerd — and that driver reports
+      # CacheExport=false unless the containerd image store is enabled, which
+      # on a GitHub runner it is not. buildx checks `cache-to` against the
+      # driver's features while it assembles the solve options, BEFORE it reads
+      # the Dockerfile, so the `cache-to` below aborted the build in one to
+      # three seconds. That is why every tagged release since v0.2.0 failed,
+      # and why no image has ever been pushed: four runs, four failures, each
+      # with the one-line annotation "buildx failed with: Learn more at
+      # https://docs.docker.com/go/build-cache-backends/", which is the last
+      # line of exactly one error in the whole buildx source.
+      #
+      # This action's default driver is docker-container, where cache export is
+      # unconditionally supported. `cache-from` was never the problem —
+      # buildx only checks CacheTo against driver features.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+
       - name: Build and push
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25  # v5
         with:

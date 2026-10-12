@@ -207,6 +207,62 @@ class TestTheTestedEnvironmentIsTheShippedOne(unittest.TestCase):
         self.assertEqual(step["env"].get("AUTO_DOWNLOAD_NLTK"), "false")
 
 
+class TestABuildThatExportsACacheCanExportACache(unittest.TestCase):
+    """Four tagged releases, four failures, no image ever pushed — and the
+    cause was two lines of cache configuration with no builder behind them.
+
+    buildx's default driver on a GitHub runner is `docker`, the BuildKit inside
+    dockerd, which reports CacheExport=false unless the containerd image store
+    is on. buildx validates `cache-to` against the driver's features while it
+    assembles the solve options, before it ever reads the Dockerfile, so the
+    build died in one to three seconds with a single line of stderr. The step
+    list of all four runs contains no "Set up Docker Buildx".
+
+    The assertion is conditional on exporting a cache, so the last test here
+    keeps it from passing because nothing does.
+    """
+
+    @staticmethod
+    def _steps(job) -> list:
+        return job.get("steps") or []
+
+    def _exporting_jobs(self):
+        for path in WORKFLOWS:
+            for name, job in _jobs(path).items():
+                steps = self._steps(job)
+                exporters = [index for index, step in enumerate(steps)
+                             if "cache-to" in str(step.get("with") or {})]
+                if exporters:
+                    yield path.name, name, steps, exporters
+
+    def test_every_cache_exporting_job_sets_up_a_builder(self):
+        for workflow, job, steps, _at in self._exporting_jobs():
+            with self.subTest(workflow=workflow, job=job):
+                self.assertTrue(
+                    any("setup-buildx-action" in str(step.get("uses") or "")
+                        for step in steps),
+                    f"{workflow}:{job} passes cache-to with no "
+                    "docker/setup-buildx-action step, so buildx runs on the "
+                    "docker driver and rejects the export before building "
+                    "anything")
+
+    def test_the_builder_is_set_up_before_the_build_that_needs_it(self):
+        """Steps run in order; a builder created afterwards is not the one the
+        build used."""
+        for workflow, job, steps, exporters in self._exporting_jobs():
+            builder = [index for index, step in enumerate(steps)
+                       if "setup-buildx-action" in str(step.get("uses") or "")]
+            with self.subTest(workflow=workflow, job=job):
+                self.assertTrue(builder)
+                self.assertLess(min(builder), min(exporters))
+
+    def test_something_actually_exports_a_cache(self):
+        """Otherwise the two tests above hold over an empty set, which is how a
+        conditional guard quietly stops guarding."""
+        found = [(workflow, job) for workflow, job, _s, _a in self._exporting_jobs()]
+        self.assertEqual(found, [("release.yml", "build")], found)
+
+
 
 if __name__ == "__main__":                    # pragma: no cover
     unittest.main()
