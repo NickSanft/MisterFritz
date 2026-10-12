@@ -744,6 +744,84 @@ class TestTheImageDoesNotFetchCorporaAtImport(unittest.TestCase):
         self.assertIn("LookupError", row[0])
 
 
+class TestTheTwoDeclarationsDescribeTheSameSoftware(unittest.TestCase):
+    """pyproject declares floors; requirements.txt pins the closure of them.
+
+    CI now installs the floors UNDER the pins (`pip install -c
+    requirements.txt -e ".[dev]"`), which only has a solution while every
+    declaration admits its own pin. A floor raised above its pin, or a pin
+    moved below its floor, would turn that into a ResolutionImpossible that
+    reads like a registry problem rather than like the edit that caused it.
+
+    This checks it from the two files, with no network and no install.
+    """
+
+    @staticmethod
+    def _pins() -> dict:
+        pins = {}
+        for line in (REPO / "requirements.txt").read_text(encoding="utf-8").splitlines():
+            line = line.split("#")[0].strip()
+            if not line or "==" not in line:
+                continue
+            name, _, rest = line.partition("==")
+            key = name.strip().lower().replace("_", "-").replace(".", "-")
+            pins[key] = rest.split(";")[0].strip()
+        return pins
+
+    @staticmethod
+    def _declarations():
+        proj = _pyproject()["project"]
+        groups = {"core": proj["dependencies"]}
+        groups.update({name: reqs for name, reqs
+                       in proj["optional-dependencies"].items() if name != "all"})
+        for group, reqs in groups.items():
+            for raw in reqs:
+                if raw.startswith("misterfritz["):     # the [all] aggregate
+                    continue
+                yield group, raw
+
+    def test_the_declarations_are_found(self):
+        """So a restructure of pyproject cannot make the rest vacuous."""
+        found = list(self._declarations())
+        self.assertGreater(len(found), 40, found)
+        self.assertGreater(len(self._pins()), 200)
+
+    def test_every_declaration_admits_its_own_pin(self):
+        from packaging.requirements import Requirement
+        from packaging.version import Version
+        pins = self._pins()
+        for group, raw in self._declarations():
+            requirement = Requirement(raw)
+            key = requirement.name.lower().replace("_", "-").replace(".", "-")
+            if key not in pins:
+                continue                 # covered by the next test
+            with self.subTest(group=group, declared=raw):
+                self.assertIn(
+                    Version(pins[key]), requirement.specifier,
+                    f"pyproject's [{group}] asks for {raw!r} and the lock pins "
+                    f"{key}=={pins[key]}. CI installs the first constrained by "
+                    "the second, so these two cannot disagree.")
+
+    def test_only_the_dev_tooling_floats_under_the_constraint(self):
+        """Everything else must be pinned, or the constrained install is not
+        actually installing the shipped closure. nh3 is a deliberate bounded
+        range in both files and python-telegram-bot is the one dependency with
+        no resolved version to pin (see the note at the end of the lock)."""
+        unpinned = sorted(
+            raw for _group, raw in self._declarations()
+            if raw.split(";")[0].split("[")[0].strip().lower()
+            .replace("_", "-").replace(".", "-")
+            .split(">")[0].split("<")[0].split("=")[0].split("!")[0].split("~")[0]
+            not in self._pins())
+        self.assertEqual(
+            unpinned,
+            ["nh3>=0.3,<0.4", "pytest-asyncio>=0.24", "pytest-cov>=5.0",
+             "pytest>=8.0", "python-telegram-bot>=20.0", "ruff>=0.6"],
+            "something declared in pyproject has no pin in the lock, so a "
+            "constrained install resolves it freely. Pin it, or add it here "
+            "with a reason.")
+
+
 class TestTheLockActuallyLocks(unittest.TestCase):
     """The file's stated job is "the pinned closure of those roots".
 

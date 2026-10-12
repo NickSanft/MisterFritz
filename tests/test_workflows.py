@@ -126,6 +126,79 @@ class TestEveryActionIsPinnedToACommit(unittest.TestCase):
                 text = path.read_text(encoding="utf-8")
                 self.assertIn("moving pointer", text)
 
+class TestTheTestedEnvironmentIsTheShippedOne(unittest.TestCase):
+    """CI installed pyproject's floors; the Dockerfile installs the lock. For
+    four days that difference made the suite red on a commit that touched
+    neither file.
+
+    `unstructured>=0.18` resolved to 0.27.25, and unstructured 0.21.0 replaced
+    nltk with spaCy. Three tests that read the INSTALLED tokenizer's source to
+    check the Dockerfile's corpora bake were therefore reading a module that no
+    longer mentions nltk, and a fourth asked importlib for the version of a
+    package the floors no longer install at all. The assertions were right. The
+    environment was not the one they were written about, and nothing said so.
+
+    These are about the pipeline, not about the packages: that the job which
+    gates a push installs the pinned closure, and that the nightly job does
+    NOT, because resolving the floors freely is how drift like this surfaces.
+    """
+
+    CI = REPO / ".github/workflows/ci.yml"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.jobs = _jobs(cls.CI)
+
+    @staticmethod
+    def _install_step(job) -> dict:
+        [step] = [s for s in job["steps"]
+                  if "pip install" in str(s.get("run", ""))]
+        return step
+
+    def test_the_push_path_installs_under_the_lock(self):
+        step = self._install_step(self.jobs["test"])
+        self.assertIn(
+            "-c requirements.txt", step["run"],
+            "the job that gates every push resolves pyproject's floors, so it "
+            "tests whatever PyPI offers today rather than what the Dockerfile "
+            "installs. Constrain it to the lock.")
+
+    def test_the_nightly_job_is_left_unconstrained_on_purpose(self):
+        """The other half. Constraining both would make the floors
+        unobserved, and an unobserved floor is how this happened."""
+        step = self._install_step(self.jobs["full-deps"])
+        self.assertNotIn("-c requirements.txt", step["run"])
+        self.assertIn('-e ".[all]"', step["run"])
+
+    def test_the_nightly_job_is_not_on_the_push_path(self):
+        """Because it is the one allowed to go red on somebody else's release.
+        If it ever gates a push, drift stops being information and starts
+        being a blocked merge."""
+        condition = self.jobs["full-deps"]["if"]
+        self.assertIn("schedule", condition)
+        self.assertIn("workflow_dispatch", condition)
+
+    def test_the_pip_cache_key_notices_a_lock_change(self):
+        """It was keyed on pyproject alone, so editing requirements.txt
+        reused a cache built from different pins."""
+        [setup] = [s for s in self.jobs["test"]["steps"]
+                   if "setup-python" in str(s.get("uses", ""))]
+        key = setup["with"]["cache-dependency-path"]
+        for name in ("pyproject.toml", "requirements.txt"):
+            with self.subTest(file=name):
+                self.assertIn(name, key)
+
+    def test_the_corpora_download_is_off_where_the_lock_is_installed(self):
+        """unstructured 0.18.21 calls nltk.download() at module scope unless
+        AUTO_DOWNLOAD_NLTK is false, and tests/test_packaging.py imports that
+        module. Under the constraint CI gets that unstructured, so without this
+        every run reaches the network inside a `quiet=True` call that says
+        nothing when it fails. The image sets the same variable."""
+        [step] = [s for s in self.jobs["test"]["steps"]
+                  if "pytest" in str(s.get("run", ""))]
+        self.assertEqual(step["env"].get("AUTO_DOWNLOAD_NLTK"), "false")
+
+
 
 if __name__ == "__main__":                    # pragma: no cover
     unittest.main()

@@ -37,13 +37,31 @@ jobs:
           python-version: "3.12"
           # Was absent, so every run re-downloaded the whole closure.
           cache: pip
-          cache-dependency-path: pyproject.toml
+          # Both files, because the install below reads both. Keyed on
+          # pyproject alone, editing the lock did not invalidate the cache.
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.txt
 
       # Core is deliberately torch-free — the GPU stack lives in the [image]
       # and [voice] extras, which this job does not install. See the
       # deferred imports in bot_commands / main_discord / agent_tools.
-      - name: Install core + dev
-        run: pip install -e ".[dev]"
+      #
+      # `-c requirements.txt` is what makes this job test what ships. pyproject
+      # declares FLOORS; requirements.txt is the pinned closure the Dockerfile
+      # installs, and nothing installed it anywhere in CI. So the floors
+      # resolved freely, and `unstructured>=0.18` resolved to 0.27.x — which
+      # dropped nltk for spaCy in 0.21.0. Tests written about the shipped
+      # closure then ran against a package family nobody ships, and went red
+      # on a commit that touched neither file.
+      #
+      # The constraint has a solution: every declaration in pyproject is
+      # admitted by its pin, which tests/test_packaging.py now checks from the
+      # two files rather than hoping. The nightly full-deps job below stays
+      # unconstrained on purpose — that is where floor drift is meant to
+      # surface, nightly, blocking nothing.
+      - name: Install core + dev, at the versions we ship
+        run: pip install -c requirements.txt -e ".[dev]"
 
       - name: Compile all sources
         run: python -m compileall -q .
@@ -74,6 +92,14 @@ jobs:
           WHISPER_MODEL: "small"
           WHISPER_DEVICE: "cpu"
           WHISPER_COMPUTE_TYPE: "int8"
+          # The image's own setting (Dockerfile), for the same reason and one
+          # more. unstructured 0.18.21 calls nltk.download() at MODULE scope
+          # unless this is false, and tests/test_packaging.py imports that
+          # module to read it — so without this the suite would fetch two
+          # corpora over the network on every run, quietly, inside a
+          # `quiet=True` call that says nothing when it fails. Nothing here
+          # parses a real .docx, so no corpus is needed.
+          AUTO_DOWNLOAD_NLTK: "false"
 
   full-deps:
     name: all extras (CPU wheels)
