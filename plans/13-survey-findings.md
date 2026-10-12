@@ -283,6 +283,48 @@ Also here, for sequencing only: the queued **`file_tools` symlink hardening** �
 > environment that pass today by luck rather than design — the constrained
 > install is what makes them meaningful, and it is now in place.
 >
+> **The image has now been built and booted, and two estimates in these
+> commits are wrong.** Run 38290801171, dispatched manually against master
+> after the batch landed, is the first time any automation has built this
+> Dockerfile. All three jobs passed. What the entrypoint reported from inside
+> the image:
+>
+> ```
+> preflight: 5 checks
+>   ok    modules a boot never loads: imported migrate_db, migrate_identity
+>   ok    configuration: validate_config passed, version 0.1.0
+>   ok    command surface: 19 commands: Block this sender, about, ...
+>   ok    document corpora: punkt_tab split 2, tagger tagged 9
+>   ok    metrics server: 127.0.0.1:8000 /health ok, /metrics 2735 bytes, 404 works
+> preflight passed
+> ```
+>
+> The corpora line is the one that could not be checked anywhere else: the
+> Dockerfile's `nltk.download` bake and its `AUTO_DOWNLOAD_NLTK=false` are two
+> independent build steps, and that line is them agreeing. The
+> no-configuration run behaved as designed too — with neither variable set,
+> `configuration` failed with "Missing required configuration" and the other
+> four checks still ran, so `.dockerignore` really did keep config.json out.
+>
+> **Correction 1, the one that matters: the build takes 6m22s, not 15-30
+> minutes.** Boot adds 10s; the whole job is 6m51s, with no layer cache at
+> all. `2cd9cd6` justified keeping this off the push path with the larger
+> figure, which was arithmetic on measured wheel sizes and download rates
+> rather than an observation, and it was pessimistic by a factor of two to
+> five. At seven minutes, per-push is defensible, and per-push filtered to
+> commits touching `Dockerfile` or `requirements.txt` plainly is. Left as-is
+> because changing the trigger on the strength of one run is the same mistake
+> in the other direction — but the number in that commit message should not
+> be trusted.
+>
+> **Correction 2:** the CPU-index item above is still worth doing, but for
+> image size (~8.5 GiB installed, ~5 GB pushed) rather than for build time.
+>
+> Still unverified, and unchanged by this: the RELEASE path. No `v*` tag has
+> been pushed since the fixes, so buildx-with-a-driver, the digest reference,
+> the GHCR login and the canary's reference have all been reasoned about and
+> none has run.
+>
 > 72 mutations RED across the nine commits, counted from the specs rather
 > than added up from the commit messages, two of which overstate their own
 > run by one. Four guards were blind until a
