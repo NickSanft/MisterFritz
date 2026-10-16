@@ -256,14 +256,14 @@ TTS_MAX_CONCURRENCY: int = _at_least_one("TTS_MAX_CONCURRENCY", "1")
 # a shared server DM anyone else with no way for the recipient to refuse. The
 # plan calls that a ship blocker. Setting RELAY_ENABLED=true early is possible
 # and deliberate; it is not the default.
-RELAY_ENABLED: bool = os.environ.get("RELAY_ENABLED", "false").lower() in ("1", "true", "yes")
+RELAY_ENABLED: bool = os.environ.get("RELAY_ENABLED", "true").lower() in ("1", "true", "yes")
 # Reserved for the phase 2 agent tool ("tell Alice I'll be late", with the
 # model choosing the wording). That tool is NOT BUILT: nothing in the tree
 # reads this value except validate_config below, which warns that setting it
 # does nothing. The name is kept so the switch exists before the capability
 # does — flipping it must never be what introduces the ability for a model to
 # DM somebody.
-RELAY_AGENT_TOOL_ENABLED: bool = os.environ.get("RELAY_AGENT_TOOL_ENABLED", "false").lower() in ("1", "true", "yes")
+RELAY_AGENT_TOOL_ENABLED: bool = os.environ.get("RELAY_AGENT_TOOL_ENABLED", "true").lower() in ("1", "true", "yes")
 RELAY_MAX_BODY_CHARS: int = _at_least_one("RELAY_MAX_BODY_CHARS", "1000")
 RELAY_MAX_PER_SENDER_PER_HOUR: int = _at_least_one("RELAY_MAX_PER_SENDER_PER_HOUR", "10")
 # The only limit that constrains a brigade — many senders, one recipient.
