@@ -32,6 +32,8 @@ This file is the integration layer: what to build once, what collides with what,
 
 [13. What is left — the survey findings](13-survey-findings.md) — the October 2026 117-agent survey, verified and batched: six items that break something today (a failed TTS load removing every slash command, a non-idempotent `on_ready`, `migrate_db` bricking a fresh deployment, the agent's reminders sharing one pseudo-identity, neither deployment persisting the database, and overlapping turns losing an exchange), then 16 more in batches B–G. Also records the 17 candidates that were refuted, and four questions that need answers in [DECISIONS.md](DECISIONS.md) before they can be planned.
 
+[14. Desktop companion](14-desktop-companion.md) — Fritz gets a body: a VRM avatar in a Tauri 2 overlay talking to the brain over a new `/companion` WebSocket (text in Phase 1, push-to-talk voice in Phase 2), then Lorraine-style live wallpaper and widgets (Phase 3), read-only Gmail/Calendar/Drive through `workspace-mcp` gated to `ROOT_USER` (Phase 4), and a second device over the same protocol (Phase 5). Phase 1 is gated on a one-day overlay spike because of Lorraine's foreground-stealing finding. The overlay lifts DivoraVoice's shipped `overlay_machine`/`overlay_windows` and the chrome adopts DivoraVoice's design system (tokens, moods, sigils, components), with Fritz's house look as the `ink` mood. Decisions 28–34 proposed. The execution-level companion is [14-desktop-companion-build.md](14-desktop-companion-build.md).
+
 
 ---
 
