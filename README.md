@@ -47,7 +47,7 @@ Mister Fritz is an AI-powered Discord bot with a sophisticated, sardonic persona
 | `/schedule add <cron\|interval> <prompt>` | Schedule a recurring prompt in this channel |
 | `/schedule list` / `remove <id>` | See or cancel your schedules |
 | `/schedule list_all` | (Admin only) Schedules across all users |
-| `/tell <member> <message>` | Carry your exact words to that member by DM, attributed to you. Off unless `RELAY_ENABLED=true` |
+| `/tell <member> <message>` | Carry your exact words to that member by DM, attributed to you. On unless `RELAY_ENABLED=false` |
 | `/relay block <member>` / `block-everyone` | Refuse messages relayed to you, from one person or from everyone |
 | `/relay unblock <member>` / `status` / `forget-blocks` | Manage whom you are refusing |
 
@@ -316,7 +316,7 @@ See [Direct-message relay](#direct-message-relay) for what the feature does.
 
 | Variable | Default | Description |
 |---|---|---|
-| `RELAY_ENABLED` | `false` | Master switch for `/tell` and everything around it. Off by default: it sends a DM to somebody who did not ask for it, so turning it on is a deliberate decision about your server. Turn the feature off here rather than by zeroing a count. |
+| `RELAY_ENABLED` | `true` | Master switch for `/tell` and everything around it. On by default. It sends a DM to somebody who did not ask for it, so leaving it on is a decision about your server; set `false` to turn it off. Turn the feature off here rather than by zeroing a count. |
 | `RELAY_AGENT_TOOL_ENABLED` | `false` | Reserved for the agent-facing relay tool ("tell Alice I'll be late"), which is **not built**. Setting it does nothing today, and Fritz warns at startup if you set it. |
 | `RELAY_MAX_BODY_CHARS` | `1000` | Longest message `/tell` will carry. |
 | `RELAY_MAX_PER_SENDER_PER_HOUR` | `10` | Per-sender rate limit — stops one person nagging. |
@@ -429,11 +429,11 @@ Off by default, because **turning it on branches every existing conversation**: 
 
 ## Direct-message relay
 
-`/tell @user <message>` has Fritz carry your exact words to another member of the server by DM, attributed to you. It is the one feature that makes Fritz message somebody who has not spoken to him, which is why it is **off by default**: set `RELAY_ENABLED=true` deliberately, as a decision about your server.
+`/tell @user <message>` has Fritz carry your exact words to another member of the server by DM, attributed to you. It is the one feature that makes Fritz message somebody who has not spoken to him, which is why it has a master switch. It is **on by default**; set `RELAY_ENABLED=false` if you do not want it on your server.
 
 A recipient gets a DM naming you, your message verbatim, and three buttons: `[Reply]`, `[Not now]` and `[Block sender]`. Replying opens a form, and the answer is carried back to you the same way, so neither of you needs the other's DMs open. **Apps → Block this sender** on the message does the same as the button, and `/relay block` does it by name.
 
-The parts worth knowing before turning it on:
+The parts worth knowing before leaving it on:
 
 - **Consent belongs to the recipient, not the sender.** `/relay block @someone` refuses that person, `/relay block-everyone` refuses the whole feature, and a block is resolved at the gate — before anything is sent, and without telling the sender. `/tell` answers the same way whether or not you are blocked, so it cannot be used to detect one.
 - **Blocks survive `/forget all`.** Deleting your own data does not re-arm somebody you refused, because a privacy command must not become a safety regression. `/relay forget-blocks` is the explicit way to clear them, and the only way.

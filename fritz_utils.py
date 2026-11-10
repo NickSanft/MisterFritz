@@ -250,20 +250,20 @@ TTS_MAX_CONCURRENCY: int = _at_least_one("TTS_MAX_CONCURRENCY", "1")
 # =false, never a 0 count — see the note above IMAGE_GEN_MAX_CONCURRENCY for
 # what a legal-but-unusable 0 cost last time.
 #
-# Ships FALSE while Phase 1 is being built, and flips to true in the commit that
-# completes it. Every PR lands straight on master, so every intermediate state
-# is deployable, and /tell alone - before /relay block exists - lets anyone in
-# a shared server DM anyone else with no way for the recipient to refuse. The
-# plan calls that a ship blocker. Setting RELAY_ENABLED=true early is possible
-# and deliberate; it is not the default.
+# Shipped FALSE while Phase 1 was being built: every PR lands straight on
+# master, and /tell alone - before /relay block existed - let anyone in a shared
+# server DM anyone else with no way for the recipient to refuse. Phase 1 has
+# landed, and the default is now TRUE (aecfe90). RELAY_ENABLED=false turns the
+# whole feature off for a server that does not want it.
 RELAY_ENABLED: bool = os.environ.get("RELAY_ENABLED", "true").lower() in ("1", "true", "yes")
 # Reserved for the phase 2 agent tool ("tell Alice I'll be late", with the
 # model choosing the wording). That tool is NOT BUILT: nothing in the tree
 # reads this value except validate_config below, which warns that setting it
 # does nothing. The name is kept so the switch exists before the capability
 # does — flipping it must never be what introduces the ability for a model to
-# DM somebody.
-RELAY_AGENT_TOOL_ENABLED: bool = os.environ.get("RELAY_AGENT_TOOL_ENABLED", "true").lower() in ("1", "true", "yes")
+# DM somebody. Stays FALSE: defaulting it on made every boot log that warning
+# about a setting nobody had chosen.
+RELAY_AGENT_TOOL_ENABLED: bool = os.environ.get("RELAY_AGENT_TOOL_ENABLED", "false").lower() in ("1", "true", "yes")
 RELAY_MAX_BODY_CHARS: int = _at_least_one("RELAY_MAX_BODY_CHARS", "1000")
 RELAY_MAX_PER_SENDER_PER_HOUR: int = _at_least_one("RELAY_MAX_PER_SENDER_PER_HOUR", "10")
 # The only limit that constrains a brigade — many senders, one recipient.

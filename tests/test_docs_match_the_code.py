@@ -220,10 +220,13 @@ class TestTheRelayIsDiscoverable(unittest.TestCase):
         self.assertIn("/tell", features)
         self.assertIn("#direct-message-relay", features)
 
-    def test_it_says_that_it_is_off_by_default_and_why(self):
+    def test_it_says_that_it_is_on_by_default_and_how_to_turn_it_off(self):
+        """The default flipped in aecfe90 while this still asserted "off by
+        default", so it went on passing against a README that had stopped
+        being true. It now asserts the switch an operator actually needs."""
         section = self._section()
-        self.assertIn("off by default", section.lower())
-        self.assertIn("RELAY_ENABLED", section)
+        self.assertIn("on by default", section.lower())
+        self.assertIn("RELAY_ENABLED=false", section)
 
     def test_it_explains_the_recipients_side(self):
         """The half a sender cannot discover: blocks, and that they outlast

@@ -603,13 +603,23 @@ class TestNonMemberRecipient(unittest.IsolatedAsyncioTestCase):
         self.assertIn("permitted range", interaction.response.send_message.await_args.args[0])
 
 
-class TestShipsDark(unittest.TestCase):
-    def test_the_relay_is_off_unless_an_operator_turns_it_on(self):
-        """Every commit lands on master. Until /relay block exists, a live /tell
-        lets anyone DM anyone with no way to refuse. Read from source so a
-        developer's own .env cannot make this pass or fail."""
+class TestShippedDefaults(unittest.TestCase):
+    """Read from source so a developer's own .env cannot make these pass or fail."""
+
+    def test_the_relay_is_on_unless_an_operator_turns_it_off(self):
+        """It shipped dark while Phase 1 was being built, because every commit
+        lands on master and a /tell without /relay block let anyone DM anyone
+        with no way to refuse. Phase 1 landed, and aecfe90 made on the default;
+        RELAY_ENABLED=false is how an operator opts a server out."""
         src = Path(fritz_utils.__file__).read_text(encoding="utf-8")
-        self.assertIn('os.environ.get("RELAY_ENABLED", "false")', src)
+        self.assertIn('os.environ.get("RELAY_ENABLED", "true")', src)
+
+    def test_the_reserved_agent_tool_switch_is_off(self):
+        """Nothing reads RELAY_AGENT_TOOL_ENABLED: the tool it is reserved for
+        is not built, and validate_config warns whenever it is true. Defaulting
+        it on made every boot log that warning about a setting nobody chose."""
+        src = Path(fritz_utils.__file__).read_text(encoding="utf-8")
+        self.assertIn('os.environ.get("RELAY_AGENT_TOOL_ENABLED", "false")', src)
 
 
 if __name__ == "__main__":
