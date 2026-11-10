@@ -132,6 +132,43 @@ class TestSecurityCriticalDependencies(unittest.TestCase):
         self.assertNotIn("<script", nh3.clean("<script>alert(1)</script><p>ok</p>"))
 
 
+class TestTheServerCanSpeakWebSocket(unittest.TestCase):
+    """The desktop companion talks to the brain over a WebSocket (plan 14).
+
+    uvicorn ships no WebSocket implementation of its own. Without websockets
+    or wsproto it logs "Unsupported upgrade request" at warning level and
+    serves the handshake as plain HTTP, which never reaches a WebSocketRoute.
+    Every test would stay green, because Starlette's TestClient never goes
+    through uvicorn. websockets used to be in the closure only because
+    langgraph-sdk depends on it, so a lock regeneration after that dependency
+    moved would have taken the desk offline in silence.
+    """
+
+    def test_websockets_is_pinned_and_declared(self):
+        self.assertIn("websockets", _requirements_names())
+        declared = {re.split(r"[<>=!~\[;\s]", r)[0].lower()
+                    for r in _pyproject()["project"]["dependencies"]}
+        self.assertIn(
+            "websockets", declared,
+            "uvicorn serves /companion only if a WebSocket library is "
+            "importable; declare websockets in core, not just in the lock.",
+        )
+
+    def test_uvicorn_finds_a_websocket_implementation(self):
+        # The pin existing is not the same as uvicorn picking it up.
+        import warnings
+        with warnings.catch_warnings():
+            # uvicorn 0.38's "auto" resolves to its websockets.legacy protocol,
+            # which websockets >= 14 marks deprecated on import.
+            warnings.simplefilter("ignore", DeprecationWarning)
+            from uvicorn.protocols.websockets.auto import AutoWebSocketsProtocol
+        self.assertIsNotNone(
+            AutoWebSocketsProtocol,
+            "uvicorn found no WebSocket library, so it would answer the "
+            "desktop companion's upgrade request as plain HTTP.",
+        )
+
+
 class TestCoreIsTorchFree(unittest.TestCase):
     """Core must not pull the multi-GB GPU stack.
 

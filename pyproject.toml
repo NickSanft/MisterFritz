@@ -99,9 +99,16 @@ dependencies = [
     # audio preprocessing. stt.py imports pydub at module level; the Whisper
     # model itself is deferred and lives in [voice].
     "pydub>=0.25",
-    # admin panel + web chat
+    # admin panel + web chat + the desktop companion's /companion WebSocket
     "starlette>=1.3.1",           # GHSA-82w8-qh3p-5jfq: form() size limits
-    "uvicorn>=0.38",               # plain Config: no reload, no websockets
+    "uvicorn>=0.38",               # plain Config: no reload; WebSockets via the line below
+    # uvicorn has no WebSocket implementation of its own. With neither
+    # websockets nor wsproto importable it logs "Unsupported upgrade request"
+    # and serves the handshake as plain HTTP, which can never reach a
+    # WebSocketRoute, so the desktop companion could not connect. It was in the
+    # closure only because langgraph-sdk happens to need it; declared now that
+    # this app is a direct consumer (plans/14-desktop-companion-build.md, P0).
+    "websockets>=13",
     "python-multipart>=0.0.22",    # multipart form parsing for uploads
     "Jinja2>=3.1",
     "Markdown>=3.5",
