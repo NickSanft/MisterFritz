@@ -207,6 +207,21 @@ OLLAMA_HOST=http://127.0.0.1:11434
 python main_discord.py
 ```
 
+**Or run the web surfaces without Discord.** `main_local.py` serves the admin
+panel and the web chat (and, later, the desktop companion) with no Discord login.
+It needs `ADMIN_PANEL_PASSWORD` and `ROOT_USER` (plus `CHAT_PASSWORD` for the web
+chat's sign-in), not `DISCORD_BOT_TOKEN`. Run it *instead of* `main_discord.py`,
+never beside it: the two share ports, the conversation database and the memory
+store. `main_local.py` refuses to start while another copy of the brain is
+serving, but `main_discord.py` does not check, so stop one before starting the
+other. Schedules do not fire under `main_local.py`, because they can only be
+delivered to Discord. Recurring ones are kept and resume once `main_discord.py`
+is back; a run that falls due in between is skipped.
+
+```bash
+python main_local.py
+```
+
 ---
 
 ### Option B — Docker Compose (app + monitoring)
@@ -254,7 +269,7 @@ All settings can be set as environment variables or in a `.env` file. `.env.exam
 
 | Variable | Default | Description |
 |---|---|---|
-| `DISCORD_BOT_TOKEN` | — | **Required.** Your Discord bot token |
+| `DISCORD_BOT_TOKEN` | — | **Required** for `main_discord.py`. Your Discord bot token. `main_local.py` runs without it. |
 | `ROOT_USER` | — | **Required.** Canonical identity with admin privileges (`/workspace set`, `/schedule add/remove`). Use `discord-<your numeric id>`, not your username — see [Identity](#identity). |
 | `ADMIN_USERS` | — | Comma-separated additional admin identities, same canonical form. Anyone listed gets the same powers as `ROOT_USER`. |
 | `THREADS_PER_CHANNEL` | `false` | One conversation thread per channel instead of one per person. Turning it on branches every existing conversation — see [Identity](#identity). |
@@ -452,6 +467,7 @@ User (Discord)
     │
     ▼
 main_discord.py   ──  slash commands, on_message, streaming handler
+                      (main_local.py: the web surfaces alone, no Discord)
     │
     ▼
 mister_fritz.py   ──  LangGraph state machine: START → executor → (summarize | END)

@@ -1340,6 +1340,17 @@ def create_app(password: str, schedule_manager=None, chat_password: str | None =
 _PANEL_THREAD: Optional[threading.Thread] = None
 
 
+def panel_is_serving() -> bool:
+    """True while the panel's server thread is alive.
+
+    A failed bind (the port already taken) does not raise to the caller:
+    uvicorn logs it and exits its own thread, after start_admin_panel has
+    already returned the port. main_local polls this so it can exit instead of
+    standing there serving nothing.
+    """
+    return _PANEL_THREAD is not None and _PANEL_THREAD.is_alive()
+
+
 def start_admin_panel(schedule_manager=None) -> Optional[int]:
     """Spin up the admin panel in a background thread.
 

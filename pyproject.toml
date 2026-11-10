@@ -189,6 +189,7 @@ py-modules = [
     "identity_store",
     "image_generator",
     "main_discord",
+    "main_local",
     "main_telegram",
     "migrate_db",
     "migrate_identity",

@@ -15,12 +15,7 @@ from bot_commands import FritzCommands, handle_tree_error
 from fritz_utils import (
     DISCORD_BOT_TOKEN,
     DISCORD_STREAM_MIN_INTERVAL,
-    EMBEDDING_MODEL,
-    FAST_OLLAMA_MODEL,
     MessageSource,
-    OLLAMA_KEEP_ALIVE,
-    THINKING_OLLAMA_MODEL,
-    VISION_MODEL,
     canonical_user_id,
     safe_user_token,
     validate_config,
@@ -28,7 +23,7 @@ from fritz_utils import (
 import identity_store
 from mister_fritz import ask_stuff
 from observability import METRICS, init_logging, start_metrics_server
-from prewarm import prewarm_models
+from prewarm import configured_models, prewarm_models
 import relay_router
 import relay_store
 from scheduler import ScheduleManager
@@ -307,11 +302,7 @@ async def on_ready():
         # Pre-warm Ollama in a daemon thread so the first DM doesn't pay
         # model-load lag. Once per process: a reconnect does not cool the
         # models, and re-warming three of them costs real GPU time.
-        prewarm_models(
-            chat_models=(THINKING_OLLAMA_MODEL, FAST_OLLAMA_MODEL, VISION_MODEL),
-            embedding_models=(EMBEDDING_MODEL,),
-            keep_alive=OLLAMA_KEEP_ALIVE,
-        )
+        prewarm_models(**configured_models())
         _models_prewarmed = True
     cog = client.get_cog("FritzCommands")
     if cog is None:

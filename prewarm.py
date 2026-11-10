@@ -38,6 +38,23 @@ def _prewarm_embedding(model: str, keep_alive: str) -> None:
         logger.debug("Pre-warm of embedding %s failed (non-fatal): %s", model, e)
 
 
+def configured_models() -> dict:
+    """The models every entry point warms, as keyword arguments for prewarm_models.
+
+    The three chat models and the embedder. The vision model is not optional:
+    Discord and the web chat both accept images. One definition, so that
+    main_discord and main_local cannot drift apart. fritz_utils is imported
+    here, not at module scope, to keep this module cheap to import.
+    """
+    import fritz_utils
+    return {
+        "chat_models": (fritz_utils.THINKING_OLLAMA_MODEL, fritz_utils.FAST_OLLAMA_MODEL,
+                        fritz_utils.VISION_MODEL),
+        "embedding_models": (fritz_utils.EMBEDDING_MODEL,),
+        "keep_alive": fritz_utils.OLLAMA_KEEP_ALIVE,
+    }
+
+
 def prewarm_models(
     chat_models: Iterable[str],
     embedding_models: Iterable[str] = (),

@@ -486,6 +486,14 @@ class TestOnReadyIsIdempotent(OnReadyCase):
             await self.reconnect(times=3)
         main_discord.prewarm_models.assert_called_once()
 
+    async def test_it_warms_the_shared_model_set(self):
+        """The set main_local warms too (tests/test_main_local.py). One
+        definition in prewarm.configured_models, so the two cannot drift."""
+        import prewarm
+        with self._loading_tts({"return_value": MagicMock()}):
+            await self.reconnect()
+        main_discord.prewarm_models.assert_called_once_with(**prewarm.configured_models())
+
     async def test_the_admin_panel_is_started_once(self):
         """The call is made every time; the guard that matters is inside
         start_admin_panel, because the port belongs to the process. This

@@ -394,6 +394,17 @@ class TestAmbientSettingsCannotRedirectTheStore(unittest.TestCase):
             fu.validate_config()
         self.assertIn("CHROMA_API_IMPL", str(caught.exception))
 
+    def test_a_remote_api_impl_is_refused_without_discord_too(self):
+        """main_local.py validates with require_discord=False. That relaxes the
+        token and nothing else: the web chat and the desk reach the same
+        memories, so the guard has to hold there as well."""
+        os.environ["CHROMA_API_IMPL"] = "chromadb.api.fastapi.FastAPI"
+        with unittest.mock.patch.object(fu, "DISCORD_BOT_TOKEN", None), \
+             unittest.mock.patch.object(fu, "ROOT_USER", "discord-1"):
+            with self.assertRaises(RuntimeError) as caught:
+                fu.validate_config(require_discord=False)
+        self.assertIn("CHROMA_API_IMPL", str(caught.exception))
+
     def test_the_name_is_matched_the_way_chromadb_reads_it(self):
         """pydantic-settings matches environment names case-insensitively, so a
         lowercase line in a .env binds for chromadb just as well.

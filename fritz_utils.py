@@ -769,10 +769,17 @@ def refuse_stored_embedders(collection, source: str) -> None:
 # Startup validation
 # ---------------------------------------------------------------------------
 
-def validate_config() -> None:
-    """Raise RuntimeError with a clear message if required config is missing."""
+def validate_config(*, require_discord: bool = True) -> None:
+    """Raise RuntimeError with a clear message if required config is missing.
+
+    `require_discord=False` is for main_local.py, which serves the web surfaces
+    with no Discord login at all. It drops only the DISCORD_BOT_TOKEN
+    requirement: every other check still runs, and the CHROMA_API_IMPL guard
+    below matters as much there as anywhere, because the same brain - and the
+    same memories - sit behind the web chat and the desk.
+    """
     missing = []
-    if not DISCORD_BOT_TOKEN:
+    if require_discord and not DISCORD_BOT_TOKEN:
         missing.append("DISCORD_BOT_TOKEN  (or 'discord_bot_token' in config.json)")
     if not ROOT_USER:
         missing.append("ROOT_USER  (or 'root_user' in config.json)")

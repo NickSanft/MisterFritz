@@ -266,6 +266,35 @@ class TestValidateConfigWarnsOnLegacyAdminNames(unittest.TestCase):
         self.assertIn("divora", blob)
         self.assertIn("someone_else", blob)
 
+    def test_without_discord_it_still_names_every_non_canonical_entry(self):
+        """require_discord=False drops the token requirement and nothing else:
+        main_local.py runs with it, and the same admin config applies there."""
+        with patch.object(fu, "DISCORD_BOT_TOKEN", None), \
+             patch.object(fu, "ROOT_USER", "divora"), \
+             patch.object(fu, "ADMIN_USERS", frozenset({"someone_else"})), \
+             patch.object(fu, "ADMIN_LEGACY_NAME_MATCH", False):
+            with self.assertLogs("fritz_utils", level="WARNING") as logs:
+                fu.validate_config(require_discord=False)
+        blob = " ".join(logs.output)
+        self.assertIn("divora", blob)
+        self.assertIn("someone_else", blob)
+
+    def test_without_discord_a_missing_token_is_not_an_error(self):
+        with patch.object(fu, "DISCORD_BOT_TOKEN", None), \
+             patch.object(fu, "ROOT_USER", "discord-1"):
+            fu.validate_config(require_discord=False)
+            with self.assertRaises(RuntimeError) as caught:
+                fu.validate_config()
+        self.assertIn("DISCORD_BOT_TOKEN", str(caught.exception))
+
+    def test_a_fully_canonical_config_warns_about_nothing_without_discord_either(self):
+        with patch.object(fu, "DISCORD_BOT_TOKEN", None), \
+             patch.object(fu, "ROOT_USER", "discord-1"), \
+             patch.object(fu, "ADMIN_USERS", frozenset({"discord-2"})), \
+             patch.object(fu, "_CLAMPED_KNOBS", []):
+            with self.assertNoLogs("fritz_utils", level="WARNING"):
+                fu.validate_config(require_discord=False)
+
     def test_a_fully_canonical_config_warns_about_nothing(self):
         with patch.object(fu, "DISCORD_BOT_TOKEN", "x"),              patch.object(fu, "ROOT_USER", "discord-1"),              patch.object(fu, "ADMIN_USERS", frozenset({"discord-2"})),              patch.object(fu, "_CLAMPED_KNOBS", []):
             with self.assertNoLogs("fritz_utils", level="WARNING"):
