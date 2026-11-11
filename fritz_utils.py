@@ -476,7 +476,7 @@ ADMIN_USERS: frozenset[str] = frozenset(
 # reach filenames in several places. The dash costs a closed platform allowlist
 # in split_user_id (below) so that "web-alice-bob" still parses correctly.
 IDENTITY_SEPARATOR = "-"
-KNOWN_PLATFORMS: frozenset[str] = frozenset({"discord", "telegram", "web", "local"})
+KNOWN_PLATFORMS: frozenset[str] = frozenset({"discord", "telegram", "web", "local", "desktop"})
 # Same charset admin_panel.chat_login already used for usernames — dashes
 # included. Keeping them is safe because split_user_id partitions on the FIRST
 # dash and no platform name contains one, so "web-alice-bob" resolves to
@@ -488,11 +488,12 @@ _TOKEN_SAFE_RE = re.compile(r"[^a-zA-Z0-9_-]")
 def canonical_user_id(platform: str, raw_id) -> str:
     """Return the stable, namespaced identity for a user: '<platform>-<id>'.
 
-    platform: 'discord' | 'telegram' | 'web' | 'local'
+    platform: 'discord' | 'telegram' | 'web' | 'local' | 'desktop'
     raw_id:   the platform's IMMUTABLE id where one exists (a Discord or
               Telegram numeric snowflake), otherwise the self-asserted name
-              (web). Using the snowflake is the point: a Discord rename no
-              longer orphans memories, workspace, schedules and admin rights.
+              (web) or the machine's client id (desktop). Using the snowflake
+              is the point: a Discord rename no longer orphans memories,
+              workspace, schedules and admin rights.
     """
     plat = (platform or "local").strip().lower()
     ident = _IDENT_STRIP_RE.sub("", str(raw_id or "").strip())[:64]
@@ -877,3 +878,5 @@ class MessageSource(Enum):
     LOCAL = 3,
     TELEGRAM_TEXT = 4,
     TELEGRAM_VOICE = 5,
+    DESKTOP_TEXT = 6,
+    DESKTOP_VOICE = 7,

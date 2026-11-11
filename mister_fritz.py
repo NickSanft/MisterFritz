@@ -153,6 +153,10 @@ def get_source_info(source: MessageSource, display_name: str,
         return f"User is texting from Telegram ({who})"
     elif source == MessageSource.TELEGRAM_VOICE:
         return f"User is speaking from Telegram ({who}). Please answer in 30 words or less."
+    elif source == MessageSource.DESKTOP_TEXT:
+        return f"User is typing to you at their desk, where you are present as a figure on their screen ({who})"
+    elif source == MessageSource.DESKTOP_VOICE:
+        return f"User is speaking to you at their desk ({who}). Please answer in 30 words or less."
     return f"User is interacting via CLI ({who})"
 
 

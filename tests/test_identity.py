@@ -27,6 +27,15 @@ class TestCanonicalUserId(unittest.TestCase):
     def test_platform_is_lowercased(self):
         self.assertEqual(canonical_user_id("DISCORD", 1), "discord-1")
 
+    def test_a_desktop_client_is_a_platform_of_its_own(self):
+        """Plan 14 P2. The split is what KNOWN_PLATFORMS decides: without the
+        entry, "desktop-nick-pc" reads as a legacy display name, and
+        identity_store would record its platform as None."""
+        ident = canonical_user_id("desktop", "nick-pc")
+        self.assertEqual(ident, "desktop-nick-pc")
+        self.assertEqual(split_user_id(ident), ("desktop", "nick-pc"))
+        self.assertTrue(is_canonical_user_id(ident))
+
     def test_web_name_is_stripped_of_punctuation(self):
         # `.` and `!` go; `_` and `-` survive, because they are legal in every
         # store this id reaches, including a Windows path.

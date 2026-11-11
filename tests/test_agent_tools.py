@@ -74,6 +74,36 @@ class TestFormatPromptAndSource(unittest.TestCase):
         result = get_source_info(MessageSource.LOCAL, "dave")
         self.assertIn("CLI", result)
 
+    def test_get_source_info_desktop_text(self):
+        result = get_source_info(MessageSource.DESKTOP_TEXT, "erin", "desktop-erin-pc")
+        self.assertIn("at their desk", result)
+        self.assertIn("name: erin", result)
+        self.assertIn("User ID: desktop-erin-pc", result)
+        # A reply typed at the desk appears in a bubble, not over a speaker.
+        self.assertNotIn("30 words", result)
+
+    def test_get_source_info_desktop_voice(self):
+        result = get_source_info(MessageSource.DESKTOP_VOICE, "erin", "desktop-erin-pc")
+        self.assertIn("at their desk", result)
+        self.assertIn("speaking", result)
+        self.assertIn("30 words", result)
+
+    def test_only_local_is_described_as_the_cli(self):
+        """get_source_info falls through to "via CLI", so a member nobody wrote
+        a branch for is told to the model as a terminal session, silently."""
+        for source in MessageSource:
+            if source is not MessageSource.LOCAL:
+                with self.subTest(source=source.name):
+                    self.assertNotIn("CLI", get_source_info(source, "x"))
+
+    def test_every_voice_source_asks_for_a_short_answer(self):
+        """A spoken reply is synthesised sentence by sentence, so its length is
+        how long the person waits."""
+        for source in MessageSource:
+            if source.name.endswith("_VOICE"):
+                with self.subTest(source=source.name):
+                    self.assertIn("30 words", get_source_info(source, "x"))
+
 
 class TestScrapeWebTool(unittest.TestCase):
     def _mock_response(self, html: str):
