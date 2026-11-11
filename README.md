@@ -278,6 +278,19 @@ All settings can be set as environment variables or in a `.env` file. `.env.exam
 | `ADMIN_PANEL_PASSWORD` | — | Set to enable the web admin panel. Leave unset to disable. |
 | `ADMIN_PANEL_PORT` | `8001` | Port for the admin panel. Bound to `127.0.0.1` only — use SSH port forwarding for remote access. |
 
+### Desktop companion and Google (reserved)
+
+Declared ahead of the code that reads them ([plan 14](plans/14-desktop-companion.md)). **None of these does anything yet**, and Fritz warns at startup if you set one. Three rules are enforced already: a wildcard `COMPANION_BIND`, `COMPANION_ENABLED` without `COMPANION_TOKEN`, and an unknown `COMPANION_TTS` each refuse to start.
+
+| Variable | Default | Description |
+|---|---|---|
+| `COMPANION_ENABLED` | `false` | Reserved for the `/companion` WebSocket the desktop app talks to (plan 14, PR 1). |
+| `COMPANION_TOKEN` | — | Reserved. The only gate on `/companion`, and deliberately separate from `CHAT_PASSWORD` and `ADMIN_PANEL_PASSWORD`. Required when `COMPANION_ENABLED` is true; use at least 32 random characters. |
+| `COMPANION_BIND` | `127.0.0.1` | Reserved. Address `/companion` will listen on. Never a wildcard: any address meaning "every interface" (`0.0.0.0`, `::` and their other spellings) or an empty value is refused. |
+| `COMPANION_MAX_CLIENTS` | `2` | Reserved. Desktop clients connected at once. |
+| `COMPANION_TTS` | `local` | Reserved (plan 14, PR 9). Who speaks the desk's replies: `local`, `xtts` or `off`. |
+| `GOOGLE_MCP_ENABLED` | `false` | Reserved (plan 14, PR 15). Read-only Gmail, Drive and Calendar for `ROOT_USER`. |
+
 ### Models and Ollama
 
 | Variable | Default | Description |

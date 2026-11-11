@@ -88,6 +88,17 @@ os.environ.setdefault("CHAT_COOKIE_SECRET", "conftest-test-cookie-secret")
 # import time; both honour this switch. Without it every test run dirties the
 # two tracked *_diagram.png files at the repo root.
 os.environ.setdefault("FRITZ_WRITE_DIAGRAMS", "0")
+# Plan 14's reserved knobs, pinned to their defaults by ASSIGNMENT. Set to
+# anything else, validate_config warns or refuses, and the tests asserting it
+# says nothing would fail for a reason that has nothing to do with them. The
+# plans tell a developer to put COMPANION_ENABLED=true and friends in .env,
+# which fritz_utils loads at import, so neither that nor the shell may decide.
+# COMPANION_TOKEN gets "", which it reads as unset: removing it instead would let
+# load_dotenv, which only fills names that are missing, supply one from .env.
+for _name, _default in (("COMPANION_ENABLED", "false"), ("COMPANION_TOKEN", ""),
+                        ("COMPANION_BIND", "127.0.0.1"), ("COMPANION_MAX_CLIENTS", "2"),
+                        ("COMPANION_TTS", "local"), ("GOOGLE_MCP_ENABLED", "false")):
+    os.environ[_name] = _default
 
 # ---------------------------------------------------------------------------
 # 2. Heavy-module stubs, hoisted from the per-file preambles that used to be

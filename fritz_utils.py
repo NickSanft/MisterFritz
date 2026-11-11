@@ -1,9 +1,11 @@
 import functools
+import ipaddress
 import json
 import logging
 import os
 import re
 import shutil
+import socket
 from enum import Enum
 
 from dotenv import load_dotenv
@@ -304,6 +306,62 @@ CHAT_COOKIE_SECURE: bool = os.environ.get("CHAT_COOKIE_SECURE", "").lower() in (
 # it links the whole identity rather than only the thread, so memories,
 # schedules and workspace follow the conversation instead of being left behind.
 # See the [Unreleased] CHANGELOG entry for the upgrade note.
+
+# ── Desktop companion and Google (plan 14) ─────────────────────────────────
+# RESERVED, every one of them. P4 of plans/14-desktop-companion-build.md
+# declares the knobs in one batch, ahead of the code that reads them, so each
+# PR after it is reviewed for behaviour rather than plumbing. Until that code
+# lands, validate_config says so whenever one is set, as it does for
+# RELAY_AGENT_TOOL_ENABLED: believing a capability is live is the failure mode.
+# The PR that makes each one real:
+#   COMPANION_ENABLED, COMPANION_TOKEN, COMPANION_BIND, COMPANION_MAX_CLIENTS  PR 1
+#   COMPANION_TTS                                                             PR 9
+#   GOOGLE_MCP_ENABLED                                                        PR 15
+# The checks that are about safety rather than capability run already: see
+# validate_config.
+COMPANION_ENABLED: bool = os.environ.get("COMPANION_ENABLED", "false").lower() in ("1", "true", "yes")
+# The ONLY gate on /companion. The admin panel's Basic auth, CSP and
+# same-origin checks are HTTP middleware, and a WebSocket passes straight
+# through them. Its own secret, deliberately separate from CHAT_PASSWORD and
+# ADMIN_PANEL_PASSWORD (plan 14, decision 32), for the reason CHAT_PASSWORD is
+# separate from the admin password: handing the desk a token must not hand
+# over the chat or the panel.
+COMPANION_TOKEN: str | None = os.environ.get("COMPANION_TOKEN") or None
+# Where /companion listens once it exists. Loopback by default; Phase 5 may
+# name a Tailscale address. Never a wildcard: validate_config refuses one.
+COMPANION_BIND: str = os.environ.get("COMPANION_BIND", "127.0.0.1").strip()
+COMPANION_MAX_CLIENTS: int = _at_least_one("COMPANION_MAX_CLIENTS", "2")
+# Who speaks the desk's replies: "local" (the desktop app synthesises them),
+# "xtts" (the brain does, with the /voice engine) or "off".
+COMPANION_TTS: str = os.environ.get("COMPANION_TTS", "local").strip().lower()
+GOOGLE_MCP_ENABLED: bool = os.environ.get("GOOGLE_MCP_ENABLED", "false").lower() in ("1", "true", "yes")
+
+_COMPANION_TTS_MODES = frozenset({"local", "xtts", "off"})
+# Comfortably out of reach of guessing; secrets.token_urlsafe(32) gives 43.
+_COMPANION_TOKEN_MIN_CHARS = 32
+
+
+def _is_wildcard_bind(host: str) -> bool:
+    """True if binding `host` would listen on every interface.
+
+    Decided by the address, not the spelling. uvicorn hands the host to
+    asyncio's create_server, which resolves it with getaddrinfo, and many
+    spellings resolve to the unspecified address: "::0", "0:0:0:0:0:0:0:0" and
+    "::0.0.0.0" all become "::", and glibc (the Docker image) reads "0", "0x0"
+    and "000.000.000.000" as 0.0.0.0. An empty value counts too.
+    """
+    h = host.strip().strip("[]")       # ipaddress understands an IPv6 zone itself
+    if not h:
+        return True
+    try:
+        return ipaddress.ip_address(h).is_unspecified
+    except ValueError:
+        pass
+    try:
+        return socket.inet_aton(h) == b"\0\0\0\0"
+    except OSError:
+        return False                               # a hostname
+
 
 
 # Secret used to HMAC-sign the chat identity cookie. If unset, we auto-generate
@@ -852,6 +910,8 @@ def validate_config(*, require_discord: bool = True) -> None:
             RELAY_REPLY_WINDOW_MIN / 1440, RELAY_RETENTION_DAYS,
         )
 
+    _validate_companion_knobs()
+
     legacy = [u for u in ([ROOT_USER] if ROOT_USER else []) + sorted(ADMIN_USERS)
               if not is_canonical_user_id(u)]
     if legacy:
@@ -864,6 +924,66 @@ def validate_config(*, require_discord: bool = True) -> None:
             "ON — anyone taking that username inherits admin"
             if ADMIN_LEGACY_NAME_MATCH else
             "OFF — admin commands will NOT work until you set a canonical id",
+        )
+
+
+def _validate_companion_knobs() -> None:
+    """Plan 14's knobs: the safety rules now, and the truth about the rest.
+
+    The three refusals hold before any code reads these knobs, because each
+    describes a configuration that must not exist whatever is built: a wildcard
+    bind, an enabled companion with no token, and a TTS mode nobody will
+    understand. The warnings say which knobs are set but read by nothing yet.
+    """
+    if _is_wildcard_bind(COMPANION_BIND):
+        raise RuntimeError(
+            f"COMPANION_BIND={COMPANION_BIND!r} would put /companion on every "
+            "network interface, and COMPANION_TOKEN is the only thing guarding "
+            "it. Leave it at 127.0.0.1, or name one address, such as your "
+            "Tailscale IP."
+        )
+    if COMPANION_ENABLED and not COMPANION_TOKEN:
+        raise RuntimeError(
+            "COMPANION_ENABLED is true but COMPANION_TOKEN is not set. The token "
+            "is the only gate on /companion. Generate one with: python -c "
+            "\"import secrets; print(secrets.token_urlsafe(32))\""
+        )
+    if COMPANION_TTS not in _COMPANION_TTS_MODES:
+        raise RuntimeError(
+            f"COMPANION_TTS={COMPANION_TTS!r} is not one of "
+            f"{', '.join(sorted(_COMPANION_TTS_MODES))}."
+        )
+    log = logging.getLogger(__name__)
+    if COMPANION_TOKEN and len(COMPANION_TOKEN) < _COMPANION_TOKEN_MIN_CHARS:
+        log.warning(
+            "COMPANION_TOKEN is %d characters. It is the only gate on "
+            "/companion, so use at least %d random ones: python -c \"import "
+            "secrets; print(secrets.token_urlsafe(32))\"",
+            len(COMPANION_TOKEN), _COMPANION_TOKEN_MIN_CHARS,
+        )
+
+    reserved = [name for name, is_set in (
+        ("COMPANION_ENABLED", COMPANION_ENABLED),
+        ("COMPANION_TOKEN", COMPANION_TOKEN is not None),
+        ("COMPANION_BIND", COMPANION_BIND != "127.0.0.1"),
+        ("COMPANION_MAX_CLIENTS", COMPANION_MAX_CLIENTS != 2),
+        ("COMPANION_TTS", COMPANION_TTS != "local"),
+    ) if is_set]
+    if reserved:
+        log.warning(
+            "%s %s set but %s nothing yet: the desktop companion is not built "
+            "(plan 14, PR 1 onward), and no code reads %s. %s reserved so the "
+            "switches exist before the capability does.",
+            ", ".join(reserved), "is" if len(reserved) == 1 else "are",
+            "does" if len(reserved) == 1 else "do",
+            "it" if len(reserved) == 1 else "them",
+            "It is" if len(reserved) == 1 else "They are",
+        )
+    if GOOGLE_MCP_ENABLED:
+        log.warning(
+            "GOOGLE_MCP_ENABLED=true does nothing yet: the Google integration is "
+            "not built (plan 14, PR 15), and no code reads this setting. Nothing "
+            "is connected to Gmail, Drive or Calendar."
         )
 
 

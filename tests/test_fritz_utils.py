@@ -1,6 +1,9 @@
+import contextlib
 import json
 import os
 import pathlib
+import subprocess
+import sys
 import unittest
 from unittest.mock import mock_open, patch
 
@@ -461,3 +464,163 @@ class TestAKnobThatGatesNothingSaysSo(unittest.TestCase):
                       env.index("RELAY_AGENT_TOOL_ENABLED")]
         self.assertIn("does nothing today", section)
         self.assertNotIn("Ships off; turn on only", section)
+
+
+class TestDesktopCompanionKnobs(unittest.TestCase):
+    """Plan 14 P4: six knobs declared ahead of the code that reads them.
+
+    Three refusals hold already, because each describes a configuration no
+    build should allow. The rest is the RELAY_AGENT_TOOL_ENABLED convention: a
+    knob nothing reads says so, and a scan of the tree keeps that true.
+    """
+
+    RESERVED = ("COMPANION_ENABLED", "COMPANION_TOKEN", "COMPANION_BIND",
+                "COMPANION_MAX_CLIENTS", "COMPANION_TTS", "GOOGLE_MCP_ENABLED")
+    TOKEN = "t" * 43
+
+    def _patched(self, **knobs):
+        values = {"DISCORD_BOT_TOKEN": "x", "ROOT_USER": "discord-1", "ADMIN_USERS": frozenset(),
+                  "_CLAMPED_KNOBS": [], "RELAY_AGENT_TOOL_ENABLED": False,
+                  "COMPANION_ENABLED": False, "COMPANION_TOKEN": None, "COMPANION_BIND": "127.0.0.1",
+                  "COMPANION_MAX_CLIENTS": 2, "COMPANION_TTS": "local", "GOOGLE_MCP_ENABLED": False}
+        values.update(knobs)
+        stack = contextlib.ExitStack()
+        for name, value in values.items():
+            stack.enter_context(patch.object(fu, name, value))
+        return stack
+
+    def _warnings(self, **knobs) -> str:
+        with self._patched(**knobs), self.assertLogs("fritz_utils", level="WARNING") as logs:
+            fu.validate_config()
+        return "; ".join(logs.output)
+
+    def _refusal(self, **knobs) -> str:
+        with self._patched(**knobs), self.assertRaises(RuntimeError) as caught:
+            fu.validate_config()
+        return str(caught.exception)
+
+    def test_the_shipped_defaults(self):
+        """Read from source, so a developer's own .env cannot decide it."""
+        src = pathlib.Path(fu.__file__).read_text(encoding="utf-8")
+        for expected in ('os.environ.get("COMPANION_ENABLED", "false")',
+                         'os.environ.get("COMPANION_TOKEN") or None',
+                         'os.environ.get("COMPANION_BIND", "127.0.0.1")',
+                         '_at_least_one("COMPANION_MAX_CLIENTS", "2")',
+                         'os.environ.get("COMPANION_TTS", "local")',
+                         'os.environ.get("GOOGLE_MCP_ENABLED", "false")'):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, src)
+
+    def test_the_defaults_start_cleanly_and_quietly(self):
+        with self._patched(), self.assertNoLogs("fritz_utils", level="WARNING"):
+            fu.validate_config()
+
+    # Every spelling here binds every interface: asyncio resolves the host with
+    # getaddrinfo, and glibc (the Docker image) reads "0" and "0x0" as 0.0.0.0.
+    WILDCARDS = ("0.0.0.0", " 0.0.0.0 ", "::", "[::]", "", "::0", "[::0]", "0::",
+                 "0:0:0:0:0:0:0:0", "::0.0.0.0", "::%1", "0", "0x0", "000.000.000.000")
+
+    def test_a_wildcard_bind_is_refused_enabled_or_not(self):
+        """The token is the only gate on /companion; every interface is too
+        many. Decided by the address, not the spelling."""
+        for bind in self.WILDCARDS:
+            for enabled in (False, True):
+                with self.subTest(bind=bind, enabled=enabled):
+                    said = self._refusal(COMPANION_BIND=bind, COMPANION_ENABLED=enabled,
+                                         COMPANION_TOKEN=self.TOKEN)
+                    self.assertIn("COMPANION_BIND", said)
+                    self.assertIn("every network interface", said)
+
+    def test_a_named_address_or_host_is_allowed(self):
+        """Phase 5's case is a Tailscale address."""
+        for bind in ("100.64.0.7", "::1", "[::1]", "localhost", "fritz-pc.tailnet.ts.net"):
+            with self.subTest(bind=bind):
+                said = self._warnings(COMPANION_BIND=bind)
+                self.assertIn("COMPANION_BIND", said)   # reserved, so it warns; it does not refuse
+
+    def test_an_enabled_companion_needs_a_token(self):
+        said = self._refusal(COMPANION_ENABLED=True, COMPANION_TOKEN=None)
+        self.assertIn("COMPANION_TOKEN is not set", said)
+        self.assertIn("token_urlsafe", said)
+
+    def test_an_unknown_tts_mode_is_refused(self):
+        # Values as they arrive after parsing, which strips and lowercases.
+        for mode in ("kokoro", "piper", "none"):
+            with self.subTest(mode=mode):
+                self.assertIn("COMPANION_TTS", self._refusal(COMPANION_TTS=mode))
+        for mode in ("local", "xtts", "off"):
+            with self.subTest(mode=mode), self._patched(COMPANION_TTS=mode):
+                fu.validate_config()          # accepted: no refusal
+
+    def test_a_short_token_is_named_and_a_long_one_is_not(self):
+        self.assertIn("COMPANION_TOKEN is 8 characters", self._warnings(COMPANION_TOKEN="abcdefgh"))
+        self.assertIn("COMPANION_TOKEN is 31 characters", self._warnings(COMPANION_TOKEN="t" * 31))
+        self.assertNotIn("characters", self._warnings(COMPANION_TOKEN="t" * 32))
+        self.assertNotIn("characters", self._warnings(COMPANION_TOKEN=self.TOKEN))
+
+    def test_values_are_parsed_as_the_environment_gives_them(self):
+        """Every other test patches the parsed values, so this one reads a real
+        environment in a fresh interpreter: whitespace and case are forgiven,
+        and a padded wildcard is still refused."""
+        repo = pathlib.Path(__file__).resolve().parents[1]
+        probe = ("import fritz_utils as f, json\n"
+                 "out = {'tts': f.COMPANION_TTS, 'bind': f.COMPANION_BIND}\n"
+                 "try:\n    f.validate_config(); out['started'] = True\n"
+                 "except RuntimeError as e:\n    out['started'] = str(e)\n"
+                 "print(json.dumps(out))")
+
+        def parse(**env):
+            full = {**os.environ, "DISCORD_BOT_TOKEN": "x", "ROOT_USER": "discord-1", **env}
+            proc = subprocess.run([sys.executable, "-c", probe], cwd=repo, env=full,
+                                  capture_output=True, text=True, timeout=120)
+            self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+            return json.loads(proc.stdout.strip().splitlines()[-1])
+
+        out = parse(COMPANION_TTS=" XTTS ", COMPANION_BIND=" 127.0.0.1 ")
+        self.assertEqual((out["tts"], out["bind"], out["started"]), ("xtts", "127.0.0.1", True))
+        out = parse(COMPANION_BIND=" 0.0.0.0 ")
+        self.assertIn("every network interface", out["started"])
+
+    def test_every_reserved_knob_says_it_does_nothing_when_set(self):
+        for name, value in (("COMPANION_ENABLED", True), ("COMPANION_TOKEN", self.TOKEN),
+                            ("COMPANION_BIND", "100.64.0.7"), ("COMPANION_MAX_CLIENTS", 3),
+                            ("COMPANION_TTS", "xtts")):
+            knobs = {name: value}
+            if name == "COMPANION_ENABLED":
+                knobs["COMPANION_TOKEN"] = self.TOKEN
+            with self.subTest(knob=name):
+                said = self._warnings(**knobs)
+                self.assertIn(name, said)
+                self.assertIn("nothing yet", said)
+                self.assertIn("not built", said)
+
+    def test_google_says_nothing_is_connected(self):
+        said = self._warnings(GOOGLE_MCP_ENABLED=True)
+        self.assertIn("GOOGLE_MCP_ENABLED", said)
+        self.assertIn("Nothing is connected", said)
+
+    def test_nothing_in_the_tree_reads_them_yet(self):
+        """The warnings' central claim. The PR that starts reading one of
+        these must retire its warning too, or the warning becomes the lie."""
+        repo = pathlib.Path(__file__).resolve().parents[1]
+        for knob in self.RESERVED:
+            readers = [f"{path.name}:{number}"
+                       for path in sorted(repo.glob("*.py")) if path.name != "fritz_utils.py"
+                       for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+                       if knob in line and not line.strip().startswith("#")]
+            with self.subTest(knob=knob):
+                self.assertEqual(readers, [], f"{knob} is read outside fritz_utils")
+
+    def test_the_documentation_says_they_are_reserved(self):
+        repo = pathlib.Path(__file__).resolve().parents[1]
+        env = (repo / ".env.example").read_text(encoding="utf-8")
+        section = env[env.index("Desktop companion and Google"):env.index("GOOGLE_MCP_ENABLED=false")]
+        self.assertIn("RESERVED", section)
+        self.assertIn("does nothing today", section)
+        # Decision 32: the token is its own secret.
+        self.assertIn("deliberately separate from", section)
+        readme = (repo / "README.md").read_text(encoding="utf-8")
+        for knob in self.RESERVED:
+            row = next(line for line in readme.splitlines() if line.startswith(f"| `{knob}` |"))
+            with self.subTest(knob=knob):
+                self.assertIn("Reserved", row)
