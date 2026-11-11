@@ -111,7 +111,7 @@ Four surfaces consume this callback and its arity change is atomic — a PR that
 
 **Consumed by:** event-loop, bot_commands voice/gen/lore, main_discord.on_message + TTSEngine load + speech_to_text, deferred: scheduler.py:109, main_telegram.py:26/45/52, admin_panel.py:388/457/630/642
 
-event-loop invents this. Four other call sites already offload correctly but via the unbounded default executor, so the bounded-pool guarantee is only partial until they migrate. Land the helper once with the knob, migrate the Discord surfaces in event-loop, and file the rest as a follow-up. Do NOT convert admin_panel.py:554-558 — the comment there records that the plain daemon thread is deliberate for TestClient loop teardown, and the five TestChatStream* classes are the detector if someone tries.
+event-loop invents this. Four other call sites already offload correctly but via the unbounded default executor, so the bounded-pool guarantee is only partial until they migrate. Land the helper once with the knob, migrate the Discord surfaces in event-loop, and file the rest as a follow-up. Do NOT convert the plain daemon thread in admin_panel.chat_stream (the "Use a plain daemon thread" comment; this entry cited it as lines 554-558, which have since moved) — the comment there records that it is deliberate for TestClient loop teardown, and the TestChatStream* classes in tests/test_admin_panel.py (five when this was written, eight by plan 14) are the detector if someone tries.
 
 ### fritz_error(operation, exc) butler-voiced error helper
 
