@@ -761,13 +761,16 @@ class TestChatStreamingUx(unittest.TestCase):
         self.assertIn('applyToken("", "", true)', code)
 
     def test_stop_is_labelled_honestly(self):
-        # Aborting the client fetch cannot stop the server: chat_stream runs
-        # ask_stuff on a daemon thread and never checks is_disconnected().
-        # Claiming otherwise in the UI would be a lie.
+        # This asserted the opposite until plan 14 P3: aborting the fetch did
+        # not stop the server, and the notice said so. It does now (see
+        # tests/test_cancel.py), so the notice must stop apologising for it.
         src = _template("chat.html")
         self.assertIn("Enough", src)
         self.assertIn("AbortController", src)
-        self.assertIn("mutters on in the servants", src)
+        self.assertNotIn("mutters on in the servants", src)
+        # Nor overclaim the other way: a tool already running is not stopped.
+        self.assertIn("already in hand will be finished, and nothing further begun", src)
+        self.assertNotIn("fallen silent", src)
 
     def test_stream_teardown_clears_every_timer(self):
         # A missed timer leaves a zombie status chip that never goes away.
@@ -1337,13 +1340,24 @@ class TestChatHistory(unittest.TestCase):
 
 class TestChatForget(unittest.TestCase):
     def test_authed_post_calls_forget_conversation_and_redirects(self):
+        import mister_fritz
         client = _build_client()
         _login(client)
-        with patch.object(privacy, "forget_conversation", return_value=3) as fc, \
+        gate_held = []
+
+        def forget(*args, **kwargs):
+            # The delete must run behind the thread's turn gate, or a turn
+            # still committing undoes it (tests/test_cancel.py has the race).
+            gate = mister_fritz._TURN_GATES.get("web-alice")
+            gate_held.append(gate is not None and gate.lock.locked())
+            return 3
+
+        with patch.object(privacy, "forget_conversation", side_effect=forget) as fc, \
              patch.object(admin_panel, "audit_log") as audit:
             r = client.post("/chat/forget", follow_redirects=False)
         self.assertEqual(r.status_code, 303)
         self.assertEqual(r.headers["location"], "/chat")
+        self.assertEqual(gate_held, [True])
         # Must target the WEB thread — clearing "alice" here would wipe the
         # Discord conversation instead of the one the user is looking at.
         fc.assert_called_once_with("web-alice", thread_id="web-alice")

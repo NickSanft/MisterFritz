@@ -20,6 +20,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -130,6 +131,101 @@ class GateCase(unittest.TestCase):
 
     def counted(self) -> list:
         return [call.args[0] for call in self.metrics.increment.call_args_list]
+
+
+class TestACancellableWaiter(GateCase):
+    """Every web-chat turn passes a cancel_event, so a follow-up sent while
+    Fritz is still answering always waits in the polling branch."""
+
+    def _hold(self):
+        inside, release = threading.Event(), threading.Event()
+
+        def ahead():
+            with mf.one_turn_at_a_time("thread-a"):
+                inside.set()
+                release.wait(timeout=TIMEOUT)
+
+        t = threading.Thread(target=ahead, daemon=True)
+        t.start()
+        self.addCleanup(release.set)
+        self.assertTrue(inside.wait(TIMEOUT))
+        return t, release
+
+    def test_one_never_cancelled_still_runs_once_the_way_is_clear(self):
+        ahead, release = self._hold()
+        entered, outcome = threading.Event(), {}
+
+        def follow_up():
+            try:
+                with mf.one_turn_at_a_time("thread-a", cancel_event=threading.Event()):
+                    entered.set()
+            except Exception as e:
+                outcome["error"] = e
+
+        t = threading.Thread(target=follow_up, daemon=True)
+        t.start()
+        self.assertFalse(entered.wait(0.35), "it went in while the turn ahead was running")
+        release.set()
+        self.assertTrue(entered.wait(TIMEOUT), "it never ran after the turn ahead finished")
+        t.join(TIMEOUT)
+        ahead.join(TIMEOUT)
+        self.assertNotIn("error", outcome)
+        self.assertEqual(mf._TURN_GATES, {})
+
+    def test_one_cancelled_as_the_turn_ahead_finishes_still_does_not_run(self):
+        """Both cancelled together: the turn ahead releases within the
+        waiter's poll, so the acquire succeeds with the event already set."""
+        ahead, release = self._hold()
+        cancel, entered, outcome = threading.Event(), threading.Event(), {}
+
+        def follow_up():
+            try:
+                with mf.one_turn_at_a_time("thread-a", cancel_event=cancel):
+                    entered.set()
+            except mf.CancelledWhileQueued:
+                outcome["cancelled"] = True
+
+        t = threading.Thread(target=follow_up, daemon=True)
+        t.start()
+        time.sleep(0.25)                # queued, and some way into a poll
+        cancel.set()
+        threading.Timer(0.02, release.set).start()
+        t.join(TIMEOUT)
+        ahead.join(TIMEOUT)
+        self.assertFalse(entered.is_set(), "a cancelled turn ran")
+        self.assertTrue(outcome.get("cancelled"))
+        self.assertEqual(mf._TURN_GATES, {})
+
+    def test_once_it_gives_up_a_new_message_is_admitted(self):
+        """The point of giving the place up: the next message is not refused."""
+        ahead, release = self._hold()
+        cancel = threading.Event()
+
+        def stopped():
+            try:
+                with mf.one_turn_at_a_time("thread-a", cancel_event=cancel):
+                    pass
+            except mf.CancelledWhileQueued:
+                pass
+
+        t = threading.Thread(target=stopped, daemon=True)
+        t.start()
+        time.sleep(0.15)
+        cancel.set()
+        t.join(TIMEOUT)
+        self.assertEqual(mf._TURN_GATES["thread-a"].participants, 1)
+        admitted = threading.Event()
+
+        def next_message():
+            with mf.one_turn_at_a_time("thread-a"):
+                admitted.set()
+
+        n = threading.Thread(target=next_message, daemon=True)
+        n.start()
+        release.set()
+        self.assertTrue(admitted.wait(TIMEOUT), "the next message was not admitted")
+        n.join(TIMEOUT)
+        ahead.join(TIMEOUT)
 
 
 class TestOneTurnAtATime(GateCase):
@@ -439,13 +535,17 @@ class TestAScheduledTurnWaitsRatherThanBeingRefused(GateCase):
         seen = []
         import contextlib
 
+        cancels = []
+
         @contextlib.contextmanager
-        def recording(thread_id, *, may_wait=False):
+        def recording(thread_id, *, may_wait=False, cancel_event=None):
             seen.append(may_wait)
+            cancels.append(cancel_event)
             yield
 
         app = unittest.mock.MagicMock()
         app.stream.return_value = iter(())
+        stop = threading.Event()
         with unittest.mock.patch.object(mf, "one_turn_at_a_time", recording), \
                 unittest.mock.patch.object(mf, "app", app), \
                 unittest.mock.patch.object(mf, "extract_memories_background",
@@ -453,7 +553,11 @@ class TestAScheduledTurnWaitsRatherThanBeingRefused(GateCase):
             mf.ask_stuff("hello", MessageSource.DISCORD_TEXT, "discord-1")
             app.stream.return_value = iter(())
             mf.ask_stuff("remind", MessageSource.LOCAL, "discord-1", may_wait=True)
-        self.assertEqual(seen, [False, True])
+            app.stream.return_value = iter(())
+            mf.ask_stuff("stop me", MessageSource.LOCAL, "discord-1", cancel_event=stop)
+        self.assertEqual(seen, [False, True, False])
+        # A queued turn can only give its place up if the gate is told how.
+        self.assertEqual(cancels, [None, None, stop])
 
 
 class TestTheSchedulerIsThePatientCaller(unittest.IsolatedAsyncioTestCase):

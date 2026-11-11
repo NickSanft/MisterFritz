@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import functools
 import json
 import logging
 import os
@@ -850,6 +849,10 @@ async def chat_stream(request: Request) -> Response:
       - event=progress data=<tool notice>
       - event=done     data=<JSON {text, html, images}>   (exactly one)
       - event=error    data=<message>     (instead of done on failure)
+
+    A client that goes away stops the turn: see _CancelOnEndStreamingResponse.
+    That is the "Enough" button, which aborts the fetch, but also a reload, a
+    closed tab or a dropped connection. The server cannot tell them apart.
     """
     identity, user = _chat_identity(request)
     if not identity:
@@ -864,6 +867,7 @@ async def chat_stream(request: Request) -> Response:
     pending_images = _drain_pending_images(identity)
     source = MessageSource.DISCORD_TEXT_AND_IMAGE if pending_images else MessageSource.LOCAL
     event_queue: queue.Queue = queue.Queue()
+    cancel_event = threading.Event()
 
     def _streaming_callback(delta: str, accumulated: str, restart: bool = False) -> None:
         # ask_stuff invokes this from a worker thread; queue.Queue is thread-safe.
@@ -898,12 +902,15 @@ async def chat_stream(request: Request) -> Response:
                 schedule_manager=schedule_manager,
                 thread_id=_chat_thread_id(identity),
                 display_name=user,
+                cancel_event=cancel_event,
             )
             reply = response_data.get("text") if isinstance(response_data, dict) else str(response_data)
             image_paths = response_data.get("image_paths", []) if isinstance(response_data, dict) else []
+            interrupted = isinstance(response_data, dict) and response_data.get("interrupted", False)
             audit_log("chat_message", user_id=identity, chars=len(message),
                       attached_images=len(pending_images),
-                      result="ok", reply_chars=len(reply or ""), streamed=True)
+                      result="interrupted" if interrupted else "ok",
+                      reply_chars=len(reply or ""), streamed=True)
             # The 'done' frame carries both the raw text and the rendered HTML
             # so the client doesn't have to ship a markdown parser. Image paths
             # are encoded as a JSON-ish pipe-separated list to avoid newline
@@ -951,7 +958,36 @@ async def chat_stream(request: Request) -> Response:
             data_lines = "".join(f"data: {chunk}\n" for chunk in str(data).split("\n"))
             yield f"event: {event}\n{data_lines}\n".encode("utf-8")
 
-    return StreamingResponse(_event_generator(), media_type="text/event-stream")
+    return _CancelOnEndStreamingResponse(_event_generator(), cancel_event,
+                                         media_type="text/event-stream")
+
+
+class _CancelOnEndStreamingResponse(StreamingResponse):
+    """A StreamingResponse that sets `cancel_event` however it ends.
+
+    This is how a client that has gone stops its turn. After a normal finish
+    the turn is already over and setting the event does nothing.
+
+    Two simpler places were measured first, through this app's middleware
+    stack, and neither is reliable. request.is_disconnected() never returned
+    True: the generator polling it was cancelled first. A `finally` inside the
+    generator usually ran, but not when the hang-up landed while Starlette was
+    in `await send(...)`. Then its task is cancelled with the generator parked
+    at `yield`, and the finally waits until a cyclic garbage collection
+    finalises it. With gc disabled it never ran, and in a review's measurements
+    the model went on for 40-50 more tokens at 200 tokens/s. __call__ always
+    unwinds.
+    """
+
+    def __init__(self, content, cancel_event: threading.Event, **kwargs):
+        super().__init__(content, **kwargs)
+        self._cancel_event = cancel_event
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._cancel_event.set()
 
 
 # Roots that /chat/assets/<path> is allowed to serve from. Anything outside
@@ -1047,6 +1083,23 @@ async def chat_history(request: Request) -> JSONResponse:
     return JSONResponse({"username": user, "messages": history})
 
 
+def _forget_chat_conversation(identity: str) -> int:
+    """Delete the web chat's checkpoint, after any turn on it has committed.
+
+    "Burn the correspondence" aborts the reply in flight and posts /chat/forget
+    at once. Deleting straight away lost a race with that turn: it was still
+    winding down, and when it committed it wrote one checkpoint holding every
+    message in the thread, so the burned conversation came back (reproduced
+    in review). Taking the thread's turn gate puts the delete after the
+    commit. A turn the person cancelled ends within a token, so the wait is
+    short; a turn from another tab is not cancelled, and is waited for.
+    """
+    from mister_fritz import one_turn_at_a_time
+    thread_id = _chat_thread_id(identity)
+    with one_turn_at_a_time(thread_id, may_wait=True):
+        return privacy.forget_conversation(identity, thread_id=thread_id)
+
+
 async def chat_forget(request: Request) -> Response:
     """Clear the LangGraph checkpoint for the current user — the next message
     starts a fresh conversation. Doesn't touch memories or schedules."""
@@ -1055,9 +1108,7 @@ async def chat_forget(request: Request) -> Response:
         return RedirectResponse(url="/chat", status_code=303)
     try:
         removed = await asyncio.get_running_loop().run_in_executor(
-            None, functools.partial(privacy.forget_conversation, identity,
-                                    thread_id=_chat_thread_id(identity)),
-        )
+            None, _forget_chat_conversation, identity)
     except privacy.PrivacyOperationFailed as e:
         logger.error("chat forget conversation failed for %s: %s", identity, e)
         audit_log("chat_forget_conversation", user_id=identity, error=str(e))

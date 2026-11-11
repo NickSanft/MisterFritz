@@ -9,6 +9,7 @@ from typing import Annotated, Literal, TypedDict
 
 import httpx
 
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -369,8 +370,17 @@ class ThreadBusy(Exception):
     """This thread already has a turn running and another waiting."""
 
 
+class CancelledWhileQueued(Exception):
+    """The turn was cancelled before the one ahead of it finished; it never ran."""
+
+
+# How often a queued, cancellable turn looks at its cancel_event.
+_QUEUE_POLL_S = 0.1
+
+
 @contextmanager
-def one_turn_at_a_time(thread_id: str, *, may_wait: bool = False):
+def one_turn_at_a_time(thread_id: str, *, may_wait: bool = False,
+                       cancel_event: threading.Event | None = None):
     """Serialise turns on `thread_id`, refusing a third concurrent one.
 
     `may_wait` lifts the refusal for a caller that would rather queue than be
@@ -383,6 +393,11 @@ def one_turn_at_a_time(thread_id: str, *, may_wait: bool = False):
 
     The gate is removed once the last participant leaves, so this does not
     accumulate an entry per (person, channel) for the life of the process.
+
+    A waiter given a `cancel_event` gives its place up as soon as the event is
+    set, raising CancelledWhileQueued. Otherwise a turn the person had already
+    stopped would hold one of the two places until the turn ahead finished,
+    and their next message would be refused as a third.
     """
     with _TURN_GATES_GUARD:
         gate = _TURN_GATES.get(thread_id)
@@ -392,21 +407,38 @@ def one_turn_at_a_time(thread_id: str, *, may_wait: bool = False):
             raise ThreadBusy(thread_id)
         gate.participants += 1
 
+    def _leave() -> None:
+        with _TURN_GATES_GUARD:
+            gate.participants -= 1
+            if gate.participants == 0 and _TURN_GATES.get(thread_id) is gate:
+                del _TURN_GATES[thread_id]
+
     # Counted separately from the wait itself: "how often do turns overlap" is
     # the question this answers, and it is the one worth watching.
     if not gate.lock.acquire(blocking=False):
         METRICS.increment("turn_waited_for_thread")
         logger.info("A turn is already running on thread %s; queued behind it",
                     thread_id)
-        gate.lock.acquire()
+        if cancel_event is None:
+            gate.lock.acquire()
+        else:
+            while not gate.lock.acquire(timeout=_QUEUE_POLL_S):
+                if cancel_event.is_set():
+                    _leave()
+                    raise CancelledWhileQueued(thread_id)
+            # Looked at again once the lock is ours. When both turns are
+            # cancelled together, the one ahead stops within a token and
+            # releases inside this waiter's current poll, so the acquire above
+            # succeeds with the event already set (reproduced 50/50 in review).
+            if cancel_event.is_set():
+                gate.lock.release()
+                _leave()
+                raise CancelledWhileQueued(thread_id)
     try:
         yield
     finally:
         gate.lock.release()
-        with _TURN_GATES_GUARD:
-            gate.participants -= 1
-            if gate.participants == 0 and _TURN_GATES.get(thread_id) is gate:
-                del _TURN_GATES[thread_id]
+        _leave()
 
 
 def summarize_conversation(state: EnhancedState, config: RunnableConfig):
@@ -666,6 +698,82 @@ def _until_the_bound(stream, on_bound):
         on_bound()
 
 
+# What a reply cut short carries into the checkpoint, so the summariser and the
+# history window do not take it for something Fritz finished saying.
+INTERRUPTED_MARK = " [interrupted]"
+
+
+class _TurnCancelled(Exception):
+    """The person stopped this turn. Raised inside the model call; executor catches it."""
+
+
+class _TurnFlags:
+    """What executor reports back to ask_stuff outside the graph's state.
+
+    An object, not a dict. LangGraph gives a node a copy of `metadata` in which
+    nested dicts are copied too, so a flag set in one never comes back (checked
+    against the pinned langgraph). Objects, like the callables and the
+    threading.Event beside it, pass through by reference.
+    """
+
+    def __init__(self) -> None:
+        self.interrupted = False
+
+
+class _StopWhenCancelled(BaseCallbackHandler):
+    """Ends a model call at its next token once the turn's cancel_event is set.
+
+    Breaking out of agent.stream() cannot do this. With "messages" streaming
+    LangGraph runs the model node on a worker thread, and closing the generator
+    waits for that thread to finish. Measured with a real ChatOllama against a
+    fake NDJSON server standing in for a slow Ollama: close() blocked for 4.9 s
+    while all 100 chunks were generated. Raising from the token callback
+    unwinds INSIDE that worker, which closes langchain-ollama's stream and with
+    it the HTTP request: stopped 0.05 s after the event, the server seeing the
+    hang-up at chunk 7. (Whether a real Ollama then frees the GPU at once is
+    the plan's manual check, `ollama ps`; no model was available to run it.)
+
+    The check is per token, so a model still loading into memory cannot be
+    stopped until its first token arrives. A running tool finishes, unless it
+    makes a model call of its own: the handler is inherited into that call and
+    stops it there. search_documents' RAG chain is the one such tool today, and
+    it reports the stop as a failed query. on_chat_model_start is what stops
+    the agent's next model call after a tool.
+    """
+
+    # Without this, callback exceptions are logged and swallowed. They are
+    # logged either way: see _QuietDeliberateStops.
+    raise_error = True
+
+    def __init__(self, cancel_event: threading.Event):
+        self._cancel_event = cancel_event
+
+    def _stop_if_cancelled(self) -> None:
+        if self._cancel_event.is_set():
+            raise _TurnCancelled()
+
+    def on_chat_model_start(self, *args, **kwargs) -> None:
+        self._stop_if_cancelled()
+
+    def on_llm_new_token(self, *args, **kwargs) -> None:
+        self._stop_if_cancelled()
+
+
+class _QuietDeliberateStops(logging.Filter):
+    """Drops langchain_core's WARNING for a stop the person asked for.
+
+    langchain_core logs every exception a callback raises, raise_error or not:
+    "Error in _StopWhenCancelled.on_llm_new_token callback: _TurnCancelled()".
+    One of those per press of Enough reads to an operator as a fault.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "Error in _StopWhenCancelled." not in record.getMessage()
+
+
+logging.getLogger("langchain_core.callbacks.manager").addFilter(_QuietDeliberateStops())
+
+
 def executor(state: EnhancedState, config: RunnableConfig):
     """Run the ReAct agent over the conversation window and stream the reply.
 
@@ -682,6 +790,7 @@ def executor(state: EnhancedState, config: RunnableConfig):
     streaming_callback = metadata.get("streaming_callback")
     channel_id = metadata.get("channel_id")
     schedule_manager = metadata.get("schedule_manager")
+    cancel_event = metadata.get("cancel_event")
 
     extra_tools: dict = {}
     if channel_id is not None and schedule_manager is not None:
@@ -842,39 +951,74 @@ def executor(state: EnhancedState, config: RunnableConfig):
     # A LIST — even of one mode — is what makes LangGraph tuple its output as
     # (mode, payload); a bare string yields raw payloads instead. Keeping it a
     # list either way makes the loop below uniform.
-    stream_modes = ["values", "messages"] if streaming_callback else ["values"]
+    #
+    # A cancellable turn streams even with nobody to show the tokens to,
+    # because "messages" mode is what fills `segments`. ChatOllama fires the
+    # token callback either way, so the stop itself would still happen without
+    # it, but the reply so far would be lost and stored as a bare mark.
+    stream_modes = ["values", "messages"] if streaming_callback or cancel_event is not None else ["values"]
 
-    for mode, payload in _until_the_bound(
-        agent.stream(inputs, config=get_config_values(config), stream_mode=stream_modes),
+    agent_config = get_config_values(config)
+    if cancel_event is not None:
+        agent_config["callbacks"] = [_StopWhenCancelled(cancel_event)]
+
+    interrupted = False
+    # Per answer segment, in order. _DeltaEmitter's `accumulated` only covers
+    # the current one, and an interrupted turn's reply is all of them.
+    segments: dict = {}
+    stream = _until_the_bound(
+        agent.stream(inputs, config=agent_config, stream_mode=stream_modes),
         lambda: bound_hit.append(True),
-    ):
-        if mode == "values":
-            final_state = payload
-            if "messages" in payload and payload["messages"]:
-                latest = payload["messages"][-1]
-                if getattr(latest, "tool_calls", None):
-                    logger.debug("Detected tool calls: %s", [tc.get('name', '') for tc in latest.tool_calls])
-                    if progress_callback:
-                        for tool_call in latest.tool_calls:
-                            tool_name = tool_call.get('name', '')
-                            if tool_name in TOOL_NOTICES and tool_name not in notified_tools:
-                                progress_callback(TOOL_NOTICES[tool_name])
-                                notified_tools.add(tool_name)
-            continue
+    )
+    try:
+        for mode, payload in stream:
+            # Stops the reply reaching the person at once. It does not stop the
+            # model: that is _StopWhenCancelled, without which the close() below
+            # would wait for the whole generation.
+            if cancel_event is not None and cancel_event.is_set():
+                interrupted = True
+                break
+            if mode == "values":
+                final_state = payload
+                if "messages" in payload and payload["messages"]:
+                    latest = payload["messages"][-1]
+                    if getattr(latest, "tool_calls", None):
+                        logger.debug("Detected tool calls: %s", [tc.get('name', '') for tc in latest.tool_calls])
+                        if progress_callback:
+                            for tool_call in latest.tool_calls:
+                                tool_name = tool_call.get('name', '')
+                                if tool_name in TOOL_NOTICES and tool_name not in notified_tools:
+                                    progress_callback(TOOL_NOTICES[tool_name])
+                                    notified_tools.add(tool_name)
+                continue
 
-        # mode == "messages" → (chunk, metadata). The messages stream also
-        # carries whole ToolMessages from the tools node, so filter: only
-        # AIMessageChunks are LLM tokens. chunk.id is stable within one model
-        # turn and changes across turns, which makes it a free segment key.
-        chunk, _meta = payload
-        if isinstance(chunk, AIMessageChunk):
-            emitter.feed(_chunk_text(chunk), segment_id=chunk.id)
+            # mode == "messages" → (chunk, metadata). The messages stream also
+            # carries whole ToolMessages from the tools node, so filter: only
+            # AIMessageChunks are LLM tokens. chunk.id is stable within one model
+            # turn and changes across turns, which makes it a free segment key.
+            chunk, _meta = payload
+            if isinstance(chunk, AIMessageChunk):
+                text = _chunk_text(chunk)
+                segments[chunk.id] = segments.get(chunk.id, "") + text
+                emitter.feed(text, segment_id=chunk.id)
+    except _TurnCancelled:
+        interrupted = True
+    finally:
+        stream.close()
 
     # Flush the sub-threshold tail, or the last few characters never arrive.
     emitter.flush()
 
-    resp = final_state["messages"][-1].content if final_state and "messages" in final_state else ""
-    if bound_hit:
+    if interrupted:
+        METRICS.increment("turn_cancelled")
+        spoken = "\n\n".join(s for s in segments.values() if s.strip())
+        resp = f"{spoken.rstrip()}{INTERRUPTED_MARK}".strip()
+        turn_flags = metadata.get("turn_flags")
+        if turn_flags is not None:
+            turn_flags.interrupted = True
+    else:
+        resp = final_state["messages"][-1].content if final_state and "messages" in final_state else ""
+    if bound_hit and not interrupted:
         METRICS.increment("agent.recursion_limit")
         logger.warning("a turn hit the %d-super-step bound", AGENT_RECURSION_LIMIT)
         stopped = ("I found myself going round in circles with my own tools, so I "
@@ -930,6 +1074,7 @@ def ask_stuff(
     display_name: str | None = None,
     channel_key: str | None = None,
     may_wait: bool = False,
+    cancel_event: threading.Event | None = None,
 ) -> dict:
     """Process user input and return structured output with text and attachments.
 
@@ -956,6 +1101,13 @@ def ask_stuff(
     turn runs at a time per thread and one more may queue; beyond that an
     interactive caller is told to try again, because a waiter holds a pool
     thread. A caller that sets this queues instead — see one_turn_at_a_time.
+
+    `cancel_event`, once set from any thread, stops the turn at the model's
+    next token and closes its request to Ollama. The reply so far is
+    checkpointed with INTERRUPTED_MARK, and the returned dict's `interrupted`
+    is True. A turn still queued behind another when it is cancelled never
+    runs: its text is empty and nothing is recorded. See _StopWhenCancelled for
+    what can and cannot be stopped.
     """
     # No transformation here any more. `user_id` arrives canonical from the
     # adapter (canonical_user_id at the boundary), and is passed VERBATIM to
@@ -985,6 +1137,8 @@ def ask_stuff(
     # here consumed it.
     logger.debug("Prompt to ask: %s", format_turn(base_prompt, turn_context))
 
+    turn_flags = _TurnFlags()
+
     config = {
         "configurable": {"user_id": user_id_clean, "thread_id": thread_id_clean},
         "metadata": {
@@ -996,6 +1150,8 @@ def ask_stuff(
             "workspace_root": workspace_root,
             "channel_id": channel_id,
             "schedule_manager": schedule_manager,
+            "cancel_event": cancel_event,
+            "turn_flags": turn_flags,
         }
     }
     inputs = {
@@ -1018,7 +1174,7 @@ def ask_stuff(
         # The whole stream, not just the write: LangGraph loads the checkpoint
         # when the stream opens and writes as it goes, so the read and the
         # write have to be inside the same gate to be one turn.
-        with one_turn_at_a_time(thread_id_clean, may_wait=may_wait):
+        with one_turn_at_a_time(thread_id_clean, may_wait=may_wait, cancel_event=cancel_event):
             for s in app.stream(inputs, config=config, stream_mode="values"):
                 final_state = s
                 # pretty_print writes to stdout. It used to fire on every
@@ -1027,6 +1183,16 @@ def ask_stuff(
                     message = s["messages"][-1] if "messages" in s and s["messages"] else None
                     if message and not isinstance(message, tuple) and hasattr(message, 'pretty_print'):
                         message.pretty_print()
+    except CancelledWhileQueued:
+        # Stopped before it started, so nothing ran and nothing is recorded:
+        # not the message, and not a reply. Whoever cancelled it has gone.
+        METRICS.increment("turn_cancelled_while_queued")
+        return {
+            "text": "",
+            "image_paths": [],
+            "timestamp": get_current_time_internal(),
+            "interrupted": True,
+        }
     except ThreadBusy:
         METRICS.increment("turn_refused_thread_busy")
         logger.warning(
@@ -1039,6 +1205,7 @@ def ask_stuff(
                      "caught up."),
             "image_paths": [],
             "timestamp": get_current_time_internal(),
+            "interrupted": turn_flags.interrupted,
         }
 
     final_text = ""
@@ -1049,13 +1216,15 @@ def ask_stuff(
     image_paths = final_state.get("image_paths", []) if final_state else []
 
     # Fire-and-forget: extract memorable facts from this turn in the background.
-    if final_text and base_prompt:
+    # Not from a reply cut short: half a sentence is not a thing Fritz learned.
+    if final_text and base_prompt and not turn_flags.interrupted:
         extract_memories_background(user_id_clean, base_prompt, final_text)
 
     return {
         "text": final_text,
         "image_paths": image_paths,
         "timestamp": get_current_time_internal(),
+        "interrupted": turn_flags.interrupted,
     }
 
 

@@ -268,7 +268,7 @@ These came up during planning and remain unresolved. None blocks tranche 1.
 - `/draw` upper bound — 40 fits one message; higher is safe once chunking lands, but may just be a footgun.
 - Whether `/schedule list_all` stays plain chunked text while `/schedule list` becomes an embed.
 - Enter-to-send behavior on touch devices (currently disabled on the theory that soft keyboards lack a reliable Shift).
-- ~~Whether the Stop button should say "Stop" or "Hide reply"~~ — **resolved by the mockup: "Enough"**, with honest notice copy explaining the model keeps generating server-side.
+- ~~Whether the Stop button should say "Stop" or "Hide reply"~~ — **resolved by the mockup: "Enough"**, with honest notice copy explaining the model keeps generating server-side. Plan 14 P3 made it a real stop, and the copy now says so.
 - Whether `search_memories_internal`'s `limit=30` should drop to ~10, and whether the injected memory blob should stop carrying internal `namespace` / `original_key` metadata on every turn.
 - Whether the atmosphere layers get an env knob in addition to `prefers-reduced-motion`.
 - Whether the admin panel eventually adopts a restrained version of the faceted geometry, or stays permanently plain.

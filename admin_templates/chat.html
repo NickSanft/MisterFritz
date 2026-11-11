@@ -757,12 +757,15 @@
         stopBtn.addEventListener("click", function() {
             if (!streaming || !abortController) return;
             abortController.abort();
-            // Honest copy. Aborting the client fetch does NOT stop the server:
-            // chat_stream runs ask_stuff on a plain daemon thread and never
-            // checks request.is_disconnected(). The model keeps generating.
+            // Honest copy. Aborting the fetch reaches the server: chat_stream
+            // sets the turn's cancel_event, which ends the model's request to
+            // Ollama at its next token, and what was written so far is kept,
+            // marked [interrupted]. It cannot interrupt a tool already running
+            // (an image being drawn, say), so the copy promises only that
+            // nothing new is begun.
             notice("info",
-                "Very well — Fritz has set down his pen mid-sentence. The model, " +
-                "regrettably, mutters on in the servants' quarters.");
+                "Very well — Fritz has set down his pen mid-sentence. Whatever " +
+                "is already in hand will be finished, and nothing further begun.");
         });
     }
 
@@ -1266,7 +1269,9 @@
         confirmAccept.addEventListener("click", function() {
             closeConfirm();
             // Cancel any stream first, or its done-frame would repopulate the
-            // transcript we are about to clear.
+            // transcript we are about to clear. The server's side of the same
+            // race - the cancelled turn committing after the delete - is
+            // handled in admin_panel._forget_chat_conversation.
             if (abortController) abortController.abort();
             clearStreamState();
             fetch("/chat/forget", { method: "POST", credentials: "same-origin" })
