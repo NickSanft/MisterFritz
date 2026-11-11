@@ -128,7 +128,7 @@ class TestThreadIdFor(unittest.TestCase):
 
     def test_channel_suffix_cannot_be_confused_with_a_sibling(self):
         # `discord-1#999` must not be a prefix-match for `discord-10`, which is
-        # what makes privacy.forget_conversation's LIKE sweep safe.
+        # what makes privacy.forget_conversation's prefix sweep safe.
         with patch.object(fritz_utils, "THREADS_PER_CHANNEL", True):
             self.assertFalse(thread_id_for("discord-10", "1").startswith(
                 thread_id_for("discord-1", "999")))

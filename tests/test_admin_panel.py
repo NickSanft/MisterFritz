@@ -1340,24 +1340,15 @@ class TestChatHistory(unittest.TestCase):
 
 class TestChatForget(unittest.TestCase):
     def test_authed_post_calls_forget_conversation_and_redirects(self):
-        import mister_fritz
+        # That the delete waits for a turn in flight is forget_conversation's
+        # own job, tested in tests/test_forget_race.py through this endpoint.
         client = _build_client()
         _login(client)
-        gate_held = []
-
-        def forget(*args, **kwargs):
-            # The delete must run behind the thread's turn gate, or a turn
-            # still committing undoes it (tests/test_cancel.py has the race).
-            gate = mister_fritz._TURN_GATES.get("web-alice")
-            gate_held.append(gate is not None and gate.lock.locked())
-            return 3
-
-        with patch.object(privacy, "forget_conversation", side_effect=forget) as fc, \
+        with patch.object(privacy, "forget_conversation", return_value=3) as fc, \
              patch.object(admin_panel, "audit_log") as audit:
             r = client.post("/chat/forget", follow_redirects=False)
         self.assertEqual(r.status_code, 303)
         self.assertEqual(r.headers["location"], "/chat")
-        self.assertEqual(gate_held, [True])
         # Must target the WEB thread — clearing "alice" here would wipe the
         # Discord conversation instead of the one the user is looking at.
         fc.assert_called_once_with("web-alice", thread_id="web-alice")

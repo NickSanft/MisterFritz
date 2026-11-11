@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from contextlib import ExitStack
 from typing import Any, Optional
 
 from fritz_utils import CHAT_DB_NAME, resolve_identity, thread_id_for
@@ -108,11 +109,19 @@ def export_memories(user_id: str) -> list[dict]:
 
 # ── Conversation checkpoints (LangGraph SqliteSaver) ─────────────────────────
 
-def _like_escape(value: str) -> str:
-    """Escape LIKE wildcards. Identities legitimately contain `_`, which LIKE
-    reads as "any single character" — without this, forgetting `discord-1_a`
-    would also wipe `discord-1Xa`."""
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+def _sweep_where(thread_id: str) -> tuple[str, tuple]:
+    """SQL matching a thread and every per-channel thread under it.
+
+    A literal prefix comparison, not LIKE. LIKE needed its `_` and `%`
+    escaped, since identities contain `_`, and even escaped it was
+    case-insensitive: SQLite's LIKE folds ASCII case. Web identities keep
+    theirs, so `web-alice` and `web-Alice` are different people, and with
+    THREADS_PER_CHANNEL on, forgetting one swept the other's conversation too.
+    `substr(...) = ?` compares exactly, under SQLite's default BINARY collation.
+    """
+    prefix = thread_id + "#"
+    return ("thread_id = ? OR substr(thread_id, 1, ?) = ?",
+            (thread_id, len(prefix), prefix))
 
 
 def forget_conversation(user_id: str, thread_id: str | None = None) -> int:
@@ -125,12 +134,23 @@ def forget_conversation(user_id: str, thread_id: str | None = None) -> int:
     /chat's "New conversation" does so it cannot clear the Discord history
     instead of the one the user is looking at.
 
-    The `#` in the suffix is what makes the sweep safe: `discord-1#%` cannot
-    match `discord-10#general`, because the character after `discord-1` must
-    be `#`.
+    The `#` in the suffix is what makes the sweep safe: the prefix `discord-1#`
+    cannot match `discord-10#general`, because the character after `discord-1`
+    must be `#`. See _sweep_where for why the match is exact and
+    case-sensitive.
 
     Returns the total number of rows removed across the checkpoints + writes
     tables. Next message starts a fresh conversation.
+
+    Waits for any turn in flight on those threads first. A turn loads the
+    whole conversation when it starts and commits all of it back when it
+    ends, so a delete that landed in between was undone a moment later: the
+    forget reported success and the conversation returned. Every caller gets
+    this, because every caller comes through here: Discord's /forget
+    conversation and /forget all, the admin panel's forget-user, and the web
+    chat's "Burn the correspondence". A turn someone cancelled ends within a
+    token. One nobody cancelled, such as a Discord reply still being written,
+    is waited for, and the forget answers when it has finished.
     """
     # Resolved HERE, at the entry point. It used to happen inside two of
     # these functions and nowhere else, so an IDENTITY_LINKS alias was
@@ -155,27 +175,70 @@ def forget_conversation(user_id: str, thread_id: str | None = None) -> int:
     if not thread_id:
         return 0
     if sweep_channels:
-        where = "thread_id = ? OR thread_id LIKE ? ESCAPE '\\'"
-        params = (thread_id, _like_escape(thread_id) + "#%")
+        where, params = _sweep_where(thread_id)
     else:
         where = "thread_id = ?"
         params = (thread_id,)
     try:
-        with sqlite3.connect(CHAT_DB_NAME) as conn:
-            cur1 = conn.execute(
-                f"DELETE FROM checkpoints WHERE {where}", params,
-            )
-            cur2 = conn.execute(
-                f"DELETE FROM writes WHERE {where}", params,
-            )
-            conn.commit()
-            return cur1.rowcount + cur2.rowcount
+        with _no_turn_in_flight(_threads_to_forget(thread_id, sweep_channels, where, params)):
+            with sqlite3.connect(CHAT_DB_NAME) as conn:
+                cur1 = conn.execute(
+                    f"DELETE FROM checkpoints WHERE {where}", params,
+                )
+                cur2 = conn.execute(
+                    f"DELETE FROM writes WHERE {where}", params,
+                )
+                conn.commit()
+                return cur1.rowcount + cur2.rowcount
     except sqlite3.OperationalError as e:
         # Tables may not exist yet on a fresh deployment — that's fine.
         logger.debug("forget_conversation: no checkpoint tables yet (%s)", e)
         return 0
     except Exception as e:
         raise _failed("forget_conversation", user_id, e) from e
+
+
+def _threads_to_forget(thread_id: str, sweep_channels: bool, where: str, params: tuple) -> list[str]:
+    """Every thread the delete will touch, plus any with a turn running on it.
+
+    The second half matters for a thread with no checkpoint yet, whose turn
+    began before the forget: it would commit the conversation's first
+    exchange after the delete. The match is the same as the SQL's: the thread
+    itself, and with a sweep anything under "<thread>#".
+    """
+    threads = {thread_id}
+    if sweep_channels:
+        try:
+            with sqlite3.connect(CHAT_DB_NAME) as conn:
+                threads.update(row[0] for row in conn.execute(
+                    f"SELECT DISTINCT thread_id FROM checkpoints WHERE {where}", params))
+        except sqlite3.OperationalError:
+            pass        # no checkpoint table yet, so no rows to protect
+        threads.update(t for t in _brain_threads_in_flight() if t.startswith(thread_id + "#"))
+    return sorted(threads)
+
+
+def _brain_threads_in_flight() -> list[str]:
+    import mister_fritz        # imported at call time: it is the whole brain
+    return mister_fritz.threads_in_flight()
+
+
+def _no_turn_in_flight(threads: list[str]) -> ExitStack:
+    """Hold the turn gate of every one of `threads` until the delete is done.
+
+    Taken in sorted order, so two forgets over overlapping threads cannot each
+    hold a gate the other is waiting for. A turn holds only its own gate, so
+    it cannot be part of a cycle either.
+    """
+    import mister_fritz
+    stack = ExitStack()
+    try:
+        for t in threads:
+            stack.enter_context(mister_fritz.one_turn_at_a_time(t, may_wait=True))
+    except BaseException:
+        stack.close()
+        raise
+    return stack
 
 
 def count_conversation_checkpoints(user_id: str) -> int:
@@ -193,12 +256,11 @@ def count_conversation_checkpoints(user_id: str) -> int:
         return 0
     try:
         with sqlite3.connect(CHAT_DB_NAME) as conn:
-            # Mirrors forget_conversation's sweep, so /export's count matches
-            # what /forget conversation would actually remove.
+            # The same sweep as forget_conversation, so /export's count
+            # matches what /forget conversation would actually remove.
+            where, params = _sweep_where(thread_id)
             (count,) = conn.execute(
-                "SELECT COUNT(*) FROM checkpoints "
-                "WHERE thread_id = ? OR thread_id LIKE ? ESCAPE '\\'",
-                (thread_id, _like_escape(thread_id) + "#%"),
+                f"SELECT COUNT(*) FROM checkpoints WHERE {where}", params,
             ).fetchone()
             return count
     except sqlite3.OperationalError as e:

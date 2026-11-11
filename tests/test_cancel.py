@@ -462,42 +462,6 @@ class TestARealChatOllama(_Harness):
         self.assertLess(state["hung_up_at"], _SlowNDJSONOllama.TOTAL // 2)
 
 
-class _ForgetHarness(_Harness):
-    IDENTITY = "web-burntest"
-
-    def setUp(self):
-        super().setUp()
-        self.thread = admin_panel._chat_thread_id(self.IDENTITY)
-        self.addCleanup(mister_fritz.app.checkpointer.delete_thread, self.thread)
-
-
-class TestBurningTheCorrespondenceDuringAReply(_ForgetHarness):
-    """The burn button aborts the reply and posts /chat/forget at once. The
-    stopped turn still commits, and its checkpoint carries every message, so a
-    delete that does not wait for it is undone a moment later."""
-
-    def test_the_burned_conversation_does_not_come_back(self):
-        self.ask(self.real_agent(_SlowModel(record=_Record(), total=2)),
-                 streaming_callback=lambda *a: None)
-        self.assertTrue(self.stored_messages(), "nothing to burn")
-
-        event, streaming = threading.Event(), threading.Event()
-        # Slow enough that, without the gate, the delete lands well before the
-        # stopped turn's commit.
-        model = _SlowModel(record=self.record, delay=0.3)
-        in_flight = threading.Thread(daemon=True, target=lambda: self.ask(
-            self.real_agent(model), streaming_callback=lambda *a: streaming.set(),
-            cancel_event=event))
-        in_flight.start()
-        self.assertTrue(streaming.wait(10))
-
-        event.set()                     # Enough, as the burn handler does
-        _bounded(self, lambda: admin_panel._forget_chat_conversation(self.IDENTITY))
-        in_flight.join(15)
-        self.assertFalse(in_flight.is_alive())
-        self.assertEqual(self.stored_messages(), [], "the burned conversation came back")
-
-
 class TestAWebClientHangingUp(unittest.TestCase):
     """Through the real middleware stack, on a real socket. Measured while
     building this: request.is_disconnected() never returned True here, and a

@@ -441,6 +441,17 @@ def one_turn_at_a_time(thread_id: str, *, may_wait: bool = False,
         _leave()
 
 
+def threads_in_flight() -> list[str]:
+    """Threads with a turn running or queued in this process, right now.
+
+    For privacy.forget_conversation, which must also wait for a turn on a
+    thread that has no checkpoint yet: its first commit would otherwise land
+    after the delete.
+    """
+    with _TURN_GATES_GUARD:
+        return list(_TURN_GATES)
+
+
 def summarize_conversation(state: EnhancedState, config: RunnableConfig):
     """Trim the message window, and summarise off the critical path.
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import functools
 import json
 import logging
 import os
@@ -391,7 +392,12 @@ def _admin(request: Request) -> str:
 async def forget_user_action(request: Request) -> Response:
     user_id = request.path_params["user_id"]
     schedule_manager = _schedule_manager_from_request(request)
-    result = privacy.forget_all(user_id, schedule_manager)
+    # Off the event loop. It always blocked (SQLite and Chroma deletes), and
+    # now forget_conversation also waits for a turn in flight to commit: on the
+    # loop, that would stall every other request on the panel, web chat
+    # streams included, for as long as the turn ran.
+    result = await asyncio.get_running_loop().run_in_executor(
+        None, functools.partial(privacy.forget_all, user_id, schedule_manager))
     audit_log(
         "admin_forget_all", admin=_admin(request),
         target_user=user_id, result=result,
@@ -1083,23 +1089,6 @@ async def chat_history(request: Request) -> JSONResponse:
     return JSONResponse({"username": user, "messages": history})
 
 
-def _forget_chat_conversation(identity: str) -> int:
-    """Delete the web chat's checkpoint, after any turn on it has committed.
-
-    "Burn the correspondence" aborts the reply in flight and posts /chat/forget
-    at once. Deleting straight away lost a race with that turn: it was still
-    winding down, and when it committed it wrote one checkpoint holding every
-    message in the thread, so the burned conversation came back (reproduced
-    in review). Taking the thread's turn gate puts the delete after the
-    commit. A turn the person cancelled ends within a token, so the wait is
-    short; a turn from another tab is not cancelled, and is waited for.
-    """
-    from mister_fritz import one_turn_at_a_time
-    thread_id = _chat_thread_id(identity)
-    with one_turn_at_a_time(thread_id, may_wait=True):
-        return privacy.forget_conversation(identity, thread_id=thread_id)
-
-
 async def chat_forget(request: Request) -> Response:
     """Clear the LangGraph checkpoint for the current user — the next message
     starts a fresh conversation. Doesn't touch memories or schedules."""
@@ -1107,8 +1096,13 @@ async def chat_forget(request: Request) -> Response:
     if not identity:
         return RedirectResponse(url="/chat", status_code=303)
     try:
+        # "Burn the correspondence" aborts the reply in flight and posts here
+        # at once. forget_conversation waits for that turn to commit before it
+        # deletes, which is why this runs off the event loop.
         removed = await asyncio.get_running_loop().run_in_executor(
-            None, _forget_chat_conversation, identity)
+            None, functools.partial(privacy.forget_conversation, identity,
+                                    thread_id=_chat_thread_id(identity)),
+        )
     except privacy.PrivacyOperationFailed as e:
         logger.error("chat forget conversation failed for %s: %s", identity, e)
         audit_log("chat_forget_conversation", user_id=identity, error=str(e))

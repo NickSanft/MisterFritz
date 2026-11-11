@@ -317,6 +317,20 @@ class TestForgetConversationPerChannel(unittest.TestCase):
         self.privacy.forget_conversation("web-a_b")
         self.assertIn("web-aXb#1", self._remaining())
 
+    def test_the_sweep_is_case_sensitive(self):
+        """Web identities keep their case, so these are two people. SQLite's
+        LIKE folds ASCII case, and the old sweep deleted both."""
+        with sqlite3.connect(self.db_path) as c:
+            c.executemany(
+                "INSERT INTO checkpoints VALUES (?, ?)",
+                [("web-alice#web", "mine"), ("web-Alice#web", "someone else's")],
+            )
+            c.commit()
+        self.assertEqual(self.privacy.count_conversation_checkpoints("web-alice"), 1)
+        self.assertEqual(self.privacy.forget_conversation("web-alice"), 1)
+        self.assertIn("web-Alice#web", self._remaining())
+        self.assertNotIn("web-alice#web", self._remaining())
+
     def test_count_matches_what_forget_would_remove(self):
         # /export reported a count from a narrower predicate than /forget used,
         # so the two disagreed about how much history existed.

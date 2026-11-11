@@ -1271,7 +1271,7 @@
             // Cancel any stream first, or its done-frame would repopulate the
             // transcript we are about to clear. The server's side of the same
             // race - the cancelled turn committing after the delete - is
-            // handled in admin_panel._forget_chat_conversation.
+            // handled in privacy.forget_conversation.
             if (abortController) abortController.abort();
             clearStreamState();
             fetch("/chat/forget", { method: "POST", credentials: "same-origin" })
