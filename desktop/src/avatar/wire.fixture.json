@@ -6,7 +6,9 @@
     "status": "avatar:status",
     "settings": "settings:changed",
     "power": "power:display",
-    "cursor": "cursor"
+    "cursor": "cursor",
+    "reload": "avatar:reload",
+    "loaded": "avatar:loaded"
   },
   "hotkeys": {
     "arrange": "avatar:arrange"
@@ -139,6 +141,33 @@
     "cursorNow": {
       "name": "cursor_now",
       "args": []
+    },
+    "setParked": {
+      "name": "set_parked",
+      "args": [
+        "on"
+      ]
+    },
+    "avatarModel": {
+      "name": "avatar_model",
+      "args": []
+    },
+    "openFolder": {
+      "name": "open_folder",
+      "args": [
+        "which"
+      ]
+    },
+    "reloadModel": {
+      "name": "reload_model",
+      "args": []
+    },
+    "avatarLoaded": {
+      "name": "avatar_loaded",
+      "args": [
+        "wearing",
+        "error"
+      ]
     }
   },
   "cursorKeys": [
@@ -174,5 +203,19 @@
       "height": 0,
       "over": false
     }
-  }
+  },
+  "modelInfoKeys": [
+    "bytes",
+    "changed",
+    "found",
+    "from",
+    "loadError",
+    "path",
+    "tooBig",
+    "wearing"
+  ],
+  "folders": [
+    "avatar",
+    "logs"
+  ]
 }

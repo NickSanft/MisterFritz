@@ -5,8 +5,8 @@ over the `/companion` WebSocket ([plan 14](../plans/14-desktop-companion.md),
 [build plan](../plans/14-desktop-companion-build.md)). Windows only.
 
 Today it is one persistent, transparent, click-through, never-focused avatar
-window with a WebGL VRM in it, a tray and two hotkeys: PR 2 of the build plan,
-in progress. Spike 0 proved the window ([docs/SPIKE0.md](docs/SPIKE0.md)), and
+window with a WebGL VRM in it, a control window (tray > Settings…), a tray and
+two hotkeys: PR 2 of the build plan. Spike 0 proved the window ([docs/SPIKE0.md](docs/SPIKE0.md)), and
 its table is PR 2's acceptance.
 
 ## What it keeps, and where
@@ -26,8 +26,14 @@ The hotkeys are `hotkeys.arrange` (Ctrl+Alt+A) and `hotkeys.park`
 (Ctrl+Alt+H), read at start. His eyes follow the cursor while
 `avatar.lookatCursor` is `true` (the default): on a VRoid export the eyes
 turn, and on any model his head turns part of the way, which is what shows
-on the placeholder. Until the control window lands, change a setting by
-editing `settings.json` with Fritz quit.
+on the placeholder.
+
+The tray's *Settings…* opens the control window: show or hide him, arrange
+him, his eyes following the cursor, which model he wears (with its folder,
+and loading it again after you drop in a new export), his logs, and the
+foreground log. Closing it only hides it. The rest (the hotkeys,
+`avatar.vrmPath`) is still set by editing `settings.json` with Fritz quit,
+until the sections for them land.
 
 ## Build
 
@@ -50,8 +56,9 @@ The app is `src-tauri/target/release/mister-fritz-desktop.exe`.
   2.11's own version ranges also accept the 2.12 runtime crates, and that mix
   does not compile. Move tauri, tauri-build, tauri-runtime, tauri-runtime-wry
   and tauri-utils together, never one at a time.
-- **The page is embedded in the exe at compile time**: after any change under
-  `src/` or `avatar.html`, run `pnpm build` *and* the cargo build again.
+- **The pages are embedded in the exe at compile time**: after any change to
+  a page (`avatar.html`, `control.html`) or under `src/` or `public/`, run
+  `pnpm build` *and* the cargo build again.
 - **Smart App Control** (Windows 11) blocks the Tauri CLI's unsigned native
   module on some machines, so `pnpm tauri build` fails with "An Application
   Control policy has blocked this file". The two commands above are what it

@@ -4,7 +4,9 @@
 //! process this app started. The pass mark is zero such lines in a working
 //! session (plan 14 § Spike 0). A heartbeat every minute proves a quiet log
 //! was listening, and the last few foreground changes go out with each hit so
-//! it can be seen what Fritz took the keyboard from.
+//! it can be seen what Fritz took the keyboard from. The control window
+//! (tray > Settings) is an ordinary window and takes the keyboard when it is
+//! opened: its lines say SETTINGS, never HIT.
 //!
 //! Off unless `settings.diagnostics.foregroundLog` is on (read at start): it
 //! writes other apps' window titles to `diagnostics\foreground.log`, so it is
@@ -19,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::logs::utc;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use windows::Win32::Foundation::{CloseHandle, HWND};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
@@ -52,6 +54,9 @@ pub enum Verdict {
     /// window the foreground before showing the menu, as Windows requires.
     /// Not the avatar, and not this row's business.
     Tray,
+    /// The control window (tray > Settings), which the owner opened: an
+    /// ordinary window that takes the keyboard on purpose.
+    Settings,
     /// Another window of this process.
     OurProcess,
     /// A WebView2 process descended from this one.
@@ -75,9 +80,12 @@ pub fn classify(
     seen: &Seen,
     me: u32,
     avatar: isize,
+    control: isize,
     ancestors: impl FnOnce(u32) -> Vec<u32>,
 ) -> Verdict {
-    if avatar != 0 && seen.hwnd == avatar {
+    if control != 0 && (seen.hwnd == control || seen.root_owner == control) {
+        Verdict::Settings
+    } else if avatar != 0 && seen.hwnd == avatar {
         Verdict::Avatar
     } else if avatar != 0 && seen.root_owner == avatar {
         Verdict::OwnedByAvatar
@@ -101,6 +109,7 @@ pub fn line_kind(verdict: Verdict, arranging_recently: bool) -> Option<&'static 
     match (verdict, arranging_recently) {
         (Verdict::Elsewhere, _) => None,
         (Verdict::Tray, _) => Some("TRAY"),
+        (Verdict::Settings, _) => Some("SETTINGS"),
         (_, true) => Some("ARRANGE"),
         (_, false) => Some("HIT"),
     }
@@ -120,7 +129,7 @@ pub fn judge(
         line_kind(verdict, arranging_recently)
     } else if last_kind == Some("ARRANGE")
         && !arranging_recently
-        && !matches!(verdict, Verdict::Elsewhere | Verdict::Tray)
+        && !matches!(verdict, Verdict::Elsewhere | Verdict::Tray | Verdict::Settings)
     {
         Some("HIT")
     } else {
@@ -238,10 +247,10 @@ pub fn start(app: AppHandle, path: PathBuf) {
             write(format!(
                 "start pid={me} poll=100ms; a HIT line is a failure of Spike 0's first row \
                  (ARRANGE lines are Arrange taking the keyboard on purpose, TRAY lines the \
-                 tray menu)"
+                 tray menu, SETTINGS lines the control window the owner opened)"
             ));
-            let (mut polls, mut changes, mut hits, mut arranges, mut trays) =
-                (0u64, 0u64, 0u64, 0u64, 0u64);
+            let (mut polls, mut changes, mut hits, mut arranges, mut trays, mut settings) =
+                (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
             let mut arranged_at: Option<Instant> = None;
             let mut last: isize = 0;
             // The kind of the last line written for the current foreground.
@@ -253,6 +262,14 @@ pub fn start(app: AppHandle, path: PathBuf) {
                 // SAFETY: no arguments.
                 let fg = unsafe { GetForegroundWindow() };
                 let avatar = crate::overlay_windows::avatar_hwnd(&app);
+                // Only while it can be seen: the control window holding the
+                // keyboard hidden is a theft like any other.
+                let control = app
+                    .get_webview_window(crate::CONTROL_LABEL)
+                    .and_then(|w| w.hwnd().ok())
+                    .map(|h| h.0 as isize)
+                    .filter(|&h| crate::windows_ext::is_visible(h))
+                    .unwrap_or(0);
                 if crate::overlay_windows::arranging(&app) {
                     arranged_at = Some(Instant::now());
                 }
@@ -266,7 +283,7 @@ pub fn start(app: AppHandle, path: PathBuf) {
                         changes += 1;
                     }
                     let seen = look(fg);
-                    let verdict = classify(&seen, me, avatar, |pid| ancestry(&parents(), pid));
+                    let verdict = classify(&seen, me, avatar, control, |pid| ancestry(&parents(), pid));
                     let kind = judge(changed, verdict, arranging, last_kind);
                     if changed || kind.is_some() {
                         last_kind = kind;
@@ -287,7 +304,9 @@ pub fn start(app: AppHandle, path: PathBuf) {
                             match kind {
                                 "HIT" => hits += 1,
                                 "TRAY" => trays += 1,
-                                _ => arranges += 1,
+                                "ARRANGE" => arranges += 1,
+                                "SETTINGS" => settings += 1,
+                                _ => {}
                             }
                             let kept = if changed { "" } else { " kept after Arrange" };
                             write(format!(
@@ -302,7 +321,7 @@ pub fn start(app: AppHandle, path: PathBuf) {
                 }
                 if polls % HEARTBEAT_POLLS == 0 {
                     write(format!(
-                        "alive polls={polls} changes={changes} hits={hits} arranges={arranges} trays={trays} avatar=0x{avatar:x}"
+                        "alive polls={polls} changes={changes} hits={hits} arranges={arranges} trays={trays} settings={settings} avatar=0x{avatar:x}"
                     ));
                 }
             }
@@ -330,6 +349,26 @@ mod tests {
         }
     }
 
+    /// The control window is opened by the owner and takes the keyboard on
+    /// purpose: SETTINGS, never HIT, and Arrange handing the keyboard back
+    /// to it (the window the owner was in) isn't Fritz keeping it.
+    #[test]
+    fn the_control_window_is_never_a_hit() {
+        const CONTROL: isize = 0x60;
+        let window = seen(CONTROL, CONTROL, ME, "");
+        assert_eq!(classify(&window, ME, AVATAR, CONTROL, never), Verdict::Settings);
+        let dialog = seen(0x61, CONTROL, ME, "");
+        assert_eq!(classify(&dialog, ME, AVATAR, CONTROL, never), Verdict::Settings, "a window it owns");
+        assert_eq!(line_kind(Verdict::Settings, false), Some("SETTINGS"));
+        assert_eq!(line_kind(Verdict::Settings, true), Some("SETTINGS"));
+        assert_eq!(judge(false, Verdict::Settings, false, Some("ARRANGE")), None);
+        // Without its handle (the window not made yet), it is ours, as before.
+        assert_eq!(classify(&window, ME, AVATAR, 0, never), Verdict::OurProcess);
+        // And the avatar is still the avatar.
+        let avatar = seen(AVATAR, AVATAR, ME, "");
+        assert_eq!(classify(&avatar, ME, AVATAR, CONTROL, never), Verdict::Avatar);
+    }
+
     fn never(_: u32) -> Vec<u32> {
         panic!("only a WebView2 process needs its ancestry")
     }
@@ -337,26 +376,26 @@ mod tests {
     #[test]
     fn someone_elses_window_is_the_pass_case() {
         let s = seen(0x99, 0x99, 555, r"C:\Windows\notepad.exe");
-        assert_eq!(classify(&s, ME, AVATAR, never), Verdict::Elsewhere);
+        assert_eq!(classify(&s, ME, AVATAR, 0, never), Verdict::Elsewhere);
     }
 
     #[test]
     fn the_avatar_and_its_own_windows_are_hits() {
         assert_eq!(
-            classify(&seen(AVATAR, AVATAR, ME, ""), ME, AVATAR, never),
+            classify(&seen(AVATAR, AVATAR, ME, ""), ME, AVATAR, 0, never),
             Verdict::Avatar
         );
         assert_eq!(
-            classify(&seen(0x51, AVATAR, ME, ""), ME, AVATAR, never),
+            classify(&seen(0x51, AVATAR, ME, ""), ME, AVATAR, 0, never),
             Verdict::OwnedByAvatar
         );
         assert_eq!(
-            classify(&seen(0x52, 0x52, ME, ""), ME, AVATAR, never),
+            classify(&seen(0x52, 0x52, ME, ""), ME, AVATAR, 0, never),
             Verdict::OurProcess
         );
         // Before the window exists, our process still counts.
         assert_eq!(
-            classify(&seen(0x52, 0x52, ME, ""), ME, 0, never),
+            classify(&seen(0x52, 0x52, ME, ""), ME, 0, 0, never),
             Verdict::OurProcess
         );
     }
@@ -370,12 +409,12 @@ mod tests {
             r"C:\Program Files (x86)\Microsoft\EdgeWebView\Application\msedgewebview2.exe",
         );
         assert_eq!(
-            classify(&wv, ME, AVATAR, |_| vec![200, ME, 4]),
+            classify(&wv, ME, AVATAR, 0, |_| vec![200, ME, 4]),
             Verdict::OurWebView
         );
         // Another app's WebView2 (Teams, Widgets) is not Fritz's.
         assert_eq!(
-            classify(&wv, ME, AVATAR, |_| vec![200, 999, 4]),
+            classify(&wv, ME, AVATAR, 0, |_| vec![200, 999, 4]),
             Verdict::Elsewhere
         );
     }
@@ -409,7 +448,7 @@ mod tests {
                 class: class.into(),
                 ..Seen::default()
             };
-            assert_eq!(classify(&s, ME, AVATAR, never), Verdict::Tray, "{class}");
+            assert_eq!(classify(&s, ME, AVATAR, 0, never), Verdict::Tray, "{class}");
             assert_eq!(line_kind(Verdict::Tray, false), Some("TRAY"));
         }
         // Someone else's menu is someone else's.
@@ -420,7 +459,7 @@ mod tests {
             class: "#32768".into(),
             ..Seen::default()
         };
-        assert_eq!(classify(&other, ME, AVATAR, never), Verdict::Elsewhere);
+        assert_eq!(classify(&other, ME, AVATAR, 0, never), Verdict::Elsewhere);
     }
 
     /// Fritz keeping the foreground once Arrange is over is a HIT, written

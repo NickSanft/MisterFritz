@@ -17,6 +17,7 @@
     "@pixiv/three-vrm": "^3.5.5",
     "@tauri-apps/api": "~2.11.1",
     "@tauri-apps/plugin-global-shortcut": "~2.3.2",
+    "solid-js": "1.9.16",
     "three": "~0.187.0"
   },
   "devDependencies": {
@@ -25,6 +26,7 @@
     "@types/three": "~0.187.0",
     "typescript": "~5.9.3",
     "vite": "~8.3.6",
+    "vite-plugin-solid": "2.11.14",
     "vitest": "^5.1.0"
   },
   "engines": {

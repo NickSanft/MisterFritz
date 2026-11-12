@@ -1,0 +1,153 @@
+/* The control window's layout, on the lifted DivoraVoice tokens and
+ * components (src/divora/). DivoraVoice's Settings shape: an eyebrow, a
+ * title and a line, then a panel of rows, at most 680 px wide. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text-hi);
+  font-family: var(--font-ui);
+  font-size: var(--t-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border: 0;
+  background: none;
+  color: inherit;
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  height: 44px;
+  padding: 0 var(--s2) 0 var(--s5);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-0);
+  user-select: none;
+  flex: none;
+}
+
+.brand {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: var(--t-h3);
+}
+
+.titlebar-buttons {
+  margin-left: auto;
+  display: flex;
+  gap: var(--s1);
+}
+
+.icon-btn:hover {
+  color: var(--text-hi);
+  background: var(--surface-2);
+}
+
+.sections {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--s6) var(--s5) var(--s8);
+  scrollbar-width: thin;
+  scrollbar-color: var(--surface-4) transparent;
+}
+
+.section {
+  max-width: 680px;
+  margin: 0 auto var(--s7);
+}
+
+.section h2 {
+  margin: var(--s1) 0 var(--s1);
+  font-family: var(--font-display);
+  font-size: var(--t-h2);
+  font-weight: 700;
+}
+
+.section-desc {
+  margin: 0 0 var(--s3);
+  color: var(--text-mid);
+  font-size: var(--t-sm);
+}
+
+.panel {
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-1);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+  padding: var(--s3) var(--s4);
+  min-height: 58px;
+}
+
+.row + .row {
+  border-top: 1px solid var(--line);
+}
+
+.row-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.row-title {
+  font-weight: 600;
+}
+
+.row-desc {
+  margin-top: 2px;
+  color: var(--text-lo);
+  font-size: var(--t-sm);
+  overflow-wrap: anywhere;
+}
+
+.row-control {
+  flex: none;
+}
+
+.dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--text-dim);
+}
+
+.dot.tone-ok {
+  background: var(--success);
+}
+
+.dot.tone-warn {
+  background: var(--warning);
+}
+
+.problem {
+  flex: none;
+  padding: var(--s3) var(--s5);
+  border-top: 1px solid rgba(242, 86, 122, 0.25);
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-size: var(--t-sm);
+}

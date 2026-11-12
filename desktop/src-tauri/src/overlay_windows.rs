@@ -430,7 +430,7 @@ pub fn on_window_event(app: &AppHandle, event: &WindowEvent) {
     };
     match event {
         WindowEvent::CloseRequested { .. } => {
-            going(&shared, &Desktop(None));
+            going(&shared, &Desktop(None, 0));
             let _ = step(app, Input::CloseRequested);
         }
         WindowEvent::Destroyed => {
@@ -468,7 +468,7 @@ pub fn standing(app: &AppHandle) -> Option<OverlayRect> {
 /// (the window isn't closed through `CloseRequested` then).
 pub fn before_exit(app: &AppHandle) {
     if let Some(shared) = shared(app) {
-        going(&shared, &Desktop(None));
+        going(&shared, &Desktop(None, 0));
     }
 }
 
@@ -678,11 +678,18 @@ fn show(shared: &OverlayShared, n: &impl Native) {
 /// is someone else's usable window, else the app beneath in z-order. Arrange
 /// from the tray finds the tray's own hidden window in the foreground (the
 /// menu put it there), which can never take the keyboard back.
+///
+/// Of our own windows, only the control window counts, both as `fg` and in
+/// the z-order: Arrange started from it, or from the tray while it was in
+/// use, hands the keyboard back to it, not to the app beneath (which would
+/// come up over it).
 fn return_target(fg: isize, ours: isize, n: &impl Native) -> isize {
-    if fg != 0 && fg != ours && !n.owned_by_us(fg) && n.can_take_foreground(fg) {
+    let settings = n.settings_window();
+    let ours_but_returnable = |w: isize| !n.owned_by_us(w) || (w != 0 && w == settings);
+    if fg != 0 && fg != ours && ours_but_returnable(fg) && n.can_take_foreground(fg) {
         fg
     } else {
-        n.next_app_window(ours)
+        n.next_app_window(ours, settings)
     }
 }
 
@@ -701,8 +708,9 @@ fn focus(shared: &OverlayShared, n: &impl Native) {
 /// - Fritz: the window that had it before Arrange, if it can still take it,
 ///   else the app beneath.
 /// - The tray's hidden window (a Lock from its menu): the app beneath, which
-///   is the app in use before the menu opened — not the pre-Arrange window,
-///   which the owner may have left since.
+///   is the app in use before the menu opened (the control window, if it
+///   was that) — not the pre-Arrange window, which the owner may have left
+///   since.
 /// - Anyone else (someone else's app, or a visible window of ours): left
 ///   alone, as DivoraVoice's Lock from Settings is.
 ///
@@ -712,14 +720,15 @@ fn return_focus(shared: &OverlayShared, n: &impl Native) {
     let ours = shared.hwnd.load(Ordering::SeqCst);
     let saved = shared.return_to.swap(0, Ordering::SeqCst);
     let fg = n.foreground();
+    let settings = n.settings_window();
     let target = if fg == ours {
         if saved != 0 && n.can_take_foreground(saved) {
             saved
         } else {
-            n.next_app_window(ours)
+            n.next_app_window(ours, settings)
         }
     } else if fg != 0 && n.owned_by_us(fg) && !n.can_take_foreground(fg) {
-        n.next_app_window(ours)
+        n.next_app_window(ours, settings)
     } else {
         return;
     };
@@ -803,22 +812,33 @@ trait Native {
     fn unmark_non_rude(&self, hwnd: isize);
     fn bounds(&self, hwnd: isize) -> Option<Bounds>;
     fn move_to(&self, x: i32, y: i32);
-    /// A window of this process (the tray's hidden window, the avatar).
+    /// A window of this process (the tray's hidden window, the avatar, the
+    /// control window).
     fn owned_by_us(&self, hwnd: isize) -> bool;
+    /// The control window (tray > Settings), or 0: the one window of ours
+    /// the keyboard is handed back to after Arrange.
+    fn settings_window(&self) -> isize;
     /// The app in use: the top ordinary app window that isn't `skip`
     /// (always-on-top ones only if there is no other), else the desktop.
     /// Where the keyboard goes when there's nobody saved to give it back to.
-    fn next_app_window(&self, skip: isize) -> isize;
+    /// Our own windows never count, except `also` (the control window, or
+    /// 0): visible and not minimised, it is an app like any other.
+    fn next_app_window(&self, skip: isize, also: isize) -> isize;
     /// `r`, moved onto a live monitor if its middle is on none.
     fn on_screen(&self, r: OverlayRect) -> OverlayRect;
 }
 
-/// The real avatar window, if it still exists, and the desktop.
-struct Desktop(Option<WebviewWindow>);
+/// The real avatar window, if it still exists, the control window's HWND
+/// (0 when there is none), and the desktop.
+struct Desktop(Option<WebviewWindow>, isize);
 
 impl Desktop {
     fn of(app: &AppHandle) -> Self {
-        Self(app.get_webview_window(OVERLAY_LABEL))
+        let settings = app
+            .get_webview_window(crate::CONTROL_LABEL)
+            .and_then(|w| w.hwnd().ok())
+            .map_or(0, |h| h.0 as isize);
+        Self(app.get_webview_window(OVERLAY_LABEL), settings)
     }
 }
 
@@ -895,8 +915,12 @@ impl Native for Desktop {
         windows_ext::owned_by_us(hwnd)
     }
 
-    fn next_app_window(&self, skip: isize) -> isize {
-        windows_ext::next_app_window(skip)
+    fn next_app_window(&self, skip: isize, also: isize) -> isize {
+        windows_ext::next_app_window(skip, also)
+    }
+
+    fn settings_window(&self) -> isize {
+        self.1
     }
 
     fn on_screen(&self, r: OverlayRect) -> OverlayRect {
@@ -936,6 +960,14 @@ mod tests {
         takeable: Vec<isize>,
         /// Windows of our own process besides the avatar.
         ours: Vec<isize>,
+        /// The control window, one of `ours` (0: none).
+        settings: isize,
+        /// The top-level windows, top first; empty: `next_app_window` is
+        /// `next_app`. Else it walks them as the real one does: the first
+        /// that isn't skipped, can take the keyboard (stands for visible
+        /// and not minimised) and isn't ours unless it is `also`; failing
+        /// any, `next_app` (the desktop).
+        z: Vec<isize>,
         next_app: isize,
         bounds: Option<Bounds>,
         /// Where `on_screen` puts a rect; unchanged when None.
@@ -996,8 +1028,19 @@ mod tests {
         fn owned_by_us(&self, hwnd: isize) -> bool {
             hwnd == OURS || self.ours.contains(&hwnd)
         }
-        fn next_app_window(&self, _skip: isize) -> isize {
-            self.next_app
+        fn next_app_window(&self, skip: isize, also: isize) -> isize {
+            self.z
+                .iter()
+                .copied()
+                .find(|&w| {
+                    w != skip
+                        && self.can_take_foreground(w)
+                        && (!self.owned_by_us(w) || w == also)
+                })
+                .unwrap_or(self.next_app)
+        }
+        fn settings_window(&self) -> isize {
+            self.settings
         }
         fn on_screen(&self, r: OverlayRect) -> OverlayRect {
             self.screen.unwrap_or(r)
@@ -1204,6 +1247,95 @@ mod tests {
             ..Fake::default()
         };
         window_effect(&shared, Effect::Focus, &fake);
+        assert_eq!(shared.return_to.load(Ordering::SeqCst), BENEATH);
+    }
+
+    /// Arrange started from the control window gives the keyboard back to
+    /// it on Lock; any other window of ours (the tray's) still never is.
+    #[test]
+    fn arrange_from_settings_returns_to_settings() {
+        const SETTINGS: isize = 30;
+        let shared = with_window(Phase::Painted { instance: 1 });
+        let fake = Fake {
+            foreground: SETTINGS,
+            takeable: vec![SETTINGS, BENEATH],
+            ours: vec![TRAY, SETTINGS],
+            settings: SETTINGS,
+            next_app: BENEATH,
+            ..Fake::default()
+        };
+        window_effect(&shared, Effect::Focus, &fake);
+        assert_eq!(shared.return_to.load(Ordering::SeqCst), SETTINGS);
+        let tray = Fake {
+            foreground: TRAY,
+            takeable: vec![TRAY, BENEATH],
+            ours: vec![TRAY, SETTINGS],
+            settings: SETTINGS,
+            next_app: BENEATH,
+            ..Fake::default()
+        };
+        let shared = with_window(Phase::Painted { instance: 1 });
+        window_effect(&shared, Effect::Focus, &tray);
+        assert_eq!(shared.return_to.load(Ordering::SeqCst), BENEATH, "the tray's window isn't Settings");
+        // Settings closed (hidden) meanwhile: it can't take it, the app beneath does.
+        let gone = Fake {
+            foreground: SETTINGS,
+            takeable: vec![BENEATH],
+            ours: vec![SETTINGS],
+            settings: SETTINGS,
+            next_app: BENEATH,
+            ..Fake::default()
+        };
+        let shared = with_window(Phase::Painted { instance: 1 });
+        window_effect(&shared, Effect::Focus, &gone);
+        assert_eq!(shared.return_to.load(Ordering::SeqCst), BENEATH);
+    }
+
+    /// Arrange or Lock from the tray while the control window was in use
+    /// (on top of the z-order, under the tray's hidden window) hands the
+    /// keyboard to it, not to the app beneath it; hidden or minimised, it
+    /// is passed over, and no other window of ours ever counts.
+    #[test]
+    fn the_tray_returns_to_settings_in_use() {
+        const SETTINGS: isize = 30;
+        const PROMPT: isize = 11; // another visible window of ours
+        let fake = |takeable: Vec<isize>, z: Vec<isize>| Fake {
+            foreground: TRAY,
+            takeable,
+            ours: vec![TRAY, SETTINGS, PROMPT],
+            settings: SETTINGS,
+            z,
+            next_app: BENEATH,
+            ..Fake::default()
+        };
+        let cases = [
+            (vec![SETTINGS, BENEATH], vec![TRAY, SETTINGS, BENEATH], SETTINGS),
+            (vec![BENEATH], vec![TRAY, SETTINGS, BENEATH], BENEATH),
+            (vec![SETTINGS, BENEATH], vec![TRAY, BENEATH, SETTINGS], BENEATH),
+            (vec![PROMPT, BENEATH], vec![TRAY, PROMPT, BENEATH], BENEATH),
+            (vec![SETTINGS, BENEATH, OURS], vec![TRAY, OURS, SETTINGS, BENEATH], SETTINGS),
+        ];
+        for (takeable, z, back) in cases {
+            let case = format!("takeable {takeable:?} z {z:?}");
+            // Arrange from the tray.
+            let shared = with_window(Phase::Painted { instance: 1 });
+            let tray = fake(takeable.clone(), z.clone());
+            window_effect(&shared, Effect::Focus, &tray);
+            assert_eq!(shared.return_to.load(Ordering::SeqCst), back, "arrange, {case}");
+            // Lock from the tray, after an Arrange started elsewhere.
+            let shared = with_window(Phase::Painted { instance: 1 });
+            shared.return_to.store(GAME, Ordering::SeqCst);
+            let tray = fake(takeable, z);
+            return_focus(&shared, &tray);
+            assert_eq!(tray.calls(), [format!("foreground {back}")], "lock, {case}");
+        }
+        // With no control window (0), every window of ours is passed over.
+        let shared = with_window(Phase::Painted { instance: 1 });
+        let none = Fake {
+            settings: 0,
+            ..fake(vec![SETTINGS, BENEATH], vec![TRAY, SETTINGS, BENEATH])
+        };
+        window_effect(&shared, Effect::Focus, &none);
         assert_eq!(shared.return_to.load(Ordering::SeqCst), BENEATH);
     }
 

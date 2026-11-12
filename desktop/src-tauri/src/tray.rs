@@ -1,4 +1,4 @@
-//! The tray: Show / Hide Fritz, Arrange / Lock, Fritz's logs, Quit.
+//! The tray: Show / Hide Fritz, Arrange / Lock, Settings, Fritz's logs, Quit.
 //! The menu is rebuilt when Arrange starts or ends (the machine's
 //! `RefreshTray`) and when Fritz is parked or shown, since its items follow
 //! both. Show and Hide are separate ids, so a click does what the label it
@@ -15,6 +15,7 @@ const TRAY_ID: &str = "fritz";
 const SHOW: &str = "show";
 const HIDE: &str = "hide";
 const ARRANGE: &str = "arrange";
+const SETTINGS: &str = "settings";
 const LOGS: &str = "logs";
 const QUIT: &str = "quit";
 
@@ -54,6 +55,7 @@ fn menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         m = m.text(id, label);
     }
     m.separator()
+        .text(SETTINGS, "Settings…")
         .text(LOGS, "Open Fritz's logs")
         .separator()
         .text(QUIT, "Quit Mister Fritz")
@@ -104,6 +106,7 @@ fn on_menu_item(app: &AppHandle, id: &str) {
         TRAY_LOCK_ID => {
             let _ = overlay_windows::set_mode(app, ModeRequest::Locked);
         }
+        SETTINGS => crate::show_control(app),
         LOGS => {
             let _ = std::process::Command::new("explorer")
                 .arg(crate::settings::app_dir())

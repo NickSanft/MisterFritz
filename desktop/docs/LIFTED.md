@@ -18,6 +18,8 @@ not touched these files since.
 | `src-tauri/src/windows_ext.rs` (part) | `divora-capture/src/native/window.rs` | `foreground_window`, `try_foreground`, `can_take_foreground`, `make_layered_opaque`; the rest of the file is Fritz's own or follows Lorraine (below) |
 | `src/avatar/status.ts` | `src/overlay/status.ts` | Cut to the avatar's status and commands |
 | `src/avatar/wire.fixture.json` | `src/overlay/wire.fixture.json` | Cut to what the avatar keeps; `parked`, the commands and Fritz's events added |
+| `src/divora/tokens.css` | `src/styles.css`, lines 17-265 | Verbatim: the tokens, moods, accents, light theme and motion levels (PR 3's sync script keeps it in step) |
+| `src/divora/components.css` | `src/styles.css`, lines 375-381 and 496-672 | `.eyebrow` (from Tailwind's `@layer utilities`, which comes after `components` in the cascade) and the buttons and the toggle (from `@layer components`), taken out of their layers; the control window only |
 
 ## LorraineAtelier (the owner's own app, private)
 

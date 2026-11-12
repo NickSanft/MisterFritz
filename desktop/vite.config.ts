@@ -1,9 +1,11 @@
 import { fileURLToPath, URL } from "node:url";
 import { defineConfig } from "vite";
+import solid from "vite-plugin-solid";
 
-// Multi-page, like Lorraine's: one HTML entry per window. Spike 0 has only the
-// avatar; PR 2 adds control.html and PR 4 prompt.html here.
+// Multi-page, like Lorraine's: one HTML entry per window: the avatar, the
+// control window (Solid); PR 4 adds prompt.html here.
 export default defineConfig({
+  plugins: [solid()],
   clearScreen: false,
   server: {
     // 1431, so this can run beside Lorraine (1430) and DivoraVoice (1420).
@@ -19,6 +21,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         avatar: fileURLToPath(new URL("./avatar.html", import.meta.url)),
+        control: fileURLToPath(new URL("./control.html", import.meta.url)),
       },
     },
   },

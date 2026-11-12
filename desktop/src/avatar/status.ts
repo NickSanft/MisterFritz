@@ -19,6 +19,8 @@ export const HANDSHAKE_CMD = "avatar_handshake";
 export const BEAT_CMD = "avatar_beat";
 export const MODE_CMD = "set_avatar_mode";
 export const VRM_CMD = "avatar_vrm";
+/** The control window's "Load it again": the page loads its model anew. */
+export const RELOAD_EVENT = "avatar:reload";
 
 /** Set by an init script when FRITZ_PRETEND_AVATAR_NO_READY is set in a debug
  * build: the page then skips its ready handshake, so the watchdog can be seen
@@ -114,4 +116,25 @@ export async function requestLock(): Promise<void> {
 /** The owner's VRoid export as raw bytes; rejects when there is none. */
 export function fetchOwnersModel(): Promise<ArrayBuffer> {
   return invoke<ArrayBuffer>(VRM_CMD, vrmArgs());
+}
+
+/** After every load: what the page wears now, and why not the export when
+ * there was one it couldn't use. The shell keeps it for the control window. */
+export const LOADED_CMD = "avatar_loaded";
+export type Wearing = "export" | "placeholder";
+export const loadedArgs = (wearing: Wearing, error: string | null) => ({ wearing, error });
+export async function reportLoaded(wearing: Wearing, error: string | null): Promise<void> {
+  try {
+    await invoke(LOADED_CMD, loadedArgs(wearing, error));
+  } catch (e) {
+    console.error("avatar: couldn't tell the shell which model loaded", e);
+  }
+}
+
+/** What a failed `avatar_vrm` means: "none" is no file there (not an
+ * error, he just wears the placeholder); anything else is why the file
+ * couldn't be had (too large, unreadable). */
+export function vrmFetchError(e: unknown): string | null {
+  const text = typeof e === "string" ? e : e instanceof Error ? e.message : String(e);
+  return text === "none" ? null : text;
 }

@@ -10,11 +10,16 @@ stream overlay shows it needn't, if it never takes focus. What is new here is a
 (native `bevy_vrm1` sidecar) is the owner's call.**
 
 > **Running this table again for PR 2 (its acceptance), in the real app:** the
-> foreground logger is now off unless `diagnostics.foregroundLog` is `true` in
-> `%APPDATA%\com.divora.fritz\settings.json` (set it with Fritz quit), and it
+> foreground logger is now off unless it is switched on (tray > Settings… >
+> Diagnostics, or `diagnostics.foregroundLog` in
+> `%APPDATA%\com.divora.fritz\settings.json`), from the next start, and it
 > writes to `diagnostics\foreground.log`, not `spike\foreground.log`. The tray's
-> *Open the spike logs* is now *Open Fritz's logs*. Everything below is the
-> spike as it was run.
+> *Open the spike logs* is now *Open Fritz's logs*. A fifth kind of line,
+> **`SETTINGS`**, is the control window having the keyboard, which it should
+> when you open it: not a `HIT`. New with it: Arrange (its button, or the
+> tray's) and the tray's Lock, with Settings open and in use, hand the
+> keyboard back to Settings, never to the app beneath it. Everything below is
+> the spike as it was run.
 
 ## What the spike app is
 

@@ -1,0 +1,255 @@
+/* Lifted from DivoraVoiceMod (MIT, Copyright (c) 2026 Divora Contributors),
+ * src/styles.css lines 17-265 at 62ed6a5: the design tokens, the colour
+ * moods and accents, the light theme and the motion levels. See
+ * desktop/LICENSES/DivoraVoiceMod.txt. PR 3's theme.ts sets the attributes
+ * these key on, and its sync script keeps this in step with the source. */
+
+:root {
+  /* Surfaces (dusk-violet darks) */
+  --bg: #07060d;
+  --surface-0: #0d0a16;
+  --surface-1: #14101f;
+  --surface-2: #1a1528;
+  --surface-3: #221b34;
+  --surface-4: #2c2442;
+
+  /* Lines */
+  --line: rgba(168, 150, 220, 0.10);
+  --line-strong: rgba(168, 150, 220, 0.18);
+  --line-glow: rgba(124, 92, 246, 0.40);
+
+  /* Text */
+  --text-hi: #ECE7F8;
+  --text-mid: #A99FC4;
+  --text-lo: #6E6590;
+  --text-dim: #4b4368;
+
+  /* Accent identity (brand gradient) */
+  --indigo: #6D5BF0;
+  --indigo-deep: #4F46E5;
+  --pink: #EC4899;
+  --pink-deep: #DB2777;
+  --grad: linear-gradient(120deg, #4F46E5 0%, #7C5CF6 42%, #DB2777 100%);
+  --grad-soft: linear-gradient(120deg, rgba(79, 70, 229, 0.22), rgba(219, 39, 119, 0.22));
+
+  /* Semantic */
+  --success: #34D9A0;
+  --warning: #E9B14C;
+  --danger: #F2567A;
+  --info: #58C6F2;
+
+  --success-bg: rgba(52, 217, 160, 0.12);
+  --warning-bg: rgba(233, 177, 76, 0.12);
+  --danger-bg: rgba(242, 86, 122, 0.12);
+  --info-bg: rgba(88, 198, 242, 0.12);
+  --accent-bg: rgba(124, 92, 246, 0.14);
+
+  /* Radii */
+  --r-sm: 7px;
+  --r-md: 11px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+  --r-pill: 999px;
+
+  /* Spacing scale (4px base) */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s7: 32px;
+  --s8: 40px;
+  --s9: 56px;
+
+  /* Shadows / glows */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 6px 22px rgba(0, 0, 0, 0.45);
+  --shadow-3: 0 18px 50px rgba(0, 0, 0, 0.55);
+  --glow-accent: 0 0 0 1px rgba(124, 92, 246, 0.35), 0 0 30px rgba(124, 92, 246, 0.35);
+
+  /* "Deep" tokens — surfaces that stay dark in BOTH themes because a
+     glowing white glyph sits on them (the voice core, the wizard's
+     ceremonial sigil disc) or because they're a modal scrim. The light
+     theme keeps these deep so the white content stays readable. */
+  --core-ink: rgba(13, 10, 22, 0.7);
+  --scrim: rgba(7, 6, 13, 0.7);
+
+  /* Meter peak-hold bloom + the optional grain/vignette overlays. The cap
+     itself stays `--text-hi` (so it contrasts the track in both themes);
+     only the bloom + overlays need theme-aware values — a bright halo and
+     a black vignette read as a smudge on light, so the light block softens
+     them to a violet wash. */
+  --meter-peak-glow: 0 0 6px rgba(236, 231, 248, 0.9);
+  --grain-blend: overlay;
+  --grain-opacity: 0.5;
+  --vignette-shadow: inset 0 0 160px 30px rgba(0, 0, 0, 0.55);
+
+  /* Type */
+  --font-display: "Bricolage Grotesque Variable", system-ui, sans-serif;
+  --font-ui: "Space Grotesk Variable", system-ui, sans-serif;
+  --font-mono: "Space Mono", ui-monospace, monospace;
+
+  /* Type scale */
+  --t-display: 34px;
+  --t-h1: 24px;
+  --t-h2: 19px;
+  --t-h3: 16px;
+  --t-body: 14px;
+  --t-sm: 12.5px;
+  --t-xs: 11px;
+  --t-micro: 9.5px;
+
+  /* Motion factor (Tweaks knob; reduced by prefers-reduced-motion) */
+  --motion: 1;
+}
+
+/* Color-mood variants (Tweaks) */
+:root[data-mood="ink"] {
+  --bg: #08070b;
+  --surface-0: #0e0c10;
+  --surface-1: #15131a;
+  --surface-2: #1c1922;
+  --surface-3: #26222d;
+  --surface-4: #322c3a;
+  --warning: #E9B14C;
+  --line: rgba(233, 200, 150, 0.10);
+  --line-strong: rgba(233, 200, 150, 0.16);
+  --text-mid: #b4a896;
+  --text-lo: #75694f;
+}
+
+:root[data-mood="midnight"] {
+  --bg: #040406;
+  --surface-0: #08080c;
+  --surface-1: #0d0d13;
+  --surface-2: #131319;
+  --surface-3: #1b1b23;
+  --surface-4: #24242e;
+  --line: rgba(150, 160, 200, 0.08);
+  --line-strong: rgba(150, 160, 200, 0.14);
+  --text-mid: #9aa0b8;
+  --text-lo: #5d6178;
+}
+
+/* Accent variants */
+:root[data-accent="abyssal"] {
+  --indigo: #4ABDE0;
+  --indigo-deep: #2A88B0;
+  --pink: #7CD0E5;
+  --pink-deep: #4AB0D0;
+  --grad: linear-gradient(120deg, #2A88B0 0%, #4ABDE0 50%, #7CD0E5 100%);
+}
+
+:root[data-accent="ember"] {
+  --indigo: #F2A857;
+  --indigo-deep: #D97B2B;
+  --pink: #F25757;
+  --pink-deep: #C13838;
+  --grad: linear-gradient(120deg, #D97B2B 0%, #F2A857 50%, #F25757 100%);
+}
+
+/* ============================================================
+   LIGHT THEME (Tweaks · orthogonal to mood)
+   `data-theme="light"` flips the surface/text polarity; the mood
+   blocks below it (higher specificity) re-tint the hue so light
+   composes with warm/cool. Placed AFTER the dark mood blocks so the
+   shared surface/line/text props win on source order when only the
+   theme (not a mood-specific light block) matches. Brand gradient +
+   accent identity are unchanged — they read fine on light.
+   ============================================================ */
+:root[data-theme="light"] {
+  /* Soft lilac-tinted light ramp — surface gets *darker* with elevation
+     (the opposite of dark) so hover/pressed still read as "raised". */
+  --bg: #e6e2f1;
+  --surface-0: #f8f6fc;
+  --surface-1: #f1eef8;
+  --surface-2: #eae5f3;
+  --surface-3: #e0d9ed;
+  --surface-4: #d3cbe5;
+
+  --line: rgba(70, 50, 130, 0.12);
+  --line-strong: rgba(70, 50, 130, 0.20);
+  --line-glow: rgba(124, 92, 246, 0.45);
+
+  --text-hi: #1c1730;
+  --text-mid: #494060;
+  --text-lo: #6f6690;
+  --text-dim: #8b83a6;
+
+  /* Softer, violet-tinted shadows instead of harsh black on light. */
+  --shadow-1: 0 1px 2px rgba(60, 45, 110, 0.12);
+  --shadow-2: 0 6px 22px rgba(60, 45, 110, 0.14);
+  --shadow-3: 0 18px 50px rgba(40, 30, 80, 0.20);
+  --glow-accent: 0 0 0 1px rgba(124, 92, 246, 0.30), 0 0 26px rgba(124, 92, 246, 0.22);
+
+  /* Tints need a touch more alpha to register on a light surface. */
+  --success-bg: rgba(52, 217, 160, 0.18);
+  --warning-bg: rgba(233, 177, 76, 0.20);
+  --danger-bg: rgba(242, 86, 122, 0.15);
+  --info-bg: rgba(88, 198, 242, 0.18);
+  --accent-bg: rgba(124, 92, 246, 0.15);
+  --grad-soft: linear-gradient(120deg, rgba(79, 70, 229, 0.14), rgba(219, 39, 119, 0.14));
+
+  /* Keep the scrim a soft violet wash rather than near-black. The voice
+     core / sigil disc stay deep so their white glyphs read. */
+  --scrim: rgba(28, 20, 48, 0.40);
+  --core-ink: #241a3a;
+
+  /* A black bloom/vignette reads as soot on light — use a soft violet
+     instead; switch grain to multiply so the parchment speckle darkens
+     (and so shows) on a light surface. */
+  --meter-peak-glow: 0 0 5px rgba(80, 60, 140, 0.30);
+  --grain-blend: multiply;
+  --grain-opacity: 0.28;
+  --vignette-shadow: inset 0 0 160px 30px rgba(60, 45, 110, 0.18);
+}
+
+/* Light + warm (parchment & candle) */
+:root[data-theme="light"][data-mood="ink"] {
+  --bg: #efe9df;
+  --surface-0: #faf6ee;
+  --surface-1: #f4efe4;
+  --surface-2: #ece5d7;
+  --surface-3: #e3dac9;
+  --surface-4: #d6cab4;
+  --line: rgba(120, 90, 40, 0.13);
+  --line-strong: rgba(120, 90, 40, 0.22);
+  --text-hi: #2a2114;
+  --text-mid: #5a4f3c;
+  --text-lo: #837560;
+}
+
+/* Light + cool (overcast slate) */
+:root[data-theme="light"][data-mood="midnight"] {
+  --bg: #e1e4ee;
+  --surface-0: #f5f7fb;
+  --surface-1: #eef1f7;
+  --surface-2: #e6eaf2;
+  --surface-3: #dadfeb;
+  --surface-4: #ccd3e3;
+  --line: rgba(40, 60, 110, 0.12);
+  --line-strong: rgba(40, 60, 110, 0.20);
+  --text-hi: #161b29;
+  --text-mid: #3e4660;
+  --text-lo: #6b7290;
+}
+
+/* Reduced motion: collapse motion factor to 0 by default; Tweaks can lift it */
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion-user="true"]) {
+    --motion: 0;
+  }
+}
+
+:root[data-motion="functional"] {
+  --motion: 0;
+}
+
+:root[data-motion="ambient"] {
+  --motion: 0.6;
+}
+
+:root[data-motion="rich"] {
+  --motion: 1;
+}

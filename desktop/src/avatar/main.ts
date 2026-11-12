@@ -13,14 +13,19 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { PacedLoop } from "./PacedLoop";
 import { VrmActor } from "./VrmActor";
+import { VRMUtils } from "@pixiv/three-vrm";
 import { frameSpan } from "./framing";
 import { keyAction } from "./keys";
 import { POWER_EVENT, afterAsking, fetchDisplayOn, parseDisplay, shouldDraw } from "./run";
 import { AHEAD, CURSOR_EVENT, fetchCursor, gaze, parseCursor, type CursorFrame, type Gaze } from "./look";
 import {
   NO_READY_GLOBAL,
+  RELOAD_EVENT,
   STATUS_EVENT,
   fetchOwnersModel,
+  reportLoaded,
+  vrmFetchError,
+  type Wearing,
   pageInstance,
   parseStatus,
   requestLock,
@@ -144,27 +149,52 @@ function draw(): void {
   else if (!on && loop.running) loop.stop();
 }
 
-async function modelBytes(): Promise<ArrayBuffer> {
-  try {
-    return await fetchOwnersModel();
-  } catch {
-    // No fritz.vrm in the app's data folder (or it can't be read): the
-    // placeholder that ships with the app.
-  }
+/** The placeholder that ships with the app. */
+async function placeholderBytes(): Promise<ArrayBuffer> {
   const r = await fetch("/placeholder.vrm");
   return r.arrayBuffer();
 }
 
+/** His model, else the placeholder; and the shell is told which, with why
+ * when an export that is there couldn't be used. */
 async function loadActor(): Promise<void> {
+  let next: VrmActor | null = null;
+  let error: string | null = null;
+  let owners: ArrayBuffer | null = null;
   try {
-    actor = await VrmActor.load(await modelBytes());
+    owners = await fetchOwnersModel();
   } catch (e) {
-    console.error("avatar: couldn't load the model; using the placeholder", e);
-    const r = await fetch("/placeholder.vrm");
-    actor = await VrmActor.load(await r.arrayBuffer());
+    error = vrmFetchError(e); // null: there's no export, which is no error
   }
-  scene.add(actor.vrm.scene);
+  if (owners) {
+    try {
+      next = await VrmActor.load(owners);
+    } catch (e) {
+      console.error("avatar: couldn't load the owner's model; using the placeholder", e);
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+  const wearing: Wearing = next ? "export" : "placeholder";
+  next ??= await VrmActor.load(await placeholderBytes());
+  // The old model goes only once the new one is ready, so he is never
+  // missing for longer than a frame.
+  const old = actor;
+  if (old) {
+    scene.remove(old.vrm.scene);
+    VRMUtils.deepDispose(old.vrm.scene);
+  }
+  actor = next;
+  scene.add(next.vrm.scene);
   fit();
+  await reportLoaded(wearing, error);
+}
+
+/** Loads one at a time, in the order asked for: two quick reloads can't
+ * leave two models in the scene. */
+let loading: Promise<void> = Promise.resolve();
+function load(): Promise<void> {
+  loading = loading.then(loadActor, loadActor);
+  return loading;
 }
 
 // Arrange only: the shell has lifted click-through and given the window the
@@ -221,7 +251,8 @@ async function main(): Promise<void> {
   if ((window as unknown as Record<string, unknown>)[NO_READY_GLOBAL] !== true) {
     await sendHandshake(instance, "ready");
   }
-  await loadActor();
+  await listen(RELOAD_EVENT, () => void load());
+  await load();
 }
 
 void main();

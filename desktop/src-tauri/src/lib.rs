@@ -26,7 +26,7 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use tauri::{AppHandle, Emitter, Manager, RunEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 use tauri_plugin_global_shortcut::{Shortcut, ShortcutEvent, ShortcutState};
 
 use overlay_machine::{
@@ -190,13 +190,17 @@ async fn avatar_status(app: AppHandle) -> OverlayStatus {
 }
 
 /// The owner's VRoid export, as raw bytes; an error ("none") when there is
-/// none, and the page falls back to the placeholder it ships with.
+/// none, and the page falls back to the placeholder it ships with. Which
+/// file it was is kept for the page's report that follows (`HANDED`).
 #[tauri::command]
 async fn avatar_vrm() -> Result<tauri::ipc::Response, String> {
     let path = model_path(&settings::get());
-    let size = std::fs::metadata(&path)
-        .map_err(|_| "none".to_owned())?
-        .len();
+    let stamp = stamp(&path);
+    *HANDED.lock().unwrap_or_else(|e| e.into_inner()) = Some(ModelFile {
+        path: path.clone(),
+        stamp,
+    });
+    let size = stamp.ok_or_else(|| "none".to_owned())?.len;
     if size > MAX_VRM_BYTES {
         return Err(format!(
             "{} is larger than {MAX_VRM_BYTES} bytes",
@@ -245,6 +249,222 @@ async fn cursor_now(app: AppHandle) -> cursor::Cursor {
     cursor::now(&app)
 }
 
+/// The control window (tray > Settings…), declared in tauri.conf.json and
+/// shown on demand.
+pub const CONTROL_LABEL: &str = "control";
+/// Sent to the avatar's page to load its model again (the control window's
+/// "Load it again", after the owner drops a new export in).
+pub const RELOAD_EVENT: &str = "avatar:reload";
+/// Shows the control window at start: for a test run, which can't click the
+/// tray.
+const SHOW_SETTINGS_ENV: &str = "FRITZ_SHOW_SETTINGS";
+
+/// Show the control window and give it the keyboard (it is an ordinary
+/// window; only the avatar's must never take focus). By SetForegroundWindow,
+/// which Windows allows from the tray's click and refuses otherwise (the
+/// window then waits behind, its taskbar button flashing); never tao's
+/// `set_focus`, which taps Alt into the owner's app to get its way.
+pub(crate) fn show_control(app: &AppHandle) {
+    let Some(w) = app.get_webview_window(CONTROL_LABEL) else {
+        tracing::warn!("there is no control window");
+        return;
+    };
+    let _ = w.show();
+    let _ = w.unminimize();
+    if let Ok(h) = w.hwnd() {
+        windows_ext::try_foreground(h.0 as isize);
+    }
+}
+
+/// Whether closing the window `label` only hides it: the control window
+/// does, so the tray can bring it back; the avatar's has its own shell.
+pub fn hides_on_close(label: &str) -> bool {
+    label == CONTROL_LABEL
+}
+
+/// Which model the page draws, for the control window.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelInfo {
+    /// `"setting"` when `avatar.vrmPath` names it, `"folder"` for
+    /// `avatar\fritz.vrm` in the data folder.
+    pub from: &'static str,
+    pub path: String,
+    /// Whether there is a file there to load (if not, he wears the
+    /// placeholder).
+    pub found: bool,
+    pub bytes: Option<u64>,
+    /// Larger than the page is handed: he wears the placeholder.
+    pub too_big: bool,
+    /// What the avatar's page last loaded, as it said (`avatar_loaded`):
+    /// `"export"` or `"placeholder"`; `None` before its first load.
+    pub wearing: Option<&'static str>,
+    /// Why the export didn't load, when the page fell back to the
+    /// placeholder for the file there now (it isn't a VRM, say).
+    pub load_error: Option<String>,
+    /// The file there now isn't the one the page last loaded (an export
+    /// dropped in or taken away, or `avatar.vrmPath` changed): what he
+    /// wears is from before, and loading again wears what's there.
+    pub changed: bool,
+}
+
+/// A model file as it was seen: its size and when it was last written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stamp {
+    pub len: u64,
+    pub modified: Option<std::time::SystemTime>,
+}
+
+/// The model file at `path` (a file, not a folder), if there is one.
+fn stamp(path: &std::path::Path) -> Option<Stamp> {
+    std::fs::metadata(path)
+        .ok()
+        .filter(std::fs::Metadata::is_file)
+        .map(|m| Stamp { len: m.len(), modified: m.modified().ok() })
+}
+
+/// Which file a load was of: where the page was told to look, and what was
+/// there (`None`: nothing).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelFile {
+    pub path: PathBuf,
+    pub stamp: Option<Stamp>,
+}
+
+/// What `avatar_vrm` last handed the page, taken by the report that
+/// follows it (the page loads one model at a time).
+static HANDED: std::sync::Mutex<Option<ModelFile>> = std::sync::Mutex::new(None);
+
+/// What the avatar's page last loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wearing {
+    pub what: &'static str,
+    pub error: Option<String>,
+    /// The file it was of; `None` when the page never asked for one, so it
+    /// matches no file.
+    pub file: Option<ModelFile>,
+}
+
+/// The longest load error kept, in characters: it comes from the page and
+/// goes into a window.
+const LOAD_ERROR_CHARS: usize = 300;
+
+/// The page's report, checked: `"export"` or `"placeholder"`, and an error
+/// cut to printable text of a sensible length.
+pub fn wearing_from(what: &str, error: Option<String>) -> Result<Wearing, String> {
+    let what = match what {
+        "export" => "export",
+        "placeholder" => "placeholder",
+        other => return Err(format!("{other:?} isn't a model the page wears")),
+    };
+    let error = error
+        .map(|e| e.chars().filter(|c| !c.is_control()).take(LOAD_ERROR_CHARS).collect::<String>())
+        .filter(|e| !e.trim().is_empty());
+    Ok(Wearing { what, error, file: None })
+}
+
+/// The page's report, checked, and tied to the file `avatar_vrm` handed it
+/// for that load.
+fn take_report(what: &str, error: Option<String>) -> Result<Wearing, String> {
+    let mut w = wearing_from(what, error)?;
+    w.file = HANDED.lock().unwrap_or_else(|e| e.into_inner()).take();
+    Ok(w)
+}
+
+/// The page's last report, kept for `avatar_model`.
+static WEARING: std::sync::Mutex<Option<Wearing>> = std::sync::Mutex::new(None);
+
+/// Sent to every window when the avatar's page has loaded a model.
+pub const LOADED_EVENT: &str = "avatar:loaded";
+
+/// The model for the control window: the file there now (`stamp` looks),
+/// and the page's last report, whose error counts only if it was of that
+/// same file.
+fn model_info(
+    s: &Settings,
+    stamp: impl FnOnce(&std::path::Path) -> Option<Stamp>,
+    wearing: Option<&Wearing>,
+) -> ModelInfo {
+    let path = model_path(s);
+    let now = stamp(&path);
+    let bytes = now.map(|st| st.len);
+    let display = path.display().to_string();
+    let here = ModelFile { path, stamp: now };
+    let fresh = wearing.filter(|w| w.file.as_ref() == Some(&here));
+    ModelInfo {
+        from: if s.avatar.vrm_path.is_some() { "setting" } else { "folder" },
+        path: display,
+        found: bytes.is_some(),
+        bytes,
+        too_big: bytes.is_some_and(|b| b > MAX_VRM_BYTES),
+        wearing: wearing.map(|w| w.what),
+        load_error: fresh.and_then(|w| w.error.clone()),
+        changed: wearing.is_some() && fresh.is_none(),
+    }
+}
+
+/// The folders the control window opens: `"logs"` is the data folder (the
+/// logs and settings are in it), `"avatar"` where his model goes.
+fn folder(which: &str) -> Option<PathBuf> {
+    match which {
+        "logs" => Some(data_dir()),
+        "avatar" => Some(data_dir().join("avatar")),
+        _ => None,
+    }
+}
+
+/// Hide or show him, from the control window: as the tray's Hide and Show.
+#[tauri::command]
+async fn set_parked(app: AppHandle, on: bool) -> OverlayStatus {
+    if on {
+        overlay_windows::set_parked(&app, true);
+    } else {
+        show_avatar(&app);
+    }
+    let h = app.clone();
+    let _ = app.run_on_main_thread(move || tray::refresh(&h));
+    overlay_windows::status(&app)
+}
+
+#[tauri::command]
+async fn avatar_model() -> ModelInfo {
+    let wearing = WEARING.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    model_info(&settings::get(), stamp, wearing.as_ref())
+}
+
+/// The avatar's page says what it has loaded (after every load): kept for
+/// `avatar_model`, and every window is told, so the control window can say
+/// when an export didn't load.
+#[tauri::command]
+async fn avatar_loaded(app: AppHandle, wearing: String, error: Option<String>) -> Result<(), String> {
+    let w = take_report(&wearing, error)?;
+    match &w.error {
+        Some(e) => tracing::warn!(wearing = w.what, error = %e, "the avatar's model"),
+        None => tracing::info!(wearing = w.what, "the avatar's model"),
+    }
+    *WEARING.lock().unwrap_or_else(|e| e.into_inner()) = Some(w);
+    let _ = app.emit(LOADED_EVENT, ());
+    Ok(())
+}
+
+/// Open one of Fritz's folders in Explorer (made first if it isn't there).
+#[tauri::command]
+async fn open_folder(which: String) -> Result<(), String> {
+    let dir = folder(&which).ok_or_else(|| format!("there is no folder {which:?}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::process::Command::new("explorer")
+        .arg(&dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Have the avatar's page load its model again.
+#[tauri::command]
+async fn reload_model(app: AppHandle) {
+    let _ = app.emit_to(OVERLAY_LABEL, RELOAD_EVENT, ());
+}
+
 pub fn run() {
     logs::install_panic_hook();
     logs::startup(&format!(
@@ -271,7 +491,12 @@ pub fn run() {
             get_settings,
             set_setting,
             power_display,
-            cursor_now
+            cursor_now,
+            set_parked,
+            avatar_model,
+            open_folder,
+            reload_model,
+            avatar_loaded
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -298,12 +523,20 @@ pub fn run() {
             avatar_state::start_saver(handle.clone());
             open_avatar(&handle);
             cursor::start(handle.clone());
+            if std::env::var_os(SHOW_SETTINGS_ENV).is_some() {
+                show_control(&handle);
+            }
             logs::startup("started");
             Ok(())
         })
         .on_window_event(|window, event| {
             if window.label() == OVERLAY_LABEL {
                 overlay_windows::on_window_event(window.app_handle(), event);
+            } else if hides_on_close(window.label()) {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
             }
         })
         .build(tauri::generate_context!())
@@ -363,7 +596,180 @@ mod tests {
         assert_eq!(events["power"], crate::power::DISPLAY_EVENT);
         assert_eq!(events["status"], crate::overlay_machine::OVERLAY_STATUS_EVENT);
         assert_eq!(events["cursor"], crate::cursor::CURSOR_EVENT);
-        assert_eq!(events.len(), 4, "an event with no Rust half: {events:?}");
+        assert_eq!(events["reload"], super::RELOAD_EVENT);
+        assert_eq!(events["loaded"], super::LOADED_EVENT);
+        assert_eq!(events.len(), 6, "an event with no Rust half: {events:?}");
+    }
+
+    #[test]
+    fn only_the_control_window_hides_on_close() {
+        assert!(super::hides_on_close("control"));
+        assert!(!super::hides_on_close("avatar"));
+        assert!(!super::hides_on_close("prompt"));
+    }
+
+    /// The control window is the one tauri.conf.json declares, so the tray
+    /// and the close rule find it by that label.
+    #[test]
+    fn the_control_window_is_declared() {
+        let conf: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let windows = conf["app"]["windows"].as_array().unwrap();
+        let control = windows.iter().find(|w| w["label"] == super::CONTROL_LABEL).unwrap();
+        assert_eq!(control["url"], "control.html");
+        assert_eq!(control["visible"], false, "shown from the tray, never at start");
+        // Hidden is not enough: a webview made with focus takes the keyboard
+        // from the owner's app at every start, though no one can see it.
+        assert_eq!(control["focus"], false, "a hidden window must not take the keyboard");
+    }
+
+    /// A file of `len` bytes, last written at second `at`.
+    fn file(len: u64, at: u64) -> Option<super::Stamp> {
+        Some(super::Stamp {
+            len,
+            modified: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(at)),
+        })
+    }
+
+    #[test]
+    fn the_control_window_says_which_model_he_wears() {
+        let mut s = crate::settings::Settings::default();
+        let found = super::model_info(&s, |_| file(12_000_000, 1), None);
+        assert_eq!(found.from, "folder");
+        assert!(found.found && !found.too_big);
+        assert_eq!(found.bytes, Some(12_000_000));
+        assert!(found.path.ends_with("fritz.vrm"), "{}", found.path);
+        let none = super::model_info(&s, |_| None, None);
+        assert!(!none.found && !none.too_big && none.bytes.is_none());
+        s.avatar.vrm_path = Some(r"D:\models\big.vrm".into());
+        let big = super::model_info(&s, |_| file(super::MAX_VRM_BYTES + 1, 1), None);
+        assert_eq!(big.from, "setting");
+        assert!(big.found && big.too_big);
+        assert_eq!(big.path, r"D:\models\big.vrm");
+    }
+
+    /// The control window reads these keys, and asks for these folders.
+    #[test]
+    fn the_model_and_folders_are_the_wire_contract() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../src/avatar/wire.fixture.json")).unwrap();
+        let info = serde_json::to_value(super::model_info(&crate::settings::Settings::default(), |_| None, None)).unwrap();
+        let mut keys: Vec<&str> = info.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        let want: Vec<&str> =
+            fixture["modelInfoKeys"].as_array().unwrap().iter().map(|k| k.as_str().unwrap()).collect();
+        assert_eq!(keys, want);
+        for which in fixture["folders"].as_array().unwrap() {
+            assert!(super::folder(which.as_str().unwrap()).is_some(), "{which}");
+        }
+    }
+
+    /// The page's report, as of the file `stamp` at the model's place.
+    fn report(s: &crate::settings::Settings, what: &str, error: Option<&str>, stamp: Option<super::Stamp>) -> super::Wearing {
+        super::Wearing {
+            file: Some(super::ModelFile { path: super::model_path(s), stamp }),
+            ..super::wearing_from(what, error.map(str::to_owned)).unwrap()
+        }
+    }
+
+    /// What the page said it loaded reaches the control window: an export
+    /// that didn't parse is the placeholder, with the page's reason.
+    #[test]
+    fn the_page_says_what_he_wears() {
+        let s = crate::settings::Settings::default();
+        let before = super::model_info(&s, |_| file(5, 1), None);
+        assert_eq!((before.wearing, before.changed), (None, false), "before any load");
+        let failed = report(&s, "placeholder", Some("That file has no VRM in it."), file(5, 1));
+        let info = super::model_info(&s, |_| file(5, 1), Some(&failed));
+        assert_eq!(info.wearing, Some("placeholder"));
+        assert_eq!(info.load_error.as_deref(), Some("That file has no VRM in it."));
+        assert!(!info.changed);
+        let ok = report(&s, "export", None, file(5, 1));
+        let info = super::model_info(&s, |_| file(5, 1), Some(&ok));
+        assert_eq!((info.wearing, info.load_error, info.changed), (Some("export"), None, false));
+        // Nothing there at the last load, and nothing now: the placeholder,
+        // and no news.
+        let nothing = report(&s, "placeholder", None, None);
+        assert!(!super::model_info(&s, |_| None, Some(&nothing)).changed);
+    }
+
+    /// A report is of the file the page was handed: once the file there
+    /// isn't that one, the window hears that it changed, and an old error
+    /// is never pinned on a new file. What he wears is still as reported.
+    #[test]
+    fn a_report_is_of_the_file_it_was_handed() {
+        let mut s = crate::settings::Settings::default();
+        let failed = report(&s, "placeholder", Some("That file has no VRM in it."), file(5, 1));
+        let ok = report(&s, "export", None, file(5, 1));
+        let nothing = report(&s, "placeholder", None, None);
+        let cases = [
+            (&nothing, file(5, 1), "an export dropped in where there was none"),
+            (&failed, file(6, 1), "the broken export replaced by a larger one"),
+            (&failed, file(5, 2), "the broken export written again"),
+            (&ok, None, "the export he wears taken away"),
+        ];
+        for (was, now, case) in cases {
+            let info = super::model_info(&s, |_| now, Some(was));
+            assert!(info.changed, "{case}");
+            assert_eq!(info.load_error, None, "{case}");
+            assert_eq!(info.wearing, Some(was.what), "{case}");
+        }
+        // A report the page never asked a file for matches none.
+        let unasked = super::wearing_from("placeholder", None).unwrap();
+        assert!(super::model_info(&s, |_| None, Some(&unasked)).changed);
+        // avatar.vrmPath changed: the same stamp somewhere else is another file.
+        s.avatar.vrm_path = Some(r"D:\models\other.vrm".into());
+        let info = super::model_info(&s, |_| file(5, 1), Some(&failed));
+        assert!(info.changed && info.load_error.is_none());
+    }
+
+    /// A file is stamped with its size and when it was written; a folder
+    /// or nothing at all is no model.
+    #[test]
+    fn a_model_file_is_stamped() {
+        let dir = std::env::temp_dir().join(format!("fritz-stamp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("fritz.vrm");
+        std::fs::write(&f, b"vrm").unwrap();
+        let st = super::stamp(&f).unwrap();
+        assert_eq!(st.len, 3);
+        assert_eq!(st.modified, std::fs::metadata(&f).unwrap().modified().ok());
+        assert!(st.modified.is_some());
+        assert_eq!(super::stamp(&dir), None, "a folder");
+        assert_eq!(super::stamp(&dir.join("none.vrm")), None, "nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `avatar_vrm` keeps which file it handed over (here, none at the
+    /// model's place), and the page's report takes it, once.
+    #[test]
+    fn the_report_takes_what_was_handed() {
+        let none = tauri::async_runtime::block_on(super::avatar_vrm()).err();
+        assert_eq!(none.as_deref(), Some("none"));
+        let s = crate::settings::get();
+        let w = super::take_report("placeholder", None).unwrap();
+        assert_eq!(w.file, Some(super::ModelFile { path: super::model_path(&s), stamp: None }));
+        assert!(!super::model_info(&s, |_| None, Some(&w)).changed);
+        assert!(super::model_info(&s, |_| file(5, 1), Some(&w)).changed);
+        assert_eq!(super::take_report("placeholder", None).unwrap().file, None, "taken");
+    }
+
+    #[test]
+    fn the_pages_report_is_checked() {
+        assert!(super::wearing_from("a hat", None).is_err());
+        let w = super::wearing_from("placeholder", Some(format!("bad\r\nfile\u{0}{}", "x".repeat(500)))).unwrap();
+        let e = w.error.unwrap();
+        assert!(!e.contains(['\r', '\n', '\u{0}']), "{e}");
+        assert_eq!(e.chars().count(), super::LOAD_ERROR_CHARS);
+        assert_eq!(super::wearing_from("export", Some("  ".into())).unwrap().error, None);
+    }
+
+    #[test]
+    fn the_control_window_opens_only_fritzs_folders() {
+        let data = crate::settings::app_dir();
+        assert_eq!(super::folder("logs"), Some(data.clone()));
+        assert_eq!(super::folder("avatar"), Some(data.join("avatar")));
+        assert_eq!(super::folder(r"C:\Windows"), None);
+        assert_eq!(super::folder(""), None);
     }
 
     #[test]

@@ -1,0 +1,192 @@
+/* Lifted from DivoraVoiceMod (MIT, Copyright (c) 2026 Divora Contributors),
+ * src/styles.css at 62ed6a5: .eyebrow (lines 375-381, from Tailwind's
+ * utilities layer), the buttons and the
+ * toggle switch (lines 496-672, from its components layer). See
+ * desktop/LICENSES/DivoraVoiceMod.txt. The control window only: the avatar
+ * page draws nothing with CSS animation or transitions. */
+
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--text-lo);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  font-family: var(--font-ui);
+  font-weight: 600;
+  font-size: var(--t-sm);
+  border-radius: var(--r-md);
+  padding: 0 14px;
+  height: 36px;
+  white-space: nowrap;
+  transition: all 0.14s ease;
+  user-select: none;
+  border: 1px solid transparent;
+  position: relative;
+}
+
+.btn:active {
+  transform: translateY(0.5px);
+}
+
+.btn-sm {
+  height: 30px;
+  padding: 0 10px;
+  font-size: var(--t-xs);
+  border-radius: var(--r-sm);
+}
+
+.btn-lg {
+  height: 44px;
+  padding: 0 20px;
+  font-size: var(--t-body);
+}
+
+.btn-block {
+  width: 100%;
+  justify-content: center;
+}
+
+.btn-primary {
+  color: #fff;
+  background: var(--grad);
+  box-shadow: 0 2px 14px rgba(124, 92, 246, 0.35);
+}
+
+.btn-primary:hover {
+  box-shadow: 0 4px 22px rgba(124, 92, 246, 0.5);
+  filter: brightness(1.06);
+}
+
+.btn-primary:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(124, 92, 246, 0.4);
+}
+
+.btn-secondary {
+  color: var(--text-hi);
+  background: var(--surface-3);
+  border-color: var(--line-strong);
+}
+
+.btn-secondary:hover {
+  background: var(--surface-4);
+  border-color: var(--line-glow);
+}
+
+.btn-secondary:focus-visible {
+  outline: none;
+  border-color: var(--indigo);
+  box-shadow: 0 0 0 3px rgba(124, 92, 246, 0.3);
+}
+
+.btn-ghost {
+  color: var(--text-mid);
+  background: transparent;
+}
+
+.btn-ghost:hover {
+  color: var(--text-hi);
+  background: var(--surface-2);
+}
+
+.btn-danger {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-color: rgba(242, 86, 122, 0.25);
+}
+
+.btn-danger:hover {
+  background: rgba(242, 86, 122, 0.2);
+  border-color: rgba(242, 86, 122, 0.5);
+}
+
+.btn-danger.btn-solid {
+  color: #fff;
+  background: var(--danger);
+  border-color: transparent;
+}
+
+.btn-danger.btn-solid:hover {
+  filter: brightness(1.08);
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--r-md);
+  color: var(--text-mid);
+  transition: all 0.14s ease;
+  border: 1px solid transparent;
+}
+
+.icon-btn:hover {
+  background: var(--surface-2);
+  color: var(--text-hi);
+}
+
+.icon-btn.is-active {
+  background: var(--accent-bg);
+  color: var(--indigo);
+  border-color: var(--line-glow);
+}
+
+/* ---------- Toggle switch ---------- */
+.toggle {
+  width: 40px;
+  height: 23px;
+  border-radius: 999px;
+  background: var(--surface-4);
+  position: relative;
+  transition: all 0.18s ease;
+  flex: none;
+  border: 1px solid var(--line);
+}
+
+.toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 17px;
+  height: 17px;
+  border-radius: 999px;
+  background: var(--text-mid);
+  transition: all 0.2s cubic-bezier(0.5, 1.4, 0.5, 1);
+  box-shadow: var(--shadow-1);
+}
+
+.toggle.is-on {
+  background: var(--grad);
+  border-color: transparent;
+}
+
+.toggle.is-on .toggle-knob {
+  left: 19px;
+  background: #fff;
+}
+
+.toggle.tone-danger.is-on {
+  background: var(--danger);
+}
+
+.toggle.tone-success.is-on {
+  background: var(--success);
+}
+
+.toggle:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

@@ -201,6 +201,12 @@ pub fn pin_toolwindow(window: isize) -> bool {
     pinned && apply_toolwindow(window)
 }
 
+/// Whether `window` is visible (WS_VISIBLE): false for 0 or a hidden one.
+pub fn is_visible(window: isize) -> bool {
+    // SAFETY: any handle; a stale one is just not visible.
+    window != 0 && unsafe { IsWindowVisible(hwnd(window)) }.as_bool()
+}
+
 /// Where the cursor is on screen, physical pixels (the process is
 /// per-monitor DPI aware, so no monitor's scale bends it).
 pub fn cursor_pos() -> Option<(i32, i32)> {
@@ -488,10 +494,17 @@ pub fn pick_app(in_z_order: &[(isize, bool)], desktop: isize) -> isize {
         .map_or(desktop, |(h, _)| *h)
 }
 
+/// Whether the z-order walk passes `id` over as ours: every window of this
+/// process but `also` (the control window, an ordinary app window).
+fn passed_over_as_ours(id: isize, also: isize) -> bool {
+    id != also && owned_by_us(id)
+}
+
 /// The app in use, from the top of the z-order, that isn't `skip`; failing
 /// any, the desktop (`GetShellWindow`), so a Lock always has somewhere to
-/// hand the keyboard. 0 only with no shell at all.
-pub fn next_app_window(skip: isize) -> isize {
+/// hand the keyboard. 0 only with no shell at all. Our own windows are
+/// passed over, but `also` (0: none).
+pub fn next_app_window(skip: isize, also: isize) -> isize {
     let mut apps: Vec<(isize, bool)> = Vec::new();
     // SAFETY: plain queries walking the top-level z-order; a window that goes
     // mid-walk only ends the walk early.
@@ -519,7 +532,7 @@ pub fn next_app_window(skip: isize) -> isize {
                     cloaked != 0,
                     ex,
                     owned,
-                    owned_by_us(id),
+                    passed_over_as_ours(id, also),
                     &class_name(h),
                 ) {
                     let topmost = ex & WS_EX_TOPMOST.0 != 0;
@@ -542,13 +555,14 @@ pub(crate) mod tests {
     use super::{
         apply_toolwindow, can_take_foreground, covers, foreground_window, fullscreen_on, hwnd,
         intersects, is_app_window, is_shell_class, lock_state, make_layered_opaque, monitors,
-        next_app_window, owned_by_us, pick_app, pin_toolwindow, session_locked, settle,
+        next_app_window, owned_by_us, passed_over_as_ours, pick_app, pin_toolwindow, session_locked,
+        settle,
         toolwindow_style, touching, try_foreground, window_bounds, Bounds,
     };
     use windows::core::w;
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DestroyWindow, GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE,
+        CreateWindowExW, DestroyWindow, GetShellWindow, GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE,
         WINDOW_EX_STYLE, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_POPUP,
     };
 
@@ -908,9 +922,23 @@ pub(crate) mod tests {
     #[test]
     fn there_is_always_somewhere_to_hand_the_keyboard() {
         let win = Hidden::new(WINDOW_EX_STYLE(0));
-        let to = next_app_window(win.id());
+        let to = next_app_window(win.id(), 0);
         assert_ne!(to, 0);
         assert_ne!(to, win.id());
+    }
+
+    /// The walk passes over every window of ours but the one named (the
+    /// control window); no one else's is ever passed over as ours.
+    #[test]
+    fn only_the_named_window_of_ours_is_an_app() {
+        let win = Hidden::new(WINDOW_EX_STYLE(0));
+        let other = Hidden::new(WINDOW_EX_STYLE(0));
+        assert!(passed_over_as_ours(win.id(), 0));
+        assert!(passed_over_as_ours(win.id(), other.id()));
+        assert!(!passed_over_as_ours(win.id(), win.id()));
+        // SAFETY: a plain query.
+        let shell = unsafe { GetShellWindow() }.0 as isize;
+        assert!(!passed_over_as_ours(shell, 0));
     }
 
     #[test]

@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "control",
+  "description": "The control window (tray > Settings): its own title bar (dragging, minimising, hiding itself), events, and the app's version. Its app commands (get_settings, set_setting, set_parked, avatar_model, open_folder, reload_model, set_avatar_mode, avatar_status) are not ACL-checked without an app manifest, and must be granted here if one is ever added.",
+  "windows": [
+    "control"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-hide"
+  ]
+}
