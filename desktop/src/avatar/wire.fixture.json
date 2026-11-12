@@ -3,7 +3,9 @@
   "label": "avatar",
   "title": "Mister Fritz",
   "events": {
-    "status": "avatar:status"
+    "status": "avatar:status",
+    "settings": "settings:changed",
+    "power": "power:display"
   },
   "hotkeys": {
     "arrange": "avatar:arrange"
@@ -116,6 +118,21 @@
     },
     "vrm": {
       "name": "avatar_vrm",
+      "args": []
+    },
+    "getSettings": {
+      "name": "get_settings",
+      "args": []
+    },
+    "setSetting": {
+      "name": "set_setting",
+      "args": [
+        "path",
+        "value"
+      ]
+    },
+    "powerDisplay": {
+      "name": "power_display",
       "args": []
     }
   }

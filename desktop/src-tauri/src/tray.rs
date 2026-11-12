@@ -1,4 +1,4 @@
-//! The tray: Show / Hide Fritz, Arrange / Lock, the spike's log folder, Quit.
+//! The tray: Show / Hide Fritz, Arrange / Lock, Fritz's logs, Quit.
 //! The menu is rebuilt when Arrange starts or ends (the machine's
 //! `RefreshTray`) and when Fritz is parked or shown, since its items follow
 //! both. Show and Hide are separate ids, so a click does what the label it
@@ -6,7 +6,7 @@
 
 use tauri::menu::{Menu, MenuBuilder, MenuEvent};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 use crate::overlay_machine::{ModeRequest, TRAY_LOCK_ID, TRAY_LOCK_LABEL};
 use crate::overlay_windows;
@@ -54,7 +54,7 @@ fn menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         m = m.text(id, label);
     }
     m.separator()
-        .text(LOGS, "Open the spike logs")
+        .text(LOGS, "Open Fritz's logs")
         .separator()
         .text(QUIT, "Quit Mister Fritz")
         .build()
@@ -87,7 +87,11 @@ pub fn refresh(app: &AppHandle) {
 }
 
 fn on_menu(app: &AppHandle, event: MenuEvent) {
-    match event.id().as_ref() {
+    crate::logs::guard("tray menu", || on_menu_item(app, event.id().as_ref()));
+}
+
+fn on_menu_item(app: &AppHandle, id: &str) {
+    match id {
         SHOW => crate::show_avatar(app),
         HIDE => {
             overlay_windows::set_parked(app, true);
@@ -101,9 +105,9 @@ fn on_menu(app: &AppHandle, event: MenuEvent) {
             let _ = overlay_windows::set_mode(app, ModeRequest::Locked);
         }
         LOGS => {
-            if let Ok(dir) = app.path().app_data_dir() {
-                let _ = std::process::Command::new("explorer").arg(dir).spawn();
-            }
+            let _ = std::process::Command::new("explorer")
+                .arg(crate::settings::app_dir())
+                .spawn();
         }
         QUIT => crate::quit(app),
         _ => {}

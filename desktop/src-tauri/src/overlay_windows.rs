@@ -574,6 +574,11 @@ fn main_thread_effects(effects: &[Effect]) -> Vec<Effect> {
 /// a hotkey's newer one. From the main thread, in order, and level-triggered,
 /// the last status the page sees is always the current one.
 fn run_on_main(app: &AppHandle, effects: &[Effect]) {
+    // A panic here would unwind into the event loop's callback and abort.
+    crate::logs::guard("avatar effects", || run_effects(app, effects));
+}
+
+fn run_effects(app: &AppHandle, effects: &[Effect]) {
     let Some(shared) = shared(app) else {
         return;
     };

@@ -4,10 +4,27 @@ Fritz's body on the Windows desktop: a Tauri 2 app that will talk to the brain
 over the `/companion` WebSocket ([plan 14](../plans/14-desktop-companion.md),
 [build plan](../plans/14-desktop-companion-build.md)). Windows only.
 
-**Today this is Spike 0**: one persistent, transparent, click-through,
-never-focused avatar window with a WebGL VRM in it, instrumented for the
-working session that decides whether the rest of Phase 1 is built this way.
-How to run that session, and where its results go: [docs/SPIKE0.md](docs/SPIKE0.md).
+Today it is one persistent, transparent, click-through, never-focused avatar
+window with a WebGL VRM in it, a tray and two hotkeys: PR 2 of the build plan,
+in progress. Spike 0 proved the window ([docs/SPIKE0.md](docs/SPIKE0.md)), and
+its table is PR 2's acceptance.
+
+## What it keeps, and where
+
+Everything is in `%APPDATA%\com.divora.fritz\` (the tray's *Open Fritz's logs*
+opens it):
+
+| File | What |
+|---|---|
+| `settings.json` | The settings ([`settings.rs`](src-tauri/src/settings.rs)), saved as they change. A file that doesn't parse is moved to `settings.corrupt-<time>.json` and the defaults used; one that can't be read is left alone and not saved over that run |
+| `startup.log`, `crash.log` | A line per start, stop and resume, and every panic. Kept across runs (the previous one as `.old` past 64 KiB): read these after a start that died |
+| `logs\fritz.log` | This run's detailed log, started afresh each run |
+| `diagnostics\foreground.log` | Spike 0's foreground logger, **off** unless `diagnostics.foregroundLog` is `true` (read at start): it writes other apps' window titles |
+| `avatar\fritz.vrm` | The owner's model, if there is one (or `avatar.vrmPath`) |
+
+The hotkeys are `hotkeys.arrange` (Ctrl+Alt+A) and `hotkeys.park`
+(Ctrl+Alt+H), read at start. Until the control window lands, change a setting
+by editing `settings.json` with Fritz quit.
 
 ## Build
 
@@ -49,14 +66,12 @@ cargo test --locked --features custom-protocol --lib --manifest-path src-tauri/C
 `public/placeholder.vrm` is generated, CC0, and committed so a fresh checkout
 always has a body: `python scripts/make_placeholder_vrm.py` rewrites it,
 byte for byte. The owner's real model (plan 14 P6, a VRoid export) is never
-committed; drop it at `%APPDATA%\com.divora.fritz\avatar\fritz.vrm` and it is
-used instead.
+committed; drop it at `%APPDATA%\com.divora.fritz\avatar\fritz.vrm` (or point
+`avatar.vrmPath` at it) and it is used instead.
 
 ## Where things come from
 
-`src-tauri/src/overlay_machine.rs`, `overlay_windows.rs`, `non_rude.rs`, part
-of `windows_ext.rs`, `src/avatar/status.ts` and (cut down)
-`src/avatar/wire.fixture.json` are lifted from DivoraVoiceMod (MIT, see
-[LICENSES/DivoraVoiceMod.txt](LICENSES/DivoraVoiceMod.txt)); each says so at
-the top. The WebView2 arguments, the paced loop and the fullscreen test
-follow LorraineAtelier.
+[docs/LIFTED.md](docs/LIFTED.md) lists every file lifted from DivoraVoiceMod
+(MIT, see [LICENSES/DivoraVoiceMod.txt](LICENSES/DivoraVoiceMod.txt)) or
+LorraineAtelier, with its source and commit; each lifted file says so at the
+top.

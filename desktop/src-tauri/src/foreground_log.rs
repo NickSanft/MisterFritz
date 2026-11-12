@@ -6,14 +6,18 @@
 //! was listening, and the last few foreground changes go out with each hit so
 //! it can be seen what Fritz took the keyboard from.
 //!
-//! Spike-only: PR 2 keeps it behind a debug switch.
+//! Off unless `settings.diagnostics.foregroundLog` is on (read at start): it
+//! writes other apps' window titles to `diagnostics\foreground.log`, so it is
+//! the owner's to switch on, and the file stays on this machine.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
+
+use crate::logs::utc;
 
 use tauri::AppHandle;
 use windows::Win32::Foundation::{CloseHandle, HWND};
@@ -140,30 +144,6 @@ pub fn ancestry(parents: &HashMap<u32, u32>, pid: u32) -> Vec<u32> {
         at = parent;
     }
     chain
-}
-
-/// UTC "YYYY-MM-DD HH:MM:SS.mmm" without a date crate (Howard Hinnant's
-/// civil-from-days).
-pub fn utc(t: SystemTime) -> String {
-    let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let secs = d.as_secs();
-    let (days, rem) = (secs / 86_400, secs % 86_400);
-    let z = i64::try_from(days).unwrap_or(0) + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}.{:03}Z",
-        rem / 3600,
-        (rem % 3600) / 60,
-        rem % 60,
-        d.subsec_millis()
-    )
 }
 
 fn wide(buf: &[u16], n: i32) -> String {
@@ -334,9 +314,8 @@ pub fn start(app: AppHandle, path: PathBuf) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ancestry, classify, judge, line_kind, utc, Seen, Verdict};
+    use super::{ancestry, classify, judge, line_kind, Seen, Verdict};
     use std::collections::HashMap;
-    use std::time::{Duration, UNIX_EPOCH};
 
     const ME: u32 = 100;
     const AVATAR: isize = 0x50;
@@ -477,16 +456,4 @@ mod tests {
         assert_eq!(ancestry(&parents, 12345), Vec::<u32>::new());
     }
 
-    #[test]
-    fn utc_formats_known_instants() {
-        assert_eq!(utc(UNIX_EPOCH), "1970-01-01 00:00:00.000Z");
-        assert_eq!(
-            utc(UNIX_EPOCH + Duration::from_millis(951_782_400_250)),
-            "2000-02-29 00:00:00.250Z"
-        );
-        assert_eq!(
-            utc(UNIX_EPOCH + Duration::from_secs(1_794_418_496)),
-            "2026-11-11 17:34:56.000Z"
-        );
-    }
 }

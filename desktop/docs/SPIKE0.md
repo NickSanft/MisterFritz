@@ -9,6 +9,13 @@ stream overlay shows it needn't, if it never takes focus. What is new here is a
 **Pass → PR 2. Fail on the foreground row → stop: Fallback A (WorkerW layer) or B
 (native `bevy_vrm1` sidecar) is the owner's call.**
 
+> **Running this table again for PR 2 (its acceptance), in the real app:** the
+> foreground logger is now off unless `diagnostics.foregroundLog` is `true` in
+> `%APPDATA%\com.divora.fritz\settings.json` (set it with Fritz quit), and it
+> writes to `diagnostics\foreground.log`, not `spike\foreground.log`. The tray's
+> *Open the spike logs* is now *Open Fritz's logs*. Everything below is the
+> spike as it was run.
+
 ## What the spike app is
 
 One window, built at runtime by DivoraVoice's lifted overlay shell:

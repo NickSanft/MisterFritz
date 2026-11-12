@@ -1,5 +1,5 @@
 /**
- * The avatar window's page (Spike 0): a transparent three.js scene with Fritz
+ * The avatar window's page: a transparent three.js scene with Fritz
  * in it, drawn by the paced loop, answering the shell's handshake.
  *
  * The rules the spike exists to test, kept here so they stay true:
@@ -15,6 +15,7 @@ import { PacedLoop } from "./PacedLoop";
 import { VrmActor } from "./VrmActor";
 import { frameSpan } from "./framing";
 import { keyAction } from "./keys";
+import { POWER_EVENT, afterAsking, fetchDisplayOn, parseDisplay, shouldDraw } from "./run";
 import {
   NO_READY_GLOBAL,
   STATUS_EVENT,
@@ -60,6 +61,10 @@ scene.add(sun);
 
 let actor: VrmActor | null = null;
 let status: AvatarStatus | null = null;
+let displayOn = true;
+/** Display events heard, so a late reply to the start-up question can't
+ * undo a newer event. */
+let displayEvents = 0;
 let paintIn = -1; // frames until the painted handshake; -1 = not due
 let lastBeat = 0;
 
@@ -113,9 +118,16 @@ function onStatus(next: AvatarStatus | null): void {
   document.body.classList.toggle("arranging", next.mode === "arrange");
   if (next.phase === "shown" && was?.phase !== "shown") paintIn = 2; // two frames drawn since shown
   if (next.mode === "arrange" && was?.mode !== "arrange") lastBeat = 0; // beat at once
-  // Parked off-screen: draw nothing, so the compositor has nothing to present.
-  if (next.parked || next.phase === "closing" || next.phase === "closed") loop.stop();
-  else loop.start();
+  draw();
+}
+
+/** Start or stop the loop as `shouldDraw` says: parked off-screen, or with
+ * the display off, it draws nothing, so the compositor has nothing to
+ * present. Only a change starts or stops it. */
+function draw(): void {
+  const on = shouldDraw(status, displayOn);
+  if (on && !loop.running) loop.start();
+  else if (!on && loop.running) loop.stop();
 }
 
 async function modelBytes(): Promise<ArrayBuffer> {
@@ -165,6 +177,17 @@ watchPixelRatio();
 async function main(): Promise<void> {
   fit();
   await listen<unknown>(STATUS_EVENT, (e) => onStatus(parseStatus(e.payload)));
+  await listen<unknown>(POWER_EVENT, (e) => {
+    const on = parseDisplay(e.payload);
+    if (on === null) return;
+    displayEvents += 1;
+    displayOn = on;
+    draw();
+  });
+  // The state now, in case the display went off before the page listened.
+  const heard = displayEvents;
+  displayOn = afterAsking(await fetchDisplayOn(), heard, displayEvents, displayOn);
+  draw();
   // Listening: tell the shell, which shows the window. The model may still be
   // loading; the window is transparent until it is.
   if ((window as unknown as Record<string, unknown>)[NO_READY_GLOBAL] !== true) {
