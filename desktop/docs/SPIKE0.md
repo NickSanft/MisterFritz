@@ -136,8 +136,14 @@ window), but each return restarted his 30 fps loop behind it. Now the watch
 asks Windows first: while the session is locked (`WTSQuerySessionInformationW`,
 `WTS_SESSIONSTATE_LOCK`) he is covered by "the lock screen", whatever window is
 at the centre, until you sign back in. On start the watch logs what Windows
-says (`cover watch started locked=Some(false)`); a lock should then log one
-`parking him by="the lock screen"` and, at sign-in, one `bringing him back`.
+says (`cover watch started locked=Some(false)`).
+
+Seen live at 21:11–21:12 on the fixed build: two locks (Winlogon's Lock and
+Unlock notifications), the first ended after 5 s by Windows Hello face
+sign-in, the second held for 16 s. Each gave exactly one
+`parking him by="the lock screen"`, within 2.6 s of the lock, and one
+`bringing him back`, within 0.8 s of the sign-in; afterwards he was drawn,
+animating and click-through at his spot.
 
 ## Measured while building it (not the session)
 
