@@ -344,12 +344,9 @@ class TestPanelIsServing(unittest.TestCase):
         admin_panel._PANEL_THREAD = t
         self.assertTrue(admin_panel.panel_is_serving())
 
-    # Both expected. The thread dying of uvicorn's sys.exit(1) is the event
-    # under test. The deprecation is uvicorn's "auto" WebSocket protocol
-    # importing websockets.legacy, recorded in b73d28b and left for PR 1.
+    # Expected: the thread dying of uvicorn's sys.exit(1) is the event under
+    # test.
     @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
-    @pytest.mark.filterwarnings("ignore::DeprecationWarning:websockets")
-    @pytest.mark.filterwarnings("ignore::DeprecationWarning:uvicorn")
     def test_a_real_bind_failure_turns_it_false(self):
         """End to end: the port is taken, uvicorn's thread dies, and this
         notices, which is what main_local's loop polls."""

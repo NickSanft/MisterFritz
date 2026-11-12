@@ -308,17 +308,19 @@ CHAT_COOKIE_SECURE: bool = os.environ.get("CHAT_COOKIE_SECURE", "").lower() in (
 # See the [Unreleased] CHANGELOG entry for the upgrade note.
 
 # ── Desktop companion and Google (plan 14) ─────────────────────────────────
-# RESERVED, every one of them. P4 of plans/14-desktop-companion-build.md
-# declares the knobs in one batch, ahead of the code that reads them, so each
-# PR after it is reviewed for behaviour rather than plumbing. Until that code
-# lands, validate_config says so whenever one is set, as it does for
-# RELAY_AGENT_TOOL_ENABLED: believing a capability is live is the failure mode.
-# The PR that makes each one real:
-#   COMPANION_ENABLED, COMPANION_TOKEN, COMPANION_BIND, COMPANION_MAX_CLIENTS  PR 1
-#   COMPANION_TTS                                                             PR 9
-#   GOOGLE_MCP_ENABLED                                                        PR 15
-# The checks that are about safety rather than capability run already: see
-# validate_config.
+# P4 of plans/14-desktop-companion-build.md declared these in one batch, ahead
+# of the code that reads them, so each PR after it is reviewed for behaviour
+# rather than plumbing. COMPANION_ENABLED, COMPANION_TOKEN and
+# COMPANION_MAX_CLIENTS are live since PR 1: companion_api and admin_panel read
+# them at call time. The rest are still RESERVED, and validate_config says so
+# whenever one is set, as it does for RELAY_AGENT_TOOL_ENABLED: believing a
+# capability is live is the failure mode. What makes each one real:
+#   COMPANION_BIND       Phase 5, a second device (until then /companion is
+#                        served with the panel, on 127.0.0.1)
+#   COMPANION_TTS        PR 9
+#   GOOGLE_MCP_ENABLED   PR 15
+# The checks that are about safety rather than capability run whatever is
+# built: see validate_config.
 COMPANION_ENABLED: bool = os.environ.get("COMPANION_ENABLED", "false").lower() in ("1", "true", "yes")
 # The ONLY gate on /companion. The admin panel's Basic auth, CSP and
 # same-origin checks are HTTP middleware, and a WebSocket passes straight
@@ -327,8 +329,10 @@ COMPANION_ENABLED: bool = os.environ.get("COMPANION_ENABLED", "false").lower() i
 # separate from the admin password: handing the desk a token must not hand
 # over the chat or the panel.
 COMPANION_TOKEN: str | None = os.environ.get("COMPANION_TOKEN") or None
-# Where /companion listens once it exists. Loopback by default; Phase 5 may
-# name a Tailscale address. Never a wildcard: validate_config refuses one.
+# Where /companion will listen for a second device (plan 14, Phase 5), a
+# Tailscale address say. Until then it is served with the admin panel on
+# 127.0.0.1, which this does not change. Never a wildcard: validate_config
+# refuses one.
 COMPANION_BIND: str = os.environ.get("COMPANION_BIND", "127.0.0.1").strip()
 COMPANION_MAX_CLIENTS: int = _at_least_one("COMPANION_MAX_CLIENTS", "2")
 # Who speaks the desk's replies: "local" (the desktop app synthesises them),
@@ -928,12 +932,13 @@ def validate_config(*, require_discord: bool = True) -> None:
 
 
 def _validate_companion_knobs() -> None:
-    """Plan 14's knobs: the safety rules now, and the truth about the rest.
+    """Plan 14's knobs: the safety rules, and the truth about the rest.
 
-    The three refusals hold before any code reads these knobs, because each
-    describes a configuration that must not exist whatever is built: a wildcard
-    bind, an enabled companion with no token, and a TTS mode nobody will
-    understand. The warnings say which knobs are set but read by nothing yet.
+    The three refusals hold whatever is built, because each describes a
+    configuration that must not exist: a wildcard bind, an enabled companion
+    with no token, and a TTS mode nobody will understand. The warnings say
+    what a setting will not do: a short token, a companion with no server to
+    serve it, and the knobs that are set but read by nothing yet.
     """
     if _is_wildcard_bind(COMPANION_BIND):
         raise RuntimeError(
@@ -962,22 +967,27 @@ def _validate_companion_knobs() -> None:
             len(COMPANION_TOKEN), _COMPANION_TOKEN_MIN_CHARS,
         )
 
-    reserved = [name for name, is_set in (
-        ("COMPANION_ENABLED", COMPANION_ENABLED),
-        ("COMPANION_TOKEN", COMPANION_TOKEN is not None),
-        ("COMPANION_BIND", COMPANION_BIND != "127.0.0.1"),
-        ("COMPANION_MAX_CLIENTS", COMPANION_MAX_CLIENTS != 2),
-        ("COMPANION_TTS", COMPANION_TTS != "local"),
-    ) if is_set]
-    if reserved:
+    if COMPANION_ENABLED and not ADMIN_PANEL_PASSWORD:
         log.warning(
-            "%s %s set but %s nothing yet: the desktop companion is not built "
-            "(plan 14, PR 1 onward), and no code reads %s. %s reserved so the "
-            "switches exist before the capability does.",
-            ", ".join(reserved), "is" if len(reserved) == 1 else "are",
-            "does" if len(reserved) == 1 else "do",
-            "it" if len(reserved) == 1 else "them",
-            "It is" if len(reserved) == 1 else "They are",
+            "COMPANION_ENABLED is true, but ADMIN_PANEL_PASSWORD is not set. "
+            "/companion is served by the admin panel's web server, which does "
+            "not start without it, so the desktop app has nothing to connect to."
+        )
+
+    if COMPANION_BIND != "127.0.0.1":
+        log.warning(
+            "COMPANION_BIND=%s does nothing yet: /companion is served with the "
+            "admin panel, on 127.0.0.1 only, until a second device needs it "
+            "elsewhere (plan 14, Phase 5), and no code reads this setting. It is "
+            "reserved so the switch exists before the capability does.",
+            COMPANION_BIND,
+        )
+    if COMPANION_TTS != "local":
+        log.warning(
+            "COMPANION_TTS=%s does nothing yet: the desk's speech is not built "
+            "(plan 14, PR 9), and no code reads this setting. It is reserved so "
+            "the switch exists before the capability does.",
+            COMPANION_TTS,
         )
     if GOOGLE_MCP_ENABLED:
         log.warning(

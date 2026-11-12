@@ -7,6 +7,10 @@ start at all.
 
 Built on Starlette (already a transitive dep via the LLM stack) so we don't
 need to add FastAPI.
+
+The same app serves the web chat (/chat, its own cookie sign-in) and, when
+COMPANION_ENABLED, the desktop companion's WebSocket (/companion, see
+companion_api), which only its token guards.
 """
 from __future__ import annotations
 
@@ -49,6 +53,7 @@ except ImportError:  # pragma: no cover — Pillow ships with the image extra
 from bot_adapters import fritz_error
 
 import chat_auth
+import fritz_utils
 import privacy
 import workspace_store
 from fritz_utils import (
@@ -1364,6 +1369,13 @@ def create_app(password: str, schedule_manager=None, chat_password: str | None =
         # auth in _BasicAuthMiddleware so /chat/login can style itself.
         Mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static"),
     ]
+    # The desktop companion, only when it is switched on AND has its token,
+    # which is all that guards it: the middleware below is HTTP-only. Read
+    # from fritz_utils when the app is built, so tests can patch it, and
+    # imported only then, so the panel never loads it otherwise.
+    if fritz_utils.COMPANION_ENABLED and fritz_utils.COMPANION_TOKEN:
+        import companion_api
+        routes += companion_api.routes()
     app = Starlette(
         routes=routes,
         middleware=[
@@ -1426,14 +1438,7 @@ def start_admin_panel(schedule_manager=None) -> Optional[int]:
         )
 
     app = create_app(ADMIN_PANEL_PASSWORD, schedule_manager=schedule_manager)
-    config = uvicorn.Config(
-        app,
-        host="127.0.0.1",
-        port=ADMIN_PANEL_PORT,
-        log_level="warning",
-        access_log=False,
-    )
-    server = uvicorn.Server(config)
+    server = uvicorn.Server(server_config(app, ADMIN_PANEL_PORT))
 
     def _run() -> None:
         asyncio.run(server.serve())
@@ -1445,4 +1450,44 @@ def start_admin_panel(schedule_manager=None) -> Optional[int]:
         "Admin panel started at http://127.0.0.1:%d/ — HTTP Basic, any username + ADMIN_PANEL_PASSWORD",
         ADMIN_PANEL_PORT,
     )
+    if fritz_utils.COMPANION_ENABLED and fritz_utils.COMPANION_TOKEN:
+        logger.info(
+            "Desktop companion at ws://127.0.0.1:%d/companion — COMPANION_TOKEN only, "
+            "up to %d clients", ADMIN_PANEL_PORT, fritz_utils.COMPANION_MAX_CLIENTS,
+        )
     return ADMIN_PANEL_PORT
+
+
+def server_config(app, port: int) -> uvicorn.Config:
+    """The panel's uvicorn settings: here so a test can serve exactly these.
+
+    Bound to 127.0.0.1, whatever else is configured. The desktop companion is
+    served here too, on loopback, until a second device needs it elsewhere
+    (plan 14, Phase 5); widening this would widen the panel and the chat.
+
+    `ws`: uvicorn's "auto" picks its websockets.legacy protocol, which the
+    websockets package has deprecated since 14.0; the sans-I/O one is its
+    maintained path. It sends no keepalive pings of its own, so /companion's
+    heartbeat is companion_api's.
+
+    `ws_max_size`: uvicorn's default is 16 MiB, and a frame is read whole
+    before the token has been seen. 1 MiB holds a 30-second push-to-talk clip
+    (16 kHz mono PCM16, plan 14 PR 9) in one binary frame; anything larger is
+    closed with 1009. Text frames are capped far lower in companion_api.
+
+    `ws_per_message_deflate`: off. Over loopback it saves nothing, and it let
+    16 KiB on the wire become 16 MiB to parse.
+    """
+    return uvicorn.Config(
+        app,
+        host="127.0.0.1",
+        port=port,
+        log_level="warning",
+        access_log=False,
+        ws="websockets-sansio",
+        ws_max_size=WS_MAX_FRAME_BYTES,
+        ws_per_message_deflate=False,
+    )
+
+
+WS_MAX_FRAME_BYTES = 1024 * 1024

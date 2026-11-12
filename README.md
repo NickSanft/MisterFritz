@@ -278,16 +278,16 @@ All settings can be set as environment variables or in a `.env` file. `.env.exam
 | `ADMIN_PANEL_PASSWORD` | — | Set to enable the web admin panel. Leave unset to disable. |
 | `ADMIN_PANEL_PORT` | `8001` | Port for the admin panel. Bound to `127.0.0.1` only — use SSH port forwarding for remote access. |
 
-### Desktop companion and Google (reserved)
+### Desktop companion and Google
 
-Declared ahead of the code that reads them ([plan 14](plans/14-desktop-companion.md)). **None of these does anything yet**, and Fritz warns at startup if you set one. Three rules are enforced already: a wildcard `COMPANION_BIND`, `COMPANION_ENABLED` without `COMPANION_TOKEN`, and an unknown `COMPANION_TTS` each refuse to start.
+For the desktop app of [plan 14](plans/14-desktop-companion.md). The first three are live; the rest are **reserved**: declared ahead of the code that reads them, they do nothing yet, and Fritz warns at startup if you set one. Three rules are enforced whatever is built: a wildcard `COMPANION_BIND`, `COMPANION_ENABLED` without `COMPANION_TOKEN`, and an unknown `COMPANION_TTS` each refuse to start.
 
 | Variable | Default | Description |
 |---|---|---|
-| `COMPANION_ENABLED` | `false` | Reserved for the `/companion` WebSocket the desktop app talks to (plan 14, PR 1). |
-| `COMPANION_TOKEN` | — | Reserved. The only gate on `/companion`, and deliberately separate from `CHAT_PASSWORD` and `ADMIN_PANEL_PASSWORD`. Required when `COMPANION_ENABLED` is true; use at least 32 random characters. |
-| `COMPANION_BIND` | `127.0.0.1` | Reserved. Address `/companion` will listen on. Never a wildcard: any address meaning "every interface" (`0.0.0.0`, `::` and their other spellings) or an empty value is refused. |
-| `COMPANION_MAX_CLIENTS` | `2` | Reserved. Desktop clients connected at once. |
+| `COMPANION_ENABLED` | `false` | Serves the `/companion` WebSocket the desktop app talks to, at `ws://127.0.0.1:ADMIN_PANEL_PORT/companion`. It runs in the admin panel's web server, so it needs `ADMIN_PANEL_PASSWORD` set as well. |
+| `COMPANION_TOKEN` | — | The only gate on `/companion`: the panel's Basic auth and same-origin checks do not apply to a WebSocket. Deliberately separate from `CHAT_PASSWORD` and `ADMIN_PANEL_PASSWORD`. If `IDENTITY_LINKS` links the desk to `ROOT_USER`, the token carries the owner's rights too. Required when `COMPANION_ENABLED` is true; use at least 32 random characters. |
+| `COMPANION_MAX_CLIENTS` | `2` | Desktop clients connected at once. One more is turned away (close code 4409). |
+| `COMPANION_BIND` | `127.0.0.1` | Reserved (plan 14, Phase 5). Where `/companion` will listen for a second device; until then it is served with the panel on `127.0.0.1`. Never a wildcard: any address meaning "every interface" (`0.0.0.0`, `::` and their other spellings) or an empty value is refused. |
 | `COMPANION_TTS` | `local` | Reserved (plan 14, PR 9). Who speaks the desk's replies: `local`, `xtts` or `off`. |
 | `GOOGLE_MCP_ENABLED` | `false` | Reserved (plan 14, PR 15). Read-only Gmail, Drive and Calendar for `ROOT_USER`. |
 

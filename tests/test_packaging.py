@@ -154,16 +154,18 @@ class TestTheServerCanSpeakWebSocket(unittest.TestCase):
             "importable; declare websockets in core, not just in the lock.",
         )
 
-    def test_uvicorn_finds_a_websocket_implementation(self):
-        # The pin existing is not the same as uvicorn picking it up.
-        import warnings
-        with warnings.catch_warnings():
-            # uvicorn 0.38's "auto" resolves to its websockets.legacy protocol,
-            # which websockets >= 14 marks deprecated on import.
-            warnings.simplefilter("ignore", DeprecationWarning)
-            from uvicorn.protocols.websockets.auto import AutoWebSocketsProtocol
-        self.assertIsNotNone(
-            AutoWebSocketsProtocol,
+    def test_uvicorn_finds_the_websocket_implementation_the_panel_asks_for(self):
+        # The pin existing is not the same as uvicorn picking it up. The panel
+        # names websockets' sans-I/O protocol rather than "auto", which in
+        # uvicorn 0.38 picks the deprecated websockets.legacy one.
+        import admin_panel
+        from uvicorn.config import WS_PROTOCOLS
+        from uvicorn.importer import import_from_string
+        config = admin_panel.server_config(app=None, port=0)
+        self.assertEqual(config.ws, "websockets-sansio")
+        protocol = import_from_string(WS_PROTOCOLS[config.ws])
+        self.assertEqual(
+            protocol.__name__, "WebSocketsSansIOProtocol",
             "uvicorn found no WebSocket library, so it would answer the "
             "desktop companion's upgrade request as plain HTTP.",
         )

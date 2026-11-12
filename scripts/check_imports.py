@@ -36,6 +36,8 @@ CORE = [
     "bot_commands",
     "cards",
     "chat_auth",
+    "companion_api",
+    "companion_protocol",
     "document_engine",
     "file_tools",
     "fritz_utils",

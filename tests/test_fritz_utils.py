@@ -1,7 +1,9 @@
 import contextlib
 import json
+import logging
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import unittest
@@ -467,20 +469,22 @@ class TestAKnobThatGatesNothingSaysSo(unittest.TestCase):
 
 
 class TestDesktopCompanionKnobs(unittest.TestCase):
-    """Plan 14 P4: six knobs declared ahead of the code that reads them.
+    """Plan 14: six knobs, declared by P4 ahead of the code that reads them.
 
-    Three refusals hold already, because each describes a configuration no
-    build should allow. The rest is the RELAY_AGENT_TOOL_ENABLED convention: a
-    knob nothing reads says so, and a scan of the tree keeps that true.
+    Three refusals hold whatever is built, because each describes a
+    configuration no build should allow. PR 1 made three knobs live; the rest
+    follow the RELAY_AGENT_TOOL_ENABLED convention: a knob nothing reads says
+    so, and a scan of the tree keeps that true, as another keeps the live ones
+    read.
     """
 
-    RESERVED = ("COMPANION_ENABLED", "COMPANION_TOKEN", "COMPANION_BIND",
-                "COMPANION_MAX_CLIENTS", "COMPANION_TTS", "GOOGLE_MCP_ENABLED")
+    LIVE = ("COMPANION_ENABLED", "COMPANION_TOKEN", "COMPANION_MAX_CLIENTS")
+    RESERVED = ("COMPANION_BIND", "COMPANION_TTS", "GOOGLE_MCP_ENABLED")
     TOKEN = "t" * 43
 
     def _patched(self, **knobs):
         values = {"DISCORD_BOT_TOKEN": "x", "ROOT_USER": "discord-1", "ADMIN_USERS": frozenset(),
-                  "_CLAMPED_KNOBS": [], "RELAY_AGENT_TOOL_ENABLED": False,
+                  "_CLAMPED_KNOBS": [], "RELAY_AGENT_TOOL_ENABLED": False, "ADMIN_PANEL_PASSWORD": "pw",
                   "COMPANION_ENABLED": False, "COMPANION_TOKEN": None, "COMPANION_BIND": "127.0.0.1",
                   "COMPANION_MAX_CLIENTS": 2, "COMPANION_TTS": "local", "GOOGLE_MCP_ENABLED": False}
         values.update(knobs)
@@ -493,6 +497,26 @@ class TestDesktopCompanionKnobs(unittest.TestCase):
         with self._patched(**knobs), self.assertLogs("fritz_utils", level="WARNING") as logs:
             fu.validate_config()
         return "; ".join(logs.output)
+
+    def _logged(self, **knobs) -> str:
+        """Like _warnings, but nothing logged is an answer too: ""."""
+        lines = []
+
+        class _Collect(logging.Handler):
+            def emit(self, record):
+                lines.append(record.getMessage())
+
+        log = logging.getLogger("fritz_utils")
+        handler, level = _Collect(logging.WARNING), log.level
+        log.addHandler(handler)
+        log.setLevel(logging.WARNING)
+        try:
+            with self._patched(**knobs):
+                fu.validate_config()
+        finally:
+            log.removeHandler(handler)
+            log.setLevel(level)
+        return "; ".join(lines)
 
     def _refusal(self, **knobs) -> str:
         with self._patched(**knobs), self.assertRaises(RuntimeError) as caught:
@@ -543,6 +567,19 @@ class TestDesktopCompanionKnobs(unittest.TestCase):
         self.assertIn("COMPANION_TOKEN is not set", said)
         self.assertIn("token_urlsafe", said)
 
+    def test_the_live_knobs_set_well_start_quietly(self):
+        self.assertEqual(self._logged(COMPANION_ENABLED=True, COMPANION_TOKEN=self.TOKEN,
+                                      COMPANION_MAX_CLIENTS=3), "")
+
+    def test_an_enabled_companion_with_no_panel_to_serve_it_says_so(self):
+        """main_discord starts without ADMIN_PANEL_PASSWORD, panel and all
+        left off, and /companion with it."""
+        said = self._warnings(COMPANION_ENABLED=True, COMPANION_TOKEN=self.TOKEN,
+                              ADMIN_PANEL_PASSWORD=None)
+        self.assertIn("ADMIN_PANEL_PASSWORD is not set", said)
+        self.assertIn("/companion", said)
+        self.assertEqual(self._logged(COMPANION_ENABLED=False, ADMIN_PANEL_PASSWORD=None), "")
+
     def test_an_unknown_tts_mode_is_refused(self):
         # Values as they arrive after parsing, which strips and lowercases.
         for mode in ("kokoro", "piper", "none"):
@@ -555,8 +592,8 @@ class TestDesktopCompanionKnobs(unittest.TestCase):
     def test_a_short_token_is_named_and_a_long_one_is_not(self):
         self.assertIn("COMPANION_TOKEN is 8 characters", self._warnings(COMPANION_TOKEN="abcdefgh"))
         self.assertIn("COMPANION_TOKEN is 31 characters", self._warnings(COMPANION_TOKEN="t" * 31))
-        self.assertNotIn("characters", self._warnings(COMPANION_TOKEN="t" * 32))
-        self.assertNotIn("characters", self._warnings(COMPANION_TOKEN=self.TOKEN))
+        self.assertNotIn("characters", self._logged(COMPANION_TOKEN="t" * 32))
+        self.assertNotIn("characters", self._logged(COMPANION_TOKEN=self.TOKEN))
 
     def test_values_are_parsed_as_the_environment_gives_them(self):
         """Every other test patches the parsed values, so this one reads a real
@@ -582,45 +619,108 @@ class TestDesktopCompanionKnobs(unittest.TestCase):
         self.assertIn("every network interface", out["started"])
 
     def test_every_reserved_knob_says_it_does_nothing_when_set(self):
-        for name, value in (("COMPANION_ENABLED", True), ("COMPANION_TOKEN", self.TOKEN),
-                            ("COMPANION_BIND", "100.64.0.7"), ("COMPANION_MAX_CLIENTS", 3),
-                            ("COMPANION_TTS", "xtts")):
-            knobs = {name: value}
-            if name == "COMPANION_ENABLED":
-                knobs["COMPANION_TOKEN"] = self.TOKEN
+        for name, value, why in (("COMPANION_BIND", "100.64.0.7", "Phase 5"),
+                                 ("COMPANION_TTS", "xtts", "not built")):
             with self.subTest(knob=name):
-                said = self._warnings(**knobs)
-                self.assertIn(name, said)
-                self.assertIn("nothing yet", said)
-                self.assertIn("not built", said)
+                said = self._warnings(**{name: value})
+                self.assertIn(f"{name}={value} does nothing yet", said)
+                self.assertIn("no code reads this setting", said)
+                self.assertIn(why, said)
+
+    def test_a_reserved_bind_does_not_move_the_panel(self):
+        """What COMPANION_BIND's warning promises: /companion stays on
+        loopback with the panel, whatever the knob says."""
+        import admin_panel
+        with self._patched(COMPANION_BIND="100.64.0.7"):
+            self.assertEqual(admin_panel.server_config(app=None, port=0).host, "127.0.0.1")
 
     def test_google_says_nothing_is_connected(self):
         said = self._warnings(GOOGLE_MCP_ENABLED=True)
         self.assertIn("GOOGLE_MCP_ENABLED", said)
         self.assertIn("Nothing is connected", said)
 
+    @staticmethod
+    def _readers(knob):
+        """Every line outside fritz_utils that names `knob` other than as a
+        comment."""
+        repo = pathlib.Path(__file__).resolve().parents[1]
+        return [f"{path.name}:{number}"
+                for path in sorted(repo.glob("*.py")) if path.name != "fritz_utils.py"
+                for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+                if knob in line and not line.strip().startswith("#")]
+
     def test_nothing_in_the_tree_reads_them_yet(self):
         """The warnings' central claim. The PR that starts reading one of
         these must retire its warning too, or the warning becomes the lie."""
-        repo = pathlib.Path(__file__).resolve().parents[1]
         for knob in self.RESERVED:
-            readers = [f"{path.name}:{number}"
-                       for path in sorted(repo.glob("*.py")) if path.name != "fritz_utils.py"
-                       for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
-                       if knob in line and not line.strip().startswith("#")]
             with self.subTest(knob=knob):
-                self.assertEqual(readers, [], f"{knob} is read outside fritz_utils")
+                self.assertEqual(self._readers(knob), [], f"{knob} is read outside fritz_utils")
 
-    def test_the_documentation_says_they_are_reserved(self):
+    def test_the_live_ones_are_read(self):
+        """The other side of it: a knob no longer warned about must do
+        something. Read by code, as `fritz_utils.KNOB` at call time, not
+        merely named in a docstring or a comment. That it is read where it
+        matters is test_companion_api's to show, by behaviour (a log line
+        reading it would satisfy this scan)."""
+        import ast
+        repo = pathlib.Path(__file__).resolve().parents[1]
+        for knob in self.LIVE:
+            readers = [path.name for path in sorted(repo.glob("*.py")) if path.name != "fritz_utils.py"
+                       for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+                       if isinstance(node, ast.Attribute) and node.attr == knob
+                       and isinstance(node.value, ast.Name) and node.value.id == "fritz_utils"
+                       and isinstance(node.ctx, ast.Load)]
+            with self.subTest(knob=knob):
+                self.assertIn("companion_api.py" if knob != "COMPANION_ENABLED" else "admin_panel.py",
+                              readers, f"no code reads fritz_utils.{knob}")
+
+    @staticmethod
+    def _env_example_blocks() -> dict[str, str]:
+        """.env.example's companion section: each knob's own comment, the
+        lines between the previous knob (or the header's bare "#") and its
+        `# KNOB=` line."""
         repo = pathlib.Path(__file__).resolve().parents[1]
         env = (repo / ".env.example").read_text(encoding="utf-8")
-        section = env[env.index("Desktop companion and Google"):env.index("GOOGLE_MCP_ENABLED=false")]
-        self.assertIn("RESERVED", section)
-        self.assertIn("does nothing today", section)
+        lines = env[env.index("Desktop companion and Google"):].splitlines()[1:]
+        blocks, current = {}, []
+        for line in lines:
+            knob = re.match(r"# ([A-Z_]+)=", line)
+            if knob:
+                blocks[knob.group(1)], current = " ".join(current), []
+            elif line.strip() == "#":
+                current = []
+            elif line.startswith("#"):
+                current.append(line.lstrip("# "))
+            else:
+                break
+        return blocks
+
+    def test_the_documentation_says_which_are_reserved(self):
+        blocks = self._env_example_blocks()
+        self.assertEqual(sorted(blocks), sorted(self.LIVE + self.RESERVED))
+        # Its header says "the first three are live".
+        self.assertEqual(list(blocks)[:len(self.LIVE)], list(self.LIVE))
         # Decision 32: the token is its own secret.
-        self.assertIn("deliberately separate from", section)
+        self.assertIn("deliberately separate from", blocks["COMPANION_TOKEN"])
+        for knob in self.LIVE + self.RESERVED:
+            with self.subTest(env=knob):
+                if knob in self.RESERVED:
+                    self.assertIn("RESERVED", blocks[knob])
+                else:
+                    self.assertNotIn("RESERVED", blocks[knob])
+        repo = pathlib.Path(__file__).resolve().parents[1]
         readme = (repo / "README.md").read_text(encoding="utf-8")
-        for knob in self.RESERVED:
+        for knob in self.RESERVED + self.LIVE:
             row = next(line for line in readme.splitlines() if line.startswith(f"| `{knob}` |"))
-            with self.subTest(knob=knob):
-                self.assertIn("Reserved", row)
+            with self.subTest(readme=knob):
+                if knob in self.RESERVED:
+                    self.assertIn("Reserved", row)
+                else:
+                    self.assertNotIn("Reserved", row)
+        # The section's own sentence counts the live ones off the top of the table.
+        section = readme[readme.index("### Desktop companion and Google"):]
+        section = section[:section.index("\n### ", 1)]
+        self.assertIn(f"The first {len(self.LIVE)} are live", section.replace("three", "3"))
+        rows = re.findall(r"^\| `([A-Z_]+)` \|", section, flags=re.M)
+        self.assertEqual(rows[:len(self.LIVE)], list(self.LIVE))
+        self.assertEqual(sorted(rows[len(self.LIVE):]), sorted(self.RESERVED))

@@ -4,9 +4,9 @@
 
 Serves the admin panel and the web chat on 127.0.0.1:ADMIN_PANEL_PORT. It is
 the same Starlette app main_discord starts from on_ready, so until now the web
-surfaces existed only while a Discord bot was logged in. The desktop
-companion's /companion WebSocket will be served from here as well
-(plans/14-desktop-companion-build.md, PR 1).
+surfaces existed only while a Discord bot was logged in. With
+COMPANION_ENABLED, the same server also serves the desktop companion's
+/companion WebSocket (companion_api).
 
 Run this INSTEAD of main_discord.py, never beside it: the two share ports, the
 SQLite checkpointer and the Chroma store. This one refuses to start while
