@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import admin_panel
+import brain_lock
 import fritz_utils
 import main_local
 import observability
@@ -78,6 +79,7 @@ class _MainHarness(unittest.TestCase):
     def setUp(self):
         self.started = {}
         for name, target, kwargs in (
+            ("hold", brain_lock, {}),
             ("init_logging", observability, {}),
             ("start_metrics_server", observability, {"return_value": 8000}),
             ("prewarm_models", prewarm, {}),
@@ -127,10 +129,20 @@ class TestWhenItRefusesToStart(_MainHarness):
         self.assertNotIn("DISCORD_BOT_TOKEN", str(caught.exception))
         self.assert_nothing_started()
 
+    def test_a_brain_on_this_store_is_named_and_nothing_starts(self):
+        """brain_lock's refusal, which names the brain in the way."""
+        self.started["hold"].side_effect = brain_lock.BrainBusy(
+            "/data/chroma_store", "main_discord.py, process 7, since 08:00")
+        with self.assertLogs("main_local", level="ERROR") as logs:
+            self.assertEqual(main_local.main([]), 1)
+        self.assertIn("main_discord.py, process 7, since 08:00", " ".join(logs.output))
+        self.assert_nothing_started()
+
     def test_a_brain_already_running_is_named_not_a_traceback(self):
-        """The metrics port is bound synchronously and first, so on Linux it is
-        where a running main_discord.py is discovered. (On Windows the bind
-        succeeds anyway - SO_REUSEADDR - and the web-server check catches it.)"""
+        """A brain on ANOTHER memory store gets past the lock, and still shares
+        the ports. The metrics port is bound synchronously and first, so on
+        Linux it is where that one is discovered. (On Windows the bind succeeds
+        anyway - SO_REUSEADDR - and the web-server check catches it.)"""
         self.started["start_metrics_server"].side_effect = OSError(10048, "address in use")
         with self.assertLogs("main_local", level="ERROR") as logs:
             self.assertEqual(main_local.main([]), 1)
@@ -154,6 +166,15 @@ class TestWhenItRefusesToStart(_MainHarness):
 
 
 class TestWhatItStarts(_MainHarness):
+    def test_it_locks_the_memory_store_before_anything_listens(self):
+        order = []
+        for name in ("hold", "start_metrics_server", "start_admin_panel"):
+            self.started[name].side_effect = (
+                lambda *a, _name=name, **k: order.append(_name) or 8001)
+        self.assertEqual(main_local.main([]), 0)
+        self.started["hold"].assert_called_once_with("main_local.py", fritz_utils.CHROMA_DB_PATH)
+        self.assertEqual(order, ["hold", "start_metrics_server", "start_admin_panel"])
+
     def test_it_serves_with_no_discord_token(self):
         self.assertEqual(main_local.main([]), 0)
         self.started["start_admin_panel"].assert_called_once()

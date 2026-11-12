@@ -112,6 +112,12 @@ class TestWhatTheEntrypointDoesWithArguments(unittest.TestCase):
         # Every exit path before the boot, in order: --preflight, then refuse.
         self.assertLess(body.index("preflight.main()"), body.index("client.run"))
         self.assertLess(body.index("takes --preflight or nothing"), body.index("client.run"))
+        # Then one brain per memory store (tests/test_brain_lock.py runs the
+        # real refusal): after the arguments, so the lock never refuses
+        # --preflight, and before anything listens or logs in.
+        self.assertLess(body.index("takes --preflight or nothing"), body.index("brain_lock.hold"))
+        self.assertLess(body.index("brain_lock.hold"), body.index("start_metrics_server()"))
+        self.assertLess(body.index("brain_lock.hold"), body.index("client.run"))
 
 
 class TestPreflightCoversWhatABootWouldHit(unittest.TestCase):

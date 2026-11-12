@@ -3,12 +3,15 @@
 import asyncio
 import logging
 import os
+import sys
 import tempfile
 
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters
 
+import brain_lock
 from fritz_utils import (
+    CHROMA_DB_PATH,
     TELEGRAM_BOT_TOKEN,
     MessageSource,
     canonical_user_id,
@@ -100,6 +103,13 @@ def main():
         raise RuntimeError(
             "TELEGRAM_BOT_TOKEN is not set. Add it to your .env file or environment."
         )
+    # One brain per memory store, before anything listens or polls: the same
+    # lock main_discord and main_local take (brain_lock).
+    try:
+        brain_lock.hold("main_telegram.py", CHROMA_DB_PATH)
+    except brain_lock.BrainBusy as e:
+        logger.error("%s", e)
+        sys.exit(1)
     start_metrics_server()
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

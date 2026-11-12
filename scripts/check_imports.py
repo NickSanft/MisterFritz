@@ -34,6 +34,7 @@ CORE = [
     "agent_tools",
     "bot_adapters",
     "bot_commands",
+    "brain_lock",
     "cards",
     "chat_auth",
     "companion_api",

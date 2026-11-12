@@ -227,6 +227,45 @@ class TestTheMountsAreTheOnesTheAppUses(DeploymentCase):
                                  "file; bind its directory instead")
 
 
+class TestOneBrainAtATime(unittest.TestCase):
+    """brain_lock refuses a second brain on one memory store, before it serves
+    /metrics or /health. Kubernetes must never ask for one."""
+
+    @staticmethod
+    def manifests():
+        for path in sorted((REPO / "infra/k8s").glob("*.yaml")):
+            for document in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+                if document:
+                    yield path.name, document
+
+    def deployment(self):
+        [deployment] = [d for _, d in self.manifests() if d.get("kind") == "Deployment"]
+        return deployment
+
+    def test_kubernetes_stops_the_old_pod_before_it_starts_the_new_one(self):
+        """The default RollingUpdate starts the new pod beside the old one, on
+        the same volume: refused, it never becomes ready, so the old pod is
+        never stopped and the rollout stalls."""
+        self.assertEqual((self.deployment()["spec"].get("strategy") or {}).get("type"),
+                         "Recreate")
+
+    def test_kubernetes_runs_exactly_one_and_nothing_scales_it(self):
+        """An HPA once scaled this Deployment to 3: each extra pod a second
+        Discord login and, now, a brain refused that restarts forever."""
+        deployment = self.deployment()
+        self.assertEqual(deployment["spec"]["replicas"], 1)
+        for name, document in self.manifests():
+            if document.get("kind") != "HorizontalPodAutoscaler":
+                continue
+            target = document["spec"]["scaleTargetRef"]
+            with self.subTest(manifest=name):
+                self.assertFalse(
+                    target.get("kind") == "Deployment"
+                    and target.get("name") == deployment["metadata"]["name"]
+                    and document["spec"].get("maxReplicas", 1) > 1,
+                    f"{name} scales the one-brain Deployment past one pod")
+
+
 class TestTheInventoryIsComplete(unittest.TestCase):
     """The guard that outlives this change.
 

@@ -6,10 +6,18 @@ metadata:
   labels:
     app: misterfritz
 spec:
-  # NOTE: running multiple replicas of a Discord bot requires care —
-  # only one replica should hold the gateway connection. For the metrics
-  # and health endpoints, multiple replicas are fine.
+  # Exactly one, and never autoscaled. Every replica would be a second Discord
+  # login and a second brain on the one volume, and brain_lock refuses a
+  # second brain on a memory store before it serves /metrics or /health: an
+  # extra replica would only restart forever.
   replicas: 1
+  # Recreate, not the default RollingUpdate. A rolling update starts the new
+  # pod beside the old one on the same volume, and brain_lock makes a second
+  # brain on one memory store refuse to start: the new pod would never become
+  # ready, so the old one would never be stopped. Two brains on one store is
+  # also exactly what the lock exists to prevent.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: misterfritz

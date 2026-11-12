@@ -12,7 +12,9 @@ from discord.ext import commands
 from admin_panel import start_admin_panel
 from bot_adapters import fritz_error, run_blocking, split_into_chunks  # noqa: F401 — split_into_chunks re-exported for tests
 from bot_commands import FritzCommands, handle_tree_error
+import brain_lock
 from fritz_utils import (
+    CHROMA_DB_PATH,
     DISCORD_BOT_TOKEN,
     DISCORD_STREAM_MIN_INTERVAL,
     MessageSource,
@@ -620,5 +622,14 @@ if __name__ == '__main__':
     if args:
         sys.exit(f"main_discord.py takes --preflight or nothing, not {args}")
     validate_config()
+    # One brain per memory store, taken before anything listens or logs in:
+    # main_local and main_telegram take the same lock, so whichever starts
+    # second refuses and names the first. --preflight does not take it: it
+    # checks the image and never runs the brain.
+    try:
+        brain_lock.hold("main_discord.py", CHROMA_DB_PATH)
+    except brain_lock.BrainBusy as e:
+        logger.error("%s", e)
+        sys.exit(1)
     start_metrics_server()
     client.run(DISCORD_BOT_TOKEN)

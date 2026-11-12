@@ -208,15 +208,23 @@ python main_discord.py
 ```
 
 **Or run the web surfaces without Discord.** `main_local.py` serves the admin
-panel and the web chat (and, later, the desktop companion) with no Discord login.
+panel and the web chat (and, with `COMPANION_ENABLED`, the desktop companion)
+with no Discord login.
 It needs `ADMIN_PANEL_PASSWORD` and `ROOT_USER` (plus `CHAT_PASSWORD` for the web
 chat's sign-in), not `DISCORD_BOT_TOKEN`. Run it *instead of* `main_discord.py`,
 never beside it: the two share ports, the conversation database and the memory
-store. `main_local.py` refuses to start while another copy of the brain is
-serving, but `main_discord.py` does not check, so stop one before starting the
-other. Schedules do not fire under `main_local.py`, because they can only be
-delivered to Discord. Recurring ones are kept and resume once `main_discord.py`
-is back; a run that falls due in between is skipped.
+store. Each locks the memory store (`brain.lock` in `CHROMA_DB_PATH`) as it
+starts, as `main_telegram.py` does, so whichever you start second refuses and
+says which one is already running; stop that one first. Two cases the lock
+does not cover: the Docker Compose bot (Option B) shares `./chroma_store` with
+the host through its bind mount, and Docker Desktop's file sharing may not
+carry the lock across, so stop it (`docker compose stop misterfritz`; its
+`restart: unless-stopped` brings it back after a reboot) before running one
+here; and on a filesystem that cannot lock at all, a brain starts with a
+warning instead of refusing. Schedules do not fire under `main_local.py`,
+because they can only be delivered to Discord. Recurring ones are kept and
+resume once `main_discord.py` is back; a run that falls due in between is
+skipped.
 
 ```bash
 python main_local.py
@@ -400,7 +408,7 @@ See [Direct-message relay](#direct-message-relay) for what the feature does.
 
 | Variable | Default | Description |
 |---|---|---|
-| `TELEGRAM_BOT_TOKEN` | — | Enables the Telegram surface (`main_telegram.py`). Opt-in and not covered by CI. |
+| `TELEGRAM_BOT_TOKEN` | — | Enables the Telegram surface (`main_telegram.py`). Opt-in and not covered by CI. It is the same brain, so it cannot run beside `main_discord.py` or `main_local.py` on one `CHROMA_DB_PATH`: whichever starts second refuses (with the exceptions under *run the web surfaces without Discord*). |
 | `DISCORD_ERROR_DETAIL` | `0` | Append the exception type and text to user-facing Discord errors. Development only — normally users get butler copy plus a log reference, and the traceback stays in the log. |
 | `FRITZ_WRITE_DIAGRAMS` | `1` | Set `0` to skip writing the graph-diagram PNGs at import. `tests/conftest.py` sets it so a test run does not dirty the tracked images. |
 

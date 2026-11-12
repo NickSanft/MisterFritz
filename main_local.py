@@ -9,9 +9,10 @@ COMPANION_ENABLED, the same server also serves the desktop companion's
 /companion WebSocket (companion_api).
 
 Run this INSTEAD of main_discord.py, never beside it: the two share ports, the
-SQLite checkpointer and the Chroma store. This one refuses to start while
-another brain is listening on ADMIN_PANEL_PORT. main_discord.py does not check,
-so stop this before starting that.
+SQLite checkpointer and the Chroma store. Each takes brain_lock's lock on the
+memory store before it starts anything, so whichever starts second refuses and
+names the one already running. This one also refuses while anything else is
+listening on ADMIN_PANEL_PORT.
 
 Needs ADMIN_PANEL_PASSWORD (without it there is nothing to serve), ROOT_USER,
 and CHAT_PASSWORD for the web chat's sign-in. DISCORD_BOT_TOKEN is not needed.
@@ -80,8 +81,9 @@ def _serve_until_stopped(flag: _StopFlag, still_serving: Callable[[], bool],
                          sleep: Callable[[float], None] = time.sleep) -> int:
     """Block until a stop is requested (0), or until the web server dies (1).
 
-    The second case is a bind failure, almost always the port already being in
-    use because main_discord or another main_local is running. uvicorn logs the
+    The second case is a bind failure: the port already in use, by another
+    program or by a brain on another memory store (one on this store is
+    refused earlier, by brain_lock). uvicorn logs the
     error and its thread ends, after start_admin_panel has already returned.
     Without this check the process would sit there, apparently up, serving
     nothing.
@@ -90,8 +92,8 @@ def _serve_until_stopped(flag: _StopFlag, still_serving: Callable[[], bool],
         if not still_serving():
             logger.error(
                 "The web server stopped. If uvicorn logged a bind error above, "
-                "the port is already in use - is main_discord.py or another "
-                "main_local.py running?"
+                "the port is already in use: by another program, or by a "
+                "main_discord.py or main_local.py running on another memory store."
             )
             return 1
         sleep(_STOP_POLL_S)
@@ -172,17 +174,30 @@ def main(argv: list[str] | None = None) -> int:
     # Raises on a missing ROOT_USER or a CHROMA_API_IMPL pointing at a remote
     # server, exactly as main_discord's call does.
     fritz_utils.validate_config(require_discord=False)
+
+    # One brain per memory store, before anything listens: main_discord takes
+    # the same lock. Imported here, as everything else is, so that importing
+    # this module loads nothing.
+    import brain_lock
+    try:
+        brain_lock.hold("main_local.py", fritz_utils.CHROMA_DB_PATH)
+    except brain_lock.BrainBusy as e:
+        logger.error("%s", e)
+        return 1
+
     try:
         start_metrics_server()
     except OSError as e:
-        # Both entry points listen on METRICS_PORT, and this binds synchronously
-        # before the web server, so on Linux a brain that is already running is
-        # caught here. Not on Windows: HTTPServer sets SO_REUSEADDR, which there
-        # lets a second process bind a port that is still in use (seen live),
-        # so the check in _serve_until_stopped is what catches it instead.
+        # Both entry points listen on METRICS_PORT, so a brain on ANOTHER store
+        # (which the lock above does not see) still collides here. It binds
+        # synchronously before the web server, so on Linux that is caught here.
+        # Not on Windows: HTTPServer sets SO_REUSEADDR, which there lets a
+        # second process bind a port that is still in use (seen live), so the
+        # check in _serve_until_stopped is what catches it instead.
         logger.error(
-            "Could not start the metrics server (%s). Is main_discord.py or "
-            "another main_local.py already running? Run one at a time.", e,
+            "Could not start the metrics server (%s). Is another program, or a "
+            "main_discord.py or main_local.py on another memory store, already "
+            "running on METRICS_PORT?", e,
         )
         return 1
 

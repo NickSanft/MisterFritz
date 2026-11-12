@@ -111,7 +111,6 @@ echo "    -n misterfritz"
 echo ""
 
 kubectl apply -f "$MANIFESTS_DIR/service.yaml"
-kubectl apply -f "$MANIFESTS_DIR/hpa.yaml"
 # Apply Rollout instead of plain Deployment when Argo Rollouts is ready
 kubectl apply -f "$MANIFESTS_DIR/rollout.yaml"
 kubectl apply -f "$MANIFESTS_DIR/analysistemplate.yaml"
