@@ -23,7 +23,7 @@ three-vrm drawing Fritz at 30 fps from a `setTimeout` loop (no
 |---|---|
 | Tray → Hide / Show Fritz, or **Ctrl+Alt+H** | parks him at x = −10000 (a move, never a hide) and stops the loop; Show moves him back, and reopens his window if it was closed. A Hide is remembered across restarts |
 | Tray → Arrange Fritz…, or **Ctrl+Alt+A** | (only while he is on screen) takes the foreground, lifts click-through after the page's first beat: drag to move, the corner grip to resize, **Esc** (or the tray's Lock, or Ctrl+Alt+A) to lock; the keyboard goes back to the app you were in (or, if that one has gone, the app in use — never an always-on-top window if there's another — or the desktop) |
-| A fullscreen app on any monitor he touches | he parks himself within a second, and comes back when it goes — not if you hid him yourself, and not while you are arranging him (he steps aside once you lock him). A maximised window doesn't count (with an auto-hiding taskbar it covers the monitor too); the lock screen does |
+| A fullscreen app on any monitor he touches, or the lock screen | he parks himself within a second, and comes back when it goes — not if you hid him yourself, and not while you are arranging him (he steps aside once you lock him). A maximised window doesn't count (with an auto-hiding taskbar it covers the monitor too). The lock screen is Windows' word, not a window's: from the lock until you sign back in |
 | Tray → Open the spike logs | `%APPDATA%\com.divora.fritz\` |
 | A saved spot on a monitor that's gone | he comes back onto the nearest one |
 
@@ -79,18 +79,65 @@ shows him, and whether Arrange hands the keyboard back.
 
 | Check | Pass | Result |
 |---|---|---|
-| `GetForegroundWindow()` at 10 Hz never returns Fritz's window or a WebView2 child of it | zero `HIT` lines in 30 min, incl. app start, Explorer restart, sleep/resume | |
-| Typing in another app while he animates | no dropped keystrokes, no caret loss | |
-| Clicks anywhere on his window's rectangle | pass through to the app beneath | |
-| Transparent areas | no black/white halo; VRM edges premultiplied correctly | |
-| PresentMon on the WebView2 GPU process | ≤ 30 presents/s animating; ≤ 1/s parked | |
-| Borderless-fullscreen game on the same monitor | he parks himself, game unaffected | |
-| GPU busy, idle-animating (`spike0-gpu.ps1`, animating − parked) | agree a threshold (suggested < 3 % on the dGPU) | |
+| `GetForegroundWindow()` at 10 Hz never returns Fritz's window or a WebView2 child of it | zero `HIT` lines in 30 min, incl. app start, Explorer restart, sleep/resume | **0 `HIT`** in 16 min over two runs, through both starts, the lock screen, a sleep, an Explorer restart and a quit and restart. 4 `ARRANGE` lines over 3 Arranges, all yours (the 20:35:11 one is a click on him mid-Arrange), and none kept the keyboard afterwards (no `kept after Arrange`); 1 `TRAY`. After the second and third Arranges the session's checks found Claude, the app you'd been in, back in the foreground. Short of 30 min |
+| Typing in another app while he animates | no dropped keystrokes, no caret loss | Not checked on its own. Notepad had the keyboard for half a minute while he animated; nothing was reported |
+| Clicks anywhere on his window's rectangle | pass through to the app beneath | Pass by the automated check: at every look (both starts, after the sleep, after the Explorer restart) the window under his middle was the app beneath. Not clicked by hand |
+| Transparent areas | no black/white halo; VRM edges premultiplied correctly | No fringe at 1:1 over a white window (the build) or the dark Claude window (the session). Not looked at 200 % |
+| PresentMon on the WebView2 GPU process | ≤ 30 presents/s animating; ≤ 1/s parked | Not run: PresentMon isn't installed |
+| Borderless-fullscreen game on the same monitor | he parks himself, game unaffected | Not run. The same watch parks him for the lock screen, and did so unreliably; fixed (below) |
+| GPU busy, idle-animating (`spike0-gpu.ps1`, animating − parked) | agree a threshold (suggested < 3 % on the dGPU) | On the Intel iGPU (the one DWM uses); the RTX stayed asleep. His WebView2 GPU process: 4.3 % of its 3D engine animating (a 3 s sample in the second run, as in the build's check). The build's 5 s A/B: 5.6 % difference. Placeholder model; no threshold agreed |
 
-Session: date, length, Windows build, GPU(s), monitor(s) and scaling, model used.
+Session: 2026-11-11, 20:33–20:50 (UTC−6), Windows 11 build 26300, Intel
+graphics + RTX 5080 Laptop, one 3840×2400 panel at 200 % with an auto-hiding
+taskbar, the placeholder model (there is no VRoid Studio export yet).
 
-Attach: `foreground.log`, the PresentMon summaries, the edge screenshots, the
-`spike0-gpu.ps1` output.
+From `foreground.log`, `fritz.log`, the Windows System log and the checks
+made during the session (local times):
+
+- 20:33:09 — started; the foreground stayed with Claude.
+- 20:35:05 — Arrange (Ctrl+Alt+A); moved to the middle of the screen.
+  Mid-Arrange the keyboard went to Windows Search (20:35:09), then Claude
+  (20:35:10); at 20:35:11 he took it again (a click on him). The Arrange was
+  over before the lock screen at 20:35:30 (the watch parked him, which it
+  doesn't mid-Arrange); which window got the keyboard then isn't in the logs.
+- 20:35:30–20:36:05 — the lock screen: the cover watch parked him and brought
+  him back five times (`by="LockScreenBackstopFrame (pid 7104)"`).
+- 20:36:10–20:36:17 — Modern Standby (Kernel-Power 506/507). The heartbeat
+  lost 8 s of polls; afterwards the same window and WebView2 GPU process, still
+  drawn and animating.
+- 20:37:04 — Explorer restarted from Task Manager. He stayed off the taskbar
+  and out of Alt-Tab; his tray icon came back (in the overflow).
+- 20:37:28 — Arrange again; locked, and Claude had the keyboard back by
+  20:38:20.
+- 20:41:25 — Quit from the tray (the one `TRAY` line).
+- 20:42:31 — started again: back at his saved spot, without the foreground.
+  20:42:38, Arrange; moved back to the bottom right, and Claude had the
+  keyboard back by 20:43:13.
+- 20:50 — stopped for the lock-screen fix.
+
+`fritz.log` starts afresh each run, so the first run's cover lines above were
+read before the restart. The raw logs stay on the owner's machine: they name,
+with their titles, the windows that had the foreground just before each
+`ARRANGE` and `TRAY` line (up to five each). They are not a full foreground
+history.
+
+**Owner's decision (2026-11-11): proceed on these results** — PR 1, then
+PR 2, in the build plan's order. What the table marks not run or not checked,
+and the full 30 minutes, are left to PR 2, whose acceptance is this table in
+the real app.
+
+### Found in the session
+
+The lock screen didn't keep him parked. The watch tested the window at each
+monitor's centre, and under the lock screen that was Explorer's
+`LockScreenBackstopFrame` only some of the time, so he went and came back five
+times in 35 s. Nothing showed (the lock screen is above every always-on-top
+window), but each return restarted his 30 fps loop behind it. Now the watch
+asks Windows first: while the session is locked (`WTSQuerySessionInformationW`,
+`WTS_SESSIONSTATE_LOCK`) he is covered by "the lock screen", whatever window is
+at the centre, until you sign back in. On start the watch logs what Windows
+says (`cover watch started locked=Some(false)`); a lock should then log one
+`parking him by="the lock screen"` and, at sign-in, one `bringing him back`.
 
 ## Measured while building it (not the session)
 

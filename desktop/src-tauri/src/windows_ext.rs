@@ -1,5 +1,6 @@
 //! Win32 for the avatar window: the foreground without injected input, Alt-Tab,
-//! the monitor Fritz stands on, and whether a fullscreen app covers it.
+//! the monitor Fritz stands on, and whether a fullscreen app or the lock
+//! screen covers it.
 //!
 //! Windows are passed as integers (`HWND.0 as isize`), so callers need
 //! neither `unsafe` nor the `windows` crate. 0 is no window, and every call
@@ -13,12 +14,16 @@
 
 use std::ffi::c_void;
 
-use windows::core::BOOL;
+use windows::core::{BOOL, PWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, HDC, HMONITOR, MONITORINFO,
     MONITOR_DEFAULTTOPRIMARY,
+};
+use windows::Win32::System::RemoteDesktop::{
+    WTSFreeMemory, WTSQuerySessionInformationW, WTSSessionInfoEx, WTSINFOEXW,
+    WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTS_SESSIONSTATE_LOCK, WTS_SESSIONSTATE_UNLOCK,
 };
 use windows::Win32::UI::HiDpi::{
     GetDpiForMonitor, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -369,6 +374,56 @@ fn covered_monitor(m: Bounds) -> Option<String> {
     }
 }
 
+/// Whether this session is locked, as Windows tells it: `Some(true)` from a
+/// lock (Win+L, or a sleep that asks for sign-in on wake) until the owner
+/// signs back in, `Some(false)` otherwise, `None` if Windows won't say. The
+/// lock screen is drawn above every always-on-top window, but its windows are
+/// not ones [`covering_app`] can rely on: in Spike 0's session it found
+/// Explorer's `LockScreenBackstopFrame` at the monitor's centre only some of
+/// the time, and parked and unparked Fritz five times under one lock screen.
+pub fn session_locked() -> Option<bool> {
+    let mut buf = PWSTR::null();
+    let mut len = 0u32;
+    // SAFETY: on success Windows allocates `buf`, freed below exactly once;
+    // it holds a WTSINFOEXW when at least that many bytes come back, and is
+    // read unaligned so its alignment needn't be trusted. On failure nothing
+    // was allocated.
+    unsafe {
+        WTSQuerySessionInformationW(
+            Some(WTS_CURRENT_SERVER_HANDLE),
+            WTS_CURRENT_SESSION,
+            WTSSessionInfoEx,
+            &raw mut buf,
+            &raw mut len,
+        )
+        .ok()?;
+        if buf.is_null() {
+            return None;
+        }
+        let whole = usize::try_from(len).is_ok_and(|n| n >= std::mem::size_of::<WTSINFOEXW>());
+        let flags = if whole {
+            let info: WTSINFOEXW = std::ptr::read_unaligned(buf.0.cast());
+            (info.Level == 1).then_some(info.Data.WTSInfoExLevel1.SessionFlags)
+        } else {
+            None
+        };
+        WTSFreeMemory(buf.0.cast());
+        flags.and_then(lock_state)
+    }
+}
+
+/// `WTSINFOEX_LEVEL1_W::SessionFlags` read as a lock: `WTS_SESSIONSTATE_LOCK`
+/// is locked, `WTS_SESSIONSTATE_UNLOCK` unlocked, and anything else
+/// (`WTS_SESSIONSTATE_UNKNOWN`) says nothing. (Windows 7 had the two the
+/// wrong way round; Tauri 2 needs Windows 10.)
+pub fn lock_state(flags: i32) -> Option<bool> {
+    match flags.cast_unsigned() {
+        WTS_SESSIONSTATE_LOCK => Some(true),
+        WTS_SESSIONSTATE_UNLOCK => Some(false),
+        _ => None,
+    }
+}
+
 fn class_name(h: HWND) -> String {
     let mut name = [0u16; 128];
     // SAFETY: a sized buffer; a stale handle only makes the call fail.
@@ -478,9 +533,9 @@ pub(crate) mod tests {
 
     use super::{
         apply_toolwindow, can_take_foreground, covers, foreground_window, fullscreen_on, hwnd,
-        intersects, is_app_window, is_shell_class, make_layered_opaque, monitors, next_app_window,
-        owned_by_us, pick_app, pin_toolwindow, settle, toolwindow_style, touching, try_foreground,
-        window_bounds, Bounds,
+        intersects, is_app_window, is_shell_class, lock_state, make_layered_opaque, monitors,
+        next_app_window, owned_by_us, pick_app, pin_toolwindow, session_locked, settle,
+        toolwindow_style, touching, try_foreground, window_bounds, Bounds,
     };
     use windows::core::w;
     use windows::Win32::Foundation::HWND;
@@ -670,6 +725,24 @@ pub(crate) mod tests {
         // SAFETY: our own live window.
         let ex = unsafe { GetWindowLongPtrW(win.0, GWL_EXSTYLE) as u32 };
         assert_eq!(ex & WS_EX_TOOLWINDOW.0, 0);
+    }
+
+    /// The values Windows documents for `SessionFlags`: 0 locked, 1 unlocked,
+    /// 0xFFFFFFFF unknown.
+    #[test]
+    fn session_flags_read_as_a_lock() {
+        assert_eq!(lock_state(0), Some(true));
+        assert_eq!(lock_state(1), Some(false));
+        assert_eq!(lock_state(-1), None, "WTS_SESSIONSTATE_UNKNOWN");
+        assert_eq!(lock_state(2), None);
+    }
+
+    /// This desktop session's lock can be read at all: the call, the
+    /// buffer's size and its level-1 layout. (The tests run unlocked or
+    /// locked; either is an answer.)
+    #[test]
+    fn the_session_lock_can_be_read() {
+        assert!(session_locked().is_some());
     }
 
     /// Fullscreen is covering the monitor without being maximised. With an
