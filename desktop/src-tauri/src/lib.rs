@@ -10,6 +10,7 @@
 
 mod avatar_state;
 mod cover;
+mod cursor;
 mod foreground_log;
 mod hotkeys;
 mod logs;
@@ -234,6 +235,16 @@ async fn power_display() -> bool {
     power::display_on()
 }
 
+/// The cursor now: for a page that starts after the last `cursor` event
+/// (sent only on a move, so a still cursor would otherwise never be looked
+/// at). Where it is even while he is parked or the display is off, so the
+/// page has it when he is seen again; `active: false` only when look-at is
+/// off or there is no window.
+#[tauri::command]
+async fn cursor_now(app: AppHandle) -> cursor::Cursor {
+    cursor::now(&app)
+}
+
 pub fn run() {
     logs::install_panic_hook();
     logs::startup(&format!(
@@ -259,7 +270,8 @@ pub fn run() {
             avatar_vrm,
             get_settings,
             set_setting,
-            power_display
+            power_display,
+            cursor_now
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -285,6 +297,7 @@ pub fn run() {
             power::start(handle.clone());
             avatar_state::start_saver(handle.clone());
             open_avatar(&handle);
+            cursor::start(handle.clone());
             logs::startup("started");
             Ok(())
         })
@@ -349,7 +362,8 @@ mod tests {
         assert_eq!(events["settings"], super::SETTINGS_EVENT);
         assert_eq!(events["power"], crate::power::DISPLAY_EVENT);
         assert_eq!(events["status"], crate::overlay_machine::OVERLAY_STATUS_EVENT);
-        assert_eq!(events.len(), 3, "an event with no Rust half: {events:?}");
+        assert_eq!(events["cursor"], crate::cursor::CURSOR_EVENT);
+        assert_eq!(events.len(), 4, "an event with no Rust half: {events:?}");
     }
 
     #[test]

@@ -5,7 +5,8 @@
   "events": {
     "status": "avatar:status",
     "settings": "settings:changed",
-    "power": "power:display"
+    "power": "power:display",
+    "cursor": "cursor"
   },
   "hotkeys": {
     "arrange": "avatar:arrange"
@@ -134,6 +135,44 @@
     "powerDisplay": {
       "name": "power_display",
       "args": []
+    },
+    "cursorNow": {
+      "name": "cursor_now",
+      "args": []
+    }
+  },
+  "cursorKeys": [
+    "active",
+    "height",
+    "over",
+    "width",
+    "x",
+    "y"
+  ],
+  "cursorSamples": {
+    "over": {
+      "active": true,
+      "x": 100,
+      "y": 100,
+      "width": 600,
+      "height": 920,
+      "over": true
+    },
+    "elsewhere": {
+      "active": true,
+      "x": -2990,
+      "y": -1380,
+      "width": 600,
+      "height": 920,
+      "over": false
+    },
+    "idle": {
+      "active": false,
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0,
+      "over": false
     }
   }
 }

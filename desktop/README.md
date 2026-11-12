@@ -23,8 +23,11 @@ opens it):
 | `avatar\fritz.vrm` | The owner's model, if there is one (or `avatar.vrmPath`) |
 
 The hotkeys are `hotkeys.arrange` (Ctrl+Alt+A) and `hotkeys.park`
-(Ctrl+Alt+H), read at start. Until the control window lands, change a setting
-by editing `settings.json` with Fritz quit.
+(Ctrl+Alt+H), read at start. His eyes follow the cursor while
+`avatar.lookatCursor` is `true` (the default): on a VRoid export the eyes
+turn, and on any model his head turns part of the way, which is what shows
+on the placeholder. Until the control window lands, change a setting by
+editing `settings.json` with Fritz quit.
 
 ## Build
 

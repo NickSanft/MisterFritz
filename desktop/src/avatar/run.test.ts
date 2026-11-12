@@ -46,6 +46,11 @@ describe("when the avatar draws", () => {
     expect(afterAsking(true, 0, 0, false)).toBe(true);
     expect(afterAsking(true, 0, 1, false)).toBe(false);
     expect(afterAsking(false, 2, 3, true)).toBe(true);
+    // The cursor's start-up question takes the same rule.
+    const asked = { x: 1 };
+    const heard = { x: 2 };
+    expect(afterAsking(asked, 4, 4, null)).toBe(asked);
+    expect(afterAsking<object | null>(asked, 4, 5, heard)).toBe(heard);
   });
 
   it("reads the display state strictly", () => {

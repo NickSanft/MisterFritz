@@ -16,6 +16,7 @@ import { VrmActor } from "./VrmActor";
 import { frameSpan } from "./framing";
 import { keyAction } from "./keys";
 import { POWER_EVENT, afterAsking, fetchDisplayOn, parseDisplay, shouldDraw } from "./run";
+import { AHEAD, CURSOR_EVENT, fetchCursor, gaze, parseCursor, type CursorFrame, type Gaze } from "./look";
 import {
   NO_READY_GLOBAL,
   STATUS_EVENT,
@@ -65,6 +66,11 @@ let displayOn = true;
 /** Display events heard, so a late reply to the start-up question can't
  * undo a newer event. */
 let displayEvents = 0;
+/** The last cursor the shell sent (or answered with), and how many it has
+ * sent: the gaze is worked out from it every frame, so it holds before the
+ * model has loaded, and follows his head when Arrange resizes him. */
+let cursorFrame: CursorFrame | null = null;
+let cursorEvents = 0;
 let paintIn = -1; // frames until the painted handshake; -1 = not due
 let lastBeat = 0;
 
@@ -98,7 +104,15 @@ function watchPixelRatio(): void {
     }, { once: true });
 }
 
+/** Where the cursor says to look, from his eyes' place on the page now. */
+function lookFor(c: CursorFrame, a: VrmActor): Gaze {
+  if (!c.active) return AHEAD;
+  const view = { width: window.innerWidth, height: window.innerHeight };
+  return gaze(c, view, a.headScreen(camera, view.width, view.height));
+}
+
 const loop = new PacedLoop((dt) => {
+  if (actor && cursorFrame) actor.setLook(lookFor(cursorFrame, actor));
   actor?.update(dt);
   renderer.render(scene, camera);
   if (paintIn > 0 && --paintIn === 0) {
@@ -184,6 +198,20 @@ async function main(): Promise<void> {
     displayOn = on;
     draw();
   });
+  // His eyes follow the cursor (the shell sends it only on a move, while he
+  // is seen and the owner wants it; `active: false` when that stops). Kept,
+  // and looked at from the next frame on.
+  await listen<unknown>(CURSOR_EVENT, (e) => {
+    const c = parseCursor(e.payload);
+    if (!c) return;
+    cursorEvents += 1;
+    cursorFrame = c;
+  });
+  // Where it is now: a cursor that hasn't moved since he opened sends
+  // nothing, and an event before this page listened was lost.
+  const cursorHeard = cursorEvents;
+  const asked = await fetchCursor();
+  if (asked) cursorFrame = afterAsking<CursorFrame | null>(asked, cursorHeard, cursorEvents, cursorFrame);
   // The state now, in case the display went off before the page listened.
   const heard = displayEvents;
   displayOn = afterAsking(await fetchDisplayOn(), heard, displayEvents, displayOn);

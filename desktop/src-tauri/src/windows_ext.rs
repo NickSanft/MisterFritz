@@ -31,7 +31,7 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetClassNameW, GetForegroundWindow, GetShellWindow, GetTopWindow, GetWindow,
+    GetAncestor, GetClassNameW, GetCursorPos, GetForegroundWindow, GetShellWindow, GetTopWindow, GetWindow,
     GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow,
     IsWindowVisible, IsZoomed, SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW,
     SetWindowPos, WindowFromPoint, GA_ROOT, GWL_EXSTYLE, GW_HWNDNEXT, GW_OWNER, LWA_ALPHA,
@@ -199,6 +199,14 @@ pub fn pin_toolwindow(window: isize) -> bool {
     // removes itself at WM_NCDESTROY.
     let pinned = unsafe { SetWindowSubclass(hwnd(window), Some(pin_proc), PIN_ID, 0) }.as_bool();
     pinned && apply_toolwindow(window)
+}
+
+/// Where the cursor is on screen, physical pixels (the process is
+/// per-monitor DPI aware, so no monitor's scale bends it).
+pub fn cursor_pos() -> Option<(i32, i32)> {
+    let mut p = POINT::default();
+    // SAFETY: a valid out-pointer.
+    unsafe { GetCursorPos(&raw mut p) }.ok().map(|()| (p.x, p.y))
 }
 
 /// The window's rectangle on screen, physical pixels.

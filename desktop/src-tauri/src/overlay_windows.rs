@@ -72,6 +72,11 @@ pub struct OverlayShared {
     /// The current park is the cover watch's, not the owner's Hide: the
     /// watch may undo it, and it is never saved.
     cover_parked: AtomicBool,
+    /// The window is at the park spot because the shell moved it there: set
+    /// before the move off screen, cleared after the move back, so a reader
+    /// in between gets `home`. Not a guess from the window's coordinates,
+    /// which a monitor far to the left of the primary can also have.
+    window_parked: AtomicBool,
     /// Where Fritz stands when he isn't parked: set when the window is
     /// placed, and from the window itself just before it is parked. A leaf
     /// lock, never held across a window call.
@@ -93,6 +98,7 @@ impl OverlayShared {
             arranging: AtomicBool::new(false),
             return_to: AtomicIsize::new(0),
             cover_parked: AtomicBool::new(false),
+            window_parked: AtomicBool::new(false),
             home: Mutex::new(None),
             park_lock: Mutex::new(()),
             placement: tauri::async_runtime::Mutex::new(()),
@@ -250,6 +256,7 @@ fn window_id(window: &WebviewWindow) -> isize {
 fn adopt(shared: &OverlayShared, hwnd: isize) {
     shared.hwnd.store(hwnd, Ordering::SeqCst);
     shared.return_to.store(0, Ordering::SeqCst);
+    shared.window_parked.store(false, Ordering::SeqCst);
 }
 
 /// The window is going (closing, being destroyed, or the app quitting):
@@ -257,8 +264,10 @@ fn adopt(shared: &OverlayShared, hwnd: isize) {
 /// last set), and the shell's mark comes off.
 fn going(shared: &OverlayShared, n: &impl Native) {
     let hwnd = shared.hwnd.load(Ordering::SeqCst);
-    if let Some(b) = n.bounds(hwnd).filter(|b| !is_park_spot(*b)) {
-        *shared.home() = Some(rect_of(b));
+    if !shared.window_parked.load(Ordering::SeqCst) {
+        if let Some(b) = n.bounds(hwnd) {
+            *shared.home() = Some(rect_of(b));
+        }
     }
     n.unmark_non_rude(hwnd);
 }
@@ -268,6 +277,7 @@ fn going(shared: &OverlayShared, n: &impl Native) {
 fn forget(shared: &OverlayShared) {
     shared.hwnd.store(0, Ordering::SeqCst);
     shared.return_to.store(0, Ordering::SeqCst);
+    shared.window_parked.store(false, Ordering::SeqCst);
 }
 
 /// Whether the core stepped back to Closed within `within`.
@@ -446,10 +456,9 @@ pub fn avatar_hwnd(app: &AppHandle) -> isize {
 pub fn standing(app: &AppHandle) -> Option<OverlayRect> {
     let shared = shared(app)?;
     let parked = shared.core().parked;
-    let on_screen = (!parked)
+    let on_screen = (!parked && !shared.window_parked.load(Ordering::SeqCst))
         .then(|| windows_ext::window_bounds(shared.hwnd.load(Ordering::SeqCst)))
         .flatten()
-        .filter(|b| !is_park_spot(*b))
         .map(rect_of);
     let home = *shared.home();
     on_screen.or(home)
@@ -487,11 +496,6 @@ fn rect_of(b: Bounds) -> OverlayRect {
         width: u32::try_from(b.width()).unwrap_or(0),
         height: u32::try_from(b.height()).unwrap_or(0),
     }
-}
-
-/// A window this far left is parked, not standing anywhere.
-fn is_park_spot(b: Bounds) -> bool {
-    b.left <= PARK_AT.0 / 2
 }
 
 /// Step the core with `input`, emit, and run the effects.
@@ -732,8 +736,11 @@ fn return_focus(shared: &OverlayShared, n: &impl Native) {
 fn park(shared: &OverlayShared, on: bool, n: &impl Native) {
     let hwnd = shared.hwnd.load(Ordering::SeqCst);
     if on {
-        if let Some(b) = n.bounds(hwnd).filter(|b| !is_park_spot(*b)) {
-            *shared.home() = Some(rect_of(b));
+        // Already off screen (parked twice): home stays where he stood.
+        if !shared.window_parked.swap(true, Ordering::SeqCst) {
+            if let Some(b) = n.bounds(hwnd) {
+                *shared.home() = Some(rect_of(b));
+            }
         }
         n.move_to(PARK_AT.0, PARK_AT.1);
     } else {
@@ -742,6 +749,7 @@ fn park(shared: &OverlayShared, on: bool, n: &impl Native) {
             Some(r) => {
                 *shared.home() = Some(r);
                 n.move_to(r.x, r.y);
+                shared.window_parked.store(false, Ordering::SeqCst);
             }
             None => tracing::warn!("unparked with nowhere to stand; Fritz stays off screen"),
         }
@@ -1441,6 +1449,15 @@ mod tests {
         );
         assert_eq!(shared.home().map(|r| (r.x, r.y)), Some((900, 400)));
 
+        // Parked, then going: the park spot is not where he stood.
+        park(
+            &shared,
+            true,
+            &Fake {
+                bounds: at(900, 400),
+                ..Fake::default()
+            },
+        );
         going(
             &shared,
             &Fake {
@@ -1449,6 +1466,48 @@ mod tests {
             },
         );
         assert_eq!(shared.home().map(|r| (r.x, r.y)), Some((900, 400)));
+    }
+
+    /// A monitor far to the left of the primary has coordinates like the
+    /// park spot's. Dragged there, he stands there: parking, going and the
+    /// next unpark all remember that spot.
+    #[test]
+    fn a_monitor_far_to_the_left_is_somewhere_to_stand() {
+        let shared = with_window(Phase::Painted { instance: 1 });
+        let far_left = Fake {
+            bounds: at(-6500, 300),
+            ..Fake::default()
+        };
+        going(&shared, &far_left);
+        assert_eq!(shared.home().map(|r| (r.x, r.y)), Some((-6500, 300)));
+        park(&shared, true, &far_left);
+        let fake = Fake::default();
+        park(&shared, false, &fake);
+        assert_eq!(fake.calls(), ["move -6500 300"]);
+        assert!(!shared.window_parked.load(Ordering::SeqCst));
+    }
+
+    /// Set before the move off screen and cleared after the move back, so
+    /// whoever reads where he stands mid-move gets home, never the park spot.
+    #[test]
+    fn the_shell_knows_its_own_park() {
+        let shared = with_window(Phase::Painted { instance: 1 });
+        let fake = Fake {
+            bounds: at(1500, 600),
+            ..Fake::default()
+        };
+        assert!(!shared.window_parked.load(Ordering::SeqCst));
+        park(&shared, true, &fake);
+        assert!(shared.window_parked.load(Ordering::SeqCst));
+        park(&shared, false, &fake);
+        assert!(!shared.window_parked.load(Ordering::SeqCst));
+        // A new window, or none, starts unparked.
+        park(&shared, true, &fake);
+        adopt(&shared, 7);
+        assert!(!shared.window_parked.load(Ordering::SeqCst));
+        park(&shared, true, &fake);
+        forget(&shared);
+        assert!(!shared.window_parked.load(Ordering::SeqCst));
     }
 
     /// Destroying takes the mark off first; closing goes through the window's

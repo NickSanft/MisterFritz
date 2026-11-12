@@ -519,6 +519,13 @@ pub fn get() -> Settings {
     lock().settings.clone()
 }
 
+/// One look at the settings now, without copying them all: for a reader
+/// that asks often (the cursor watch, 15 times a second). `f` runs under the
+/// store's lock, so it must not change the settings or call back in here.
+pub fn peek<R>(f: impl FnOnce(&Settings) -> R) -> R {
+    f(&lock().settings)
+}
+
 /// Change the settings with `f`, and save them if they changed (or if the
 /// last save failed). Returns what `f` returned and the settings after it.
 pub fn update<R>(f: impl FnOnce(&mut Settings) -> R) -> (R, Settings) {

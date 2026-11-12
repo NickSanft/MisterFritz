@@ -1,7 +1,9 @@
 /**
  * Fritz's body: a VRM loaded with @pixiv/three-vrm, posed and kept alive with
- * a procedural idle — breathing, a slow sway, and a blink every few seconds.
- * Spike 0 needs only this much; PR 2 adds look-at, mood and the mouth.
+ * a procedural idle — breathing, a slow sway, a blink every few seconds — and
+ * looking where he is told (`setLook`, from the cursor): his eyes through
+ * three-vrm's look-at, his head turning a share of the way. Mood and the
+ * mouth come with the PRs that drive them.
  *
  * Poses go through three-vrm's normalized humanoid. That rig is built from
  * the bones as the file has them, before `VRMUtils.rotateVRM0` turns a VRM
@@ -14,6 +16,12 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { VRMLoaderPlugin, VRMUtils, type VRM, type VRMHumanBoneName } from "@pixiv/three-vrm";
+import { AHEAD, EYE_TAU, HEAD_SHARE_PITCH, HEAD_SHARE_YAW, HEAD_TAU, approach, type Gaze } from "./look";
+
+const RAD = Math.PI / 180;
+/** The eyes sit about this far above the head bone, in metres: where a
+ * gaze starts on the page. */
+const EYES_ABOVE_HEAD = 0.07;
 
 /** Breaths a minute at rest. */
 const BREATHS_PER_MINUTE = 14;
@@ -33,6 +41,15 @@ export class VrmActor {
   private blinkAt = -1;
   /** The sign of X and Z rotations: -1 for a VRM 0.x rig (see above). */
   private readonly k: number;
+  /** Where he has been told to look, and where his eyes and head are now
+   * on the way there. */
+  private aim: Gaze = AHEAD;
+  private eyes: Gaze = { ...AHEAD };
+  private headTurn: Gaze = { ...AHEAD };
+  /** The point three-vrm's look-at turns the eyes to: a metre out from his
+   * head, in the direction of `eyes`. It is told the whole gaze; it works
+   * out the eyes' part from where the head already points. */
+  readonly lookTarget = new THREE.Object3D();
 
   private constructor(
     readonly vrm: VRM,
@@ -41,8 +58,13 @@ export class VrmActor {
     this.k = vrm.meta?.metaVersion === "0" ? -1 : 1;
     this.nextBlink = this.gap();
     this.restPose();
+    if (vrm.lookAt) {
+      vrm.lookAt.target = this.lookTarget;
+      vrm.lookAt.autoUpdate = true;
+    }
     // Pose the bones now, so bounds() frames him standing, not in T-pose.
     vrm.humanoid?.update();
+    this.placeLookTarget();
   }
 
   /** Parse a .vrm (glTF binary). Throws when the file isn't a VRM. */
@@ -73,8 +95,66 @@ export class VrmActor {
   update(dt: number): void {
     this.t += dt;
     this.breathe();
+    this.look(dt);
     this.blink(dt);
     this.vrm.update(dt);
+  }
+
+  /** Look this way (degrees; right and up positive, as the page sees it).
+   * He eases there over the next frames. */
+  setLook(g: Gaze): void {
+    this.aim = { yaw: g.yaw, pitch: g.pitch };
+  }
+
+  /** Where he looks now, on the way to the last `setLook`. */
+  get gaze(): Gaze {
+    return { ...this.eyes };
+  }
+
+  /** His eyes' place on a page `width` × `height` CSS pixels big, seen by
+   * `camera`: where a gaze toward the cursor starts. */
+  headScreen(camera: THREE.Camera, width: number, height: number): { x: number; y: number } {
+    const head = this.vrm.humanoid?.getRawBoneNode("head");
+    if (!head) return { x: width / 2, y: height / 4 };
+    const p = head.getWorldPosition(new THREE.Vector3());
+    p.y += EYES_ABOVE_HEAD;
+    p.project(camera);
+    return { x: ((p.x + 1) / 2) * width, y: ((1 - p.y) / 2) * height };
+  }
+
+  /** Ease toward the aim: the eyes quickly, the head a share of the way and
+   * slower, on top of the breathing's nod. */
+  private look(dt: number): void {
+    this.eyes.yaw = approach(this.eyes.yaw, this.aim.yaw, dt, EYE_TAU);
+    this.eyes.pitch = approach(this.eyes.pitch, this.aim.pitch, dt, EYE_TAU);
+    this.headTurn.yaw = approach(this.headTurn.yaw, this.aim.yaw * HEAD_SHARE_YAW, dt, HEAD_TAU);
+    this.headTurn.pitch = approach(this.headTurn.pitch, this.aim.pitch * HEAD_SHARE_PITCH, dt, HEAD_TAU);
+    const head = this.bone("head");
+    if (head) {
+      // Facing +Z, turning about Y toward +X turns him to the page's right,
+      // in either rig. About X a positive angle tips the face down in a 1.0
+      // rig, so up is negative, times k.
+      head.rotation.y = this.headTurn.yaw * RAD;
+      head.rotation.x += -this.headTurn.pitch * RAD * this.k;
+    }
+    this.placeLookTarget();
+  }
+
+  /** A metre out from his eyes, along `eyes`, in the world (where he faces
+   * +Z and the page's right is +X). */
+  private placeLookTarget(): void {
+    const head = this.vrm.humanoid?.getRawBoneNode("head");
+    if (!head) return;
+    const origin = head.getWorldPosition(new THREE.Vector3());
+    origin.y += EYES_ABOVE_HEAD;
+    const yaw = this.eyes.yaw * RAD;
+    const pitch = this.eyes.pitch * RAD;
+    this.lookTarget.position.set(
+      origin.x + Math.sin(yaw) * Math.cos(pitch),
+      origin.y + Math.sin(pitch),
+      origin.z + Math.cos(yaw) * Math.cos(pitch),
+    );
+    this.lookTarget.updateMatrixWorld();
   }
 
   private bone(name: VRMHumanBoneName): THREE.Object3D | null {
