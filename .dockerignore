@@ -53,3 +53,6 @@ chat_history.db
 
 # Docs and README-only files (optional — remove if you want them in image)
 # README.md
+
+# The desktop companion (plan 14) is a separate Windows app, not part of the brain image
+desktop/

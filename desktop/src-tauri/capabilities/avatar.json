@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "avatar",
+  "description": "The avatar window (built at runtime by overlay_windows.rs): its status events, and moving and resizing itself while in Arrange. App commands (avatar_handshake, avatar_beat, set_avatar_mode, avatar_vrm) are not ACL-checked without an app manifest, and must be granted here if one is ever added.",
+  "windows": ["avatar"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging"
+  ]
+}

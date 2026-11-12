@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mister Fritz</title>
+    <style>
+      /* Transparent all the way down: the window, the page and the canvas. No
+         CSS animation or transition anywhere (scripts/check-paced.mjs). */
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        user-select: none;
+      }
+      #stage {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      /* Arrange: a quiet outline to drag by, and a resize grip. */
+      #frame,
+      #grip {
+        display: none;
+        position: fixed;
+        pointer-events: none;
+      }
+      body.arranging #frame {
+        display: block;
+        inset: 0;
+        border: 1px dashed rgba(200, 200, 210, 0.7);
+        border-radius: 6px;
+      }
+      body.arranging #grip {
+        display: block;
+        right: 2px;
+        bottom: 2px;
+        width: 14px;
+        height: 14px;
+        pointer-events: auto;
+        cursor: nwse-resize;
+        border-right: 2px solid rgba(200, 200, 210, 0.9);
+        border-bottom: 2px solid rgba(200, 200, 210, 0.9);
+      }
+      body.arranging {
+        cursor: move;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="stage"></canvas>
+    <div id="frame"></div>
+    <div id="grip"></div>
+    <script type="module" src="/src/avatar/main.ts"></script>
+  </body>
+</html>

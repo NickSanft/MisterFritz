@@ -1,0 +1,122 @@
+{
+  "about": "The avatar window's wire contract, read by both test suites (src-tauri/src/overlay_machine.rs and the avatar page's TypeScript tests). Production code never imports it. Cut from DivoraVoiceMod's src/overlay/wire.fixture.json (MIT, see desktop/LICENSES/DivoraVoiceMod.txt) to what the avatar keeps: no recorder, charms or assets; parked added to the status.",
+  "label": "avatar",
+  "title": "Mister Fritz",
+  "events": {
+    "status": "avatar:status"
+  },
+  "hotkeys": {
+    "arrange": "avatar:arrange"
+  },
+  "handshakeStages": [
+    "ready",
+    "painted"
+  ],
+  "modeRequests": [
+    "locked",
+    "arrange",
+    "toggle"
+  ],
+  "modes": [
+    "locked",
+    "arrange"
+  ],
+  "phases": [
+    "closed",
+    "starting",
+    "shown",
+    "painted",
+    "closing"
+  ],
+  "statusKeys": [
+    "arrangeGen",
+    "canArrange",
+    "error",
+    "fit",
+    "instance",
+    "mode",
+    "open",
+    "parked",
+    "phase"
+  ],
+  "statusSamples": {
+    "closed": {
+      "open": false,
+      "phase": "closed",
+      "instance": 0,
+      "mode": "locked",
+      "arrangeGen": 0,
+      "canArrange": false,
+      "fit": false,
+      "parked": false,
+      "error": null
+    },
+    "arranging": {
+      "open": true,
+      "phase": "painted",
+      "instance": 1,
+      "mode": "arrange",
+      "arrangeGen": 1,
+      "canArrange": true,
+      "fit": false,
+      "parked": false,
+      "error": null
+    },
+    "watchdog": {
+      "open": true,
+      "phase": "closing",
+      "instance": 1,
+      "mode": "locked",
+      "arrangeGen": 0,
+      "canArrange": false,
+      "fit": false,
+      "parked": false,
+      "error": "Fritz's window didn't start, so it was closed. Try Show Fritz again."
+    },
+    "parked": {
+      "open": true,
+      "phase": "painted",
+      "instance": 1,
+      "mode": "locked",
+      "arrangeGen": 0,
+      "canArrange": false,
+      "fit": false,
+      "parked": true,
+      "error": null
+    }
+  },
+  "debug": {
+    "noReadyEnv": "FRITZ_PRETEND_AVATAR_NO_READY",
+    "noReadyGlobal": "__FRITZ_AVATAR_NO_READY__"
+  },
+  "commands": {
+    "handshake": {
+      "name": "avatar_handshake",
+      "args": [
+        "instance",
+        "stage"
+      ]
+    },
+    "beat": {
+      "name": "avatar_beat",
+      "args": [
+        "instance",
+        "gen"
+      ]
+    },
+    "mode": {
+      "name": "set_avatar_mode",
+      "args": [
+        "mode"
+      ]
+    },
+    "status": {
+      "name": "avatar_status",
+      "args": []
+    },
+    "vrm": {
+      "name": "avatar_vrm",
+      "args": []
+    }
+  }
+}

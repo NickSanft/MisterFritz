@@ -1,0 +1,59 @@
+[package]
+name = "mister-fritz-desktop"
+version = "0.1.0"
+description = "Mister Fritz's body on the Windows desktop"
+edition = "2021"
+# DivoraVoice's floor: the lifted window helpers use std::ptr::without_provenance_mut.
+rust-version = "1.89"
+
+[lib]
+name = "fritz_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+# Lorraine's tested set, pinned exactly (plan 14 build § 0); the JS side's
+# @tauri-apps/api and cli stay on the same minor. tauri 2.11.x's own ranges
+# (tauri-runtime ^2.11.3, tauri-runtime-wry ^2.11.3/^2.11.4, tauri-utils
+# ^2.9.3) also accept the 2.12 line (tao 0.37, wry 0.57), and a fresh resolve
+# or `cargo update` then picks tauri 2.11.6 + runtime 2.12, which does not
+# compile. The three runtime crates are listed only to hold them; they are
+# never imported. Move all five together, never one at a time.
+tauri = { version = "=2.11.3", features = ["tray-icon"] }
+tauri-runtime = "=2.11.3"
+tauri-runtime-wry = { version = "=2.11.3", default-features = false }
+tauri-utils = "=2.9.3"
+tauri-plugin-global-shortcut = "~2.3.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+
+[features]
+# Serve the embedded frontend (../dist) instead of the dev server. `tauri build`
+# turns it on; pass it to any cargo build or test you run yourself, or the
+# debug exe is rebuilt as a dev build that loads localhost:1431.
+custom-protocol = ["tauri/custom-protocol"]
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Dwm",
+  "Win32_Graphics_Gdi",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Threading",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+# unwind, so a panic in a worker thread (the foreground log, the cover watch)
+# ends only that thread.
+panic = "unwind"
+strip = true
