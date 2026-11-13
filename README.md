@@ -64,17 +64,31 @@ Mister Fritz runs the LLMs locally via Ollama, so hardware is the dominant cost.
 
 | Model | Approx VRAM | Approx RAM (CPU mode) | Notes |
 |---|---|---|---|
-| `gpt-oss` (thinking model) | ~14 GB | ~20 GB | Primary reasoning model. CPU inference is usable but slow (~10 s/token range). |
-| `llama3.2` (fast model) | ~4 GB | ~6 GB | Used for planning, summarisation, memory extraction. CPU mode is comfortable. |
+| `gpt-oss` (thinking model) | ~12 GB | ~20 GB | Primary reasoning model. CPU inference is usable but slow (~10 s/token range). |
+| `llama3.2` (fast model) | ~5.5 GB | ~6 GB | Used for planning, summarisation, memory extraction. CPU mode is comfortable. |
 | `llava` (vision) | ~5 GB | ~8 GB | Only loaded when an image is analysed. |
 | `mxbai-embed-large` (embeddings) | ~1 GB | ~2 GB | Always loaded for RAG and memory. |
 | Stable Diffusion XL (image gen) | ~8 GB | not viable on CPU | First run downloads ~7 GB of weights. |
 | Coqui XTTS v2 (TTS) | ~2 GB | ~4 GB | First run downloads ~2 GB of weights. |
 
+The `gpt-oss` and `llama3.2` figures are as loaded at the modelfiles' 32k
+context (`num_ctx 32768`), measured with Ollama 0.40.16. Ollama sets aside more
+than that when it decides whether a model fits: about 14 GB for `gpt-oss`.
+
 **Recommended baseline for the full feature set:**
 - GPU with ≥ 16 GB VRAM (RTX 4080/4090, or two smaller GPUs)
 - 32 GB system RAM
 - 20 GB free disk for models and Chroma data
+
+**On a 16 GB GPU, set `FAST_OLLAMA_MODEL=gpt-oss`.** At the modelfiles' 32k
+context, `gpt-oss` and `llama3.2` don't fit together (see the table). Every
+turn ends with the fast model pulling memories out of it, which evicts
+`gpt-oss`, so the next message waits for it to load again.
+Measured on an RTX 5080 Laptop GPU (16 GB), four turns each: 14.2 s on average
+to the first word with `llama3.2` as the fast model, 4.7 s with `gpt-oss` in
+both roles, which pulled memories out of the turns as well. Add
+`OLLAMA_KEEP_ALIVE=-1` if nothing else needs the GPU while Fritz runs: then
+`gpt-oss` never unloads, and replies start within about a second.
 
 **Minimum for text-only operation (no image gen, no GPU):**
 - 16 GB RAM
@@ -309,7 +323,7 @@ For the desktop app of [plan 14](plans/14-desktop-companion.md). The first three
 | `EMBEDDING_MODEL` | `mxbai-embed-large` | Embedding model for ChromaDB |
 | `VISION_MODEL` | `llava` | Vision model for image analysis |
 | `OLLAMA_TIMEOUT` | `120` | Hard cap in seconds on a single Ollama request. Hung-model protection; it bounds one request, not a whole turn. |
-| `OLLAMA_KEEP_ALIVE` | `5m` | How long Ollama keeps a model resident after the last request. `-1` pins models forever — fastest, but the VRAM stays consumed. Accepts `30s`, `5m`, `1h`, `-1`. |
+| `OLLAMA_KEEP_ALIVE` | `5m` | How long Ollama keeps a model resident after the last request. `-1` pins models forever — fastest, but the VRAM stays consumed — and `0` unloads after each request. Accepts a duration (`30s`, `5m`, `1h`) or a whole number of seconds (`-1`, `0`, `300`). |
 
 ### Conversation, memory and streaming
 
@@ -749,6 +763,9 @@ Make sure Ollama is running: `ollama serve`. Check models with `ollama list`. Co
 
 **Ollama out-of-memory / model fails to load**
 Symptoms: Ollama logs show `model requires more memory than available` or your machine swaps to disk. Use a smaller model — switch `THINKING_OLLAMA_MODEL` to `llama3.2` (or a 7B variant), or close other GPU consumers. With multiple models in play, Ollama keeps the most-recently-used one resident; set `OLLAMA_KEEP_ALIVE=0` to evict immediately after each request and trade latency for memory headroom.
+
+**A reply fails with "I'm afraid that did not go to plan", and Ollama's log says `llama-server process has terminated`**
+An Ollama bug on some GPUs, not Fritz's: seen with Ollama 0.40.16 on an RTX 5080 Laptop GPU, where loading `gpt-oss` while any other model is loaded crashed its runner about half the time (`exit status 0xc0000409`, and `CUDA error: shared object initialization failed` in `%LOCALAPPDATA%\Ollama\server.log`). Loaded alone, it never failed. Fritz now recovers by itself: when a model's runner dies before the first word, it unloads the other models and asks once more, logging `Ollama's runner for gpt-oss crashed as it loaded` (and counting it as `ollama_runner_crash` in the counters of `:8000/health` and the admin panel's overview). If a reply still fails, it failed twice: send it again. Fewer reloads mean fewer crashes, so on a 16 GB GPU also follow the advice under System Requirements.
 
 **Very slow first response, fast subsequent responses**
 The bot now pre-warms every configured model in a background thread at startup, so the first DM shouldn't pay the cold-load tax anymore. If you still see latency on the first response, Ollama is unloading models between requests — increase `OLLAMA_KEEP_ALIVE` in `.env` (default `5m`, set to `-1` to pin models forever at the cost of permanent VRAM use). For very large models on CPU, also raise `OLLAMA_TIMEOUT=300`.

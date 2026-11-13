@@ -23,7 +23,7 @@ from langchain_core.messages import (
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
-from langchain_ollama import ChatOllama
+from ollama_recovery import RecoveringChatOllama
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -1249,12 +1249,14 @@ CACHED_SYSTEM_PROMPT = get_system_description(_conversation_tools_desc)
 
 exit_stack = ExitStack()
 checkpointer = exit_stack.enter_context(SqliteSaver.from_conn_string(CHAT_DB_NAME))
-ollama_instance = ChatOllama(
+# Recovering: on some GPUs Ollama's runner crashes loading gpt-oss beside
+# another model, and these ask once more after unloading the others.
+ollama_instance = RecoveringChatOllama(
     model=THINKING_OLLAMA_MODEL,
     keep_alive=OLLAMA_KEEP_ALIVE,
     client_kwargs={"timeout": OLLAMA_TIMEOUT},
 )
-fast_ollama_instance = ChatOllama(
+fast_ollama_instance = RecoveringChatOllama(
     model=FAST_OLLAMA_MODEL,
     keep_alive=OLLAMA_KEEP_ALIVE,
     client_kwargs={"timeout": OLLAMA_TIMEOUT},

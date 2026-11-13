@@ -20,7 +20,8 @@ import concurrent.futures
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-from langchain_ollama import ChatOllama, OllamaEmbeddings
+from langchain_ollama import OllamaEmbeddings
+from ollama_recovery import RecoveringChatOllama
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
@@ -565,12 +566,12 @@ def get_retriever(k=2):
 # --- PART 2: MODELS & PROMPTS ---
 
 # Initialize LLMs
-thinking_llm = ChatOllama(
+thinking_llm = RecoveringChatOllama(
     model=THINKING_OLLAMA_MODEL, temperature=0,
     keep_alive=OLLAMA_KEEP_ALIVE,
     client_kwargs={"timeout": OLLAMA_TIMEOUT},
 )
-fast_llm = ChatOllama(
+fast_llm = RecoveringChatOllama(
     model=FAST_OLLAMA_MODEL, temperature=0,
     keep_alive=OLLAMA_KEEP_ALIVE,
     client_kwargs={"timeout": OLLAMA_TIMEOUT},

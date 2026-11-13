@@ -29,6 +29,7 @@ from fritz_utils import (
     VISION_MODEL,
 )
 from observability import METRICS, time_tool
+from ollama_recovery import call_with_recovery
 from storage import get_default_chroma_store
 
 logger = logging.getLogger(__name__)
@@ -140,7 +141,9 @@ def _extract_and_store_memories(user_id: str, user_message: str, assistant_respo
         assistant_msg=assistant_response[:600],
     )
     try:
-        response = _ollama_client.chat(
+        response = call_with_recovery(
+            FAST_OLLAMA_MODEL,
+            _ollama_client.chat,
             model=FAST_OLLAMA_MODEL,
             messages=[{"role": "user", "content": prompt}],
             keep_alive=OLLAMA_KEEP_ALIVE,
@@ -428,7 +431,9 @@ def analyze_image(config: RunnableConfig, question: str = "What is in this image
                 return "Could not read the attached images. Please try again."
 
             logger.info("Analyzing %d image(s) with %s", len(encoded_images), VISION_MODEL)
-            response = _ollama_client.chat(
+            response = call_with_recovery(
+                VISION_MODEL,
+                _ollama_client.chat,
                 model=VISION_MODEL,
                 messages=[{
                     'role': 'user',

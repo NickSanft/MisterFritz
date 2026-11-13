@@ -87,11 +87,32 @@ VISION_MODEL = os.environ.get("VISION_MODEL", "llava")
 # Hard cap on a single Ollama request. Prevents a hung model from wedging the bot.
 OLLAMA_TIMEOUT: float = float(os.environ.get("OLLAMA_TIMEOUT", "120"))
 
+def parse_keep_alive(raw: str | None) -> str | int:
+    """OLLAMA_KEEP_ALIVE as Ollama takes it.
+
+    A duration with a unit ("30s", "5m", "1h", "-1m") is passed on as written.
+    A bare whole number is a number of seconds and is passed on as a NUMBER:
+    Ollama parses a string with Go's time.ParseDuration, which accepts a bare
+    "0" but refuses any other number without a unit ("time: missing unit in
+    duration"), so the "-1" (pin forever) this file and the README recommended
+    made every request fail with HTTP 400. As numbers, Ollama takes them all:
+    any negative pins, 0 unloads, N keeps the model N seconds. Unset or blank
+    is Ollama's own default, "5m".
+    """
+    text = (raw or "").strip()
+    if not text:
+        return "5m"
+    if re.fullmatch(r"[+-]?\d+", text):
+        return int(text)
+    return text
+
+
 # How long Ollama keeps a model resident in memory after the last request.
-# Conservative default matches Ollama's own ("5m"). Set to "-1" to pin models
-# forever — fastest, but VRAM stays consumed. Accepted formats are anything
-# Ollama parses (e.g. "30s", "5m", "1h", "-1").
-OLLAMA_KEEP_ALIVE: str = os.environ.get("OLLAMA_KEEP_ALIVE", "5m")
+# Conservative default matches Ollama's own ("5m"). Set to -1 to pin models
+# forever — fastest, but VRAM stays consumed — or 0 to unload after each
+# request. Accepts a duration Ollama parses ("30s", "5m", "1h", "-1m") or a
+# whole number of seconds ("-1", "0", "300"); see parse_keep_alive.
+OLLAMA_KEEP_ALIVE: str | int = parse_keep_alive(os.environ.get("OLLAMA_KEEP_ALIVE"))
 
 # ---------------------------------------------------------------------------
 # Tunables (formerly magic numbers in module bodies)

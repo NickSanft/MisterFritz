@@ -48,6 +48,7 @@ CORE = [
     "migrate_identity",
     "mister_fritz",
     "observability",
+    "ollama_recovery",
     "preflight",
     "prewarm",
     "privacy",
