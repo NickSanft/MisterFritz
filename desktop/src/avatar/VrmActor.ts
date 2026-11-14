@@ -2,7 +2,8 @@
  * Fritz's body: a VRM loaded with @pixiv/three-vrm, posed and kept alive with
  * a procedural idle — breathing, a slow sway, a blink every few seconds — and
  * looking where he is told (`setLook`, from the cursor): his eyes through
- * three-vrm's look-at, his head turning a share of the way. Mood and the
+ * three-vrm's look-at, his head turning a share of the way. `setPhase` is the
+ * turn's: thinking, he glances up and away and tilts his head. Mood and the
  * mouth come with the PRs that drive them.
  *
  * Poses go through three-vrm's normalized humanoid. That rig is built from
@@ -19,6 +20,7 @@ import {
   VRMExpressionMaterialColorBind, VRMLoaderPlugin, VRMUtils, type VRM, type VRMHumanBoneName,
 } from "@pixiv/three-vrm";
 import { AHEAD, EYE_TAU, HEAD_SHARE_PITCH, HEAD_SHARE_YAW, HEAD_TAU, approach, type Gaze } from "./look";
+import type { Phase } from "./state";
 
 const RAD = Math.PI / 180;
 /** The eyes sit about this far above the head bone, in metres: where a
@@ -32,6 +34,14 @@ const BLINK_GAP: readonly [number, number] = [2, 6];
 /** Seconds a blink takes to close, then to open. */
 const BLINK_CLOSE = 0.06;
 const BLINK_OPEN = 0.1;
+
+/** Starting to think, he glances up and away (degrees, as `setLook`), for
+ * this many seconds, then back to what he was looking at. */
+export const GLANCE: Gaze = Object.freeze({ yaw: -14, pitch: 12 });
+export const GLANCE_S = 1.2;
+/** While he thinks, his head tilts this far (degrees), easing in and out. */
+export const THINK_TILT_DEG = 4;
+const TILT_TAU = 0.3;
 
 /** Arms down from the T-pose the file is stored in, in radians. */
 const ARM_DOWN = 1.22;
@@ -85,6 +95,12 @@ export class VrmActor {
   /** The theme's motion factor (theme.ts): 1 is everything, 0 leaves only
    * the blink and the breathing. */
   private motion = 1;
+  /** The turn's phase, the glance's seconds left, and the head's tilt now
+   * (degrees). */
+  private phase: Phase = "idle";
+  private glance = 0;
+  private tilt = 0;
+  private crown: number | null = null;
   /** Each MToon material's own outline and rim, as the file has them:
    * every tint starts from these, so tints never compound. */
   private readonly authored = new WeakMap<Toon, Authored>();
@@ -128,6 +144,17 @@ export class VrmActor {
     return new VrmActor(vrm, random);
   }
 
+  /** How far the top of the model (his hair) is over his head bone, in
+   * metres, standing at rest: worked out once. */
+  get crownAboveHead(): number {
+    if (this.crown === null) {
+      const head = this.vrm.humanoid?.getRawBoneNode("head");
+      const top = this.bounds().top;
+      this.crown = head ? top - head.getWorldPosition(new THREE.Vector3()).y : 0;
+    }
+    return this.crown;
+  }
+
   /** The model's vertical extent in world units, feet to crown. */
   bounds(): { bottom: number; top: number } {
     this.vrm.scene.updateMatrixWorld(true);
@@ -159,10 +186,23 @@ export class VrmActor {
     return { ...this.eyes };
   }
 
+  /** Where the turn is. Thinking starts a glance up and away (GLANCE, for
+   * GLANCE_S) and tilts his head while it lasts. Listening, transcribing
+   * and speaking are kept, with no pose of their own yet (PRs 8 and 10). */
+  setPhase(p: Phase): void {
+    if (p === this.phase) return;
+    if (p === "thinking") this.glance = GLANCE_S;
+    this.phase = p;
+  }
+
+  get currentPhase(): Phase {
+    return this.phase;
+  }
+
   /** The theme's motion factor (0 to 1): it scales his sway, and at 0 he
-   * looks ahead whatever `setLook` says (plan 14: with no motion, only the
-   * blink and the breathing move). Neither the blink nor the breathing is
-   * ever scaled. */
+   * looks ahead whatever `setLook` says, with no glance or tilt (plan 14:
+   * with no motion, only the blink and the breathing move). Neither the
+   * blink nor the breathing is ever scaled. */
   setMotion(factor: number): void {
     this.motion = Math.min(1, Math.max(0, factor));
   }
@@ -212,21 +252,24 @@ export class VrmActor {
     }
   }
 
-  /** His eyes' place on a page `width` × `height` CSS pixels big, seen by
-   * `camera`: where a gaze toward the cursor starts. */
-  headScreen(camera: THREE.Camera, width: number, height: number): { x: number; y: number } {
+  /** The point `above` metres over his head bone (his eyes by default),
+   * on a page `width` × `height` CSS pixels big, seen by `camera`: where a
+   * gaze toward the cursor starts, and (higher) what the bubble points at. */
+  headScreen(camera: THREE.Camera, width: number, height: number, above = EYES_ABOVE_HEAD): { x: number; y: number } {
     const head = this.vrm.humanoid?.getRawBoneNode("head");
     if (!head) return { x: width / 2, y: height / 4 };
     const p = head.getWorldPosition(new THREE.Vector3());
-    p.y += EYES_ABOVE_HEAD;
+    p.y += above;
     p.project(camera);
     return { x: ((p.x + 1) / 2) * width, y: ((1 - p.y) / 2) * height };
   }
 
   /** Ease toward the aim: the eyes quickly, the head a share of the way and
-   * slower, on top of the breathing's nod. */
+   * slower, on top of the breathing's nod. A glance, while it lasts, is the
+   * aim; with no motion, ahead is. */
   private look(dt: number): void {
-    const aim = this.motion === 0 ? AHEAD : this.aim;
+    if (dt > 0) this.glance = Math.max(0, this.glance - dt);
+    const aim = this.motion === 0 ? AHEAD : this.glance > 0 ? GLANCE : this.aim;
     this.eyes.yaw = approach(this.eyes.yaw, aim.yaw, dt, EYE_TAU);
     this.eyes.pitch = approach(this.eyes.pitch, aim.pitch, dt, EYE_TAU);
     this.headTurn.yaw = approach(this.headTurn.yaw, aim.yaw * HEAD_SHARE_YAW, dt, HEAD_TAU);
@@ -238,6 +281,10 @@ export class VrmActor {
       // rig, so up is negative, times k.
       head.rotation.y = this.headTurn.yaw * RAD;
       head.rotation.x += -this.headTurn.pitch * RAD * this.k;
+      // The thinking tilt, a roll about Z, eased in and out.
+      const tilt = this.phase === "thinking" && this.motion > 0 ? THINK_TILT_DEG : 0;
+      this.tilt = approach(this.tilt, tilt, dt, TILT_TAU);
+      head.rotation.z = this.tilt * RAD * this.k;
     }
     this.placeLookTarget();
   }

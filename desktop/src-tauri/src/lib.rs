@@ -26,6 +26,7 @@ mod windows_ext;
 
 use std::fs::File;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
@@ -40,8 +41,10 @@ use settings::Settings;
 const MAX_VRM_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Fritz's first spot: the bottom-right of the primary work area, this many
-/// logical pixels in, and this big.
-const FIRST_SIZE: (f64, f64) = (300.0, 460.0);
+/// logical pixels in, and this big. The top 28% is room for his speech
+/// bubble (the page's `HEADROOM`), so he stands as tall as PR 2's 300×460
+/// framed him; a window opened with no place yet is built this size too.
+pub(crate) const FIRST_SIZE: (f64, f64) = (340.0, 640.0);
 const FIRST_MARGIN: f64 = 24.0;
 
 /// Sent to every window when a setting changes, with all of them.
@@ -51,6 +54,14 @@ pub const COMPANION_STATUS_EVENT: &str = "companion:status";
 /// Sent to the avatar's page to ask for its config again and connect anew:
 /// the token was saved, or the owner pressed Reconnect.
 pub const COMPANION_CONFIG_EVENT: &str = "companion:config";
+/// Sent to the avatar's page with `{text}`: a turn to ask the brain, from
+/// Settings › Brain's Ask (and PR 4's prompt window).
+pub const COMPANION_SAY_EVENT: &str = "companion:say";
+/// A debug build only: once the link is first online, ask the brain this,
+/// through the same path as Ask (a live check's turn with no click).
+pub const PRETEND_SAY_ENV: &str = "FRITZ_PRETEND_SAY";
+/// The pretend say is asked once a run.
+static PRETENDED: AtomicBool = AtomicBool::new(false);
 
 fn data_dir() -> PathBuf {
     settings::app_dir()
@@ -76,18 +87,31 @@ fn foreground_log_path(s: &Settings) -> Option<PathBuf> {
 /// The first placement, in physical pixels.
 fn first_rect() -> Option<OverlayRect> {
     let (work, dpi) = windows_ext::primary_work_area()?;
+    first_rect_in(work, dpi)
+}
+
+/// The first placement in work area `work` at `dpi`: `FIRST_SIZE` at its
+/// bottom right, `FIRST_MARGIN` in. On a work area too short (or narrow)
+/// for it, the window is made to fit rather than placed off its top: the
+/// top of his window is the bubble's room.
+fn first_rect_in(work: windows_ext::Bounds, dpi: u32) -> Option<OverlayRect> {
     let s = f64::from(dpi) / 96.0;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(clippy::cast_possible_truncation)]
     let (w, h, m) = (
-        (FIRST_SIZE.0 * s) as u32,
-        (FIRST_SIZE.1 * s) as u32,
+        (FIRST_SIZE.0 * s) as i32,
+        (FIRST_SIZE.1 * s) as i32,
         (FIRST_MARGIN * s) as i32,
     );
+    let (w, h) = (w.min(work.width() - 2 * m), h.min(work.height() - 2 * m));
+    let (width, height) = (u32::try_from(w).ok()?, u32::try_from(h).ok()?);
+    if width == 0 || height == 0 {
+        return None;
+    }
     Some(OverlayRect {
-        x: work.right - i32::try_from(w).ok()? - m,
-        y: work.bottom - i32::try_from(h).ok()? - m,
-        width: w,
-        height: h,
+        x: work.right - w - m,
+        y: work.bottom - h - m,
+        width,
+        height,
     })
 }
 
@@ -588,7 +612,46 @@ async fn companion_report(app: AppHandle, webview: tauri::Webview, report: serde
         }
     }
     let _ = app.emit(COMPANION_STATUS_EVENT, &s);
+    if s.link == companion::Link::Online && !PRETENDED.load(Ordering::SeqCst) {
+        let env = std::env::var(PRETEND_SAY_ENV).ok();
+        if let Some(text) = companion::pretend_say_text(cfg!(debug_assertions), env) {
+            PRETENDED.store(true, Ordering::SeqCst);
+            if let Err(e) = ask_the_brain(&app, &text, PRETEND_SAY_ENV) {
+                tracing::warn!("{PRETEND_SAY_ENV}: {e}");
+            }
+        }
+    }
     Ok(())
+}
+
+/// His window is gone, and the brain's session with it (his page held it):
+/// its last report is forgotten and every window told, so nothing is asked
+/// of a page that isn't there, nor of the next one before it is online.
+fn companion_page_gone(app: &AppHandle) {
+    companion::forget();
+    let _ = app.emit(COMPANION_STATUS_EVENT, companion::current(token_present()));
+}
+
+/// Ask the brain `text`, through the avatar's page (it holds the session):
+/// refused, with why, when there is nothing to ask, his window is closed or
+/// the link isn't online. Logs the length, never the text.
+fn ask_the_brain(app: &AppHandle, text: &str, from: &str) -> Result<(), String> {
+    let avatar = overlay_windows::status(app);
+    let open = avatar.open && avatar.phase != overlay_machine::PhaseName::Closing;
+    if let Some(why) = companion::say_refusal(text, &companion::current(token_present()), open) {
+        return Err(why.to_owned());
+    }
+    app.emit_to(OVERLAY_LABEL, COMPANION_SAY_EVENT, serde_json::json!({ "text": text }))
+        .map_err(|e| format!("Couldn't reach his window: {e}"))?;
+    tracing::info!("a turn asked from {from} ({} characters)", text.trim().chars().count());
+    Ok(())
+}
+
+/// A turn asked from a window (Settings › Brain's Ask): the avatar's page
+/// asks it, and his bubble shows the reply.
+#[tauri::command]
+async fn companion_say(app: AppHandle, text: String) -> Result<(), String> {
+    ask_the_brain(&app, &text, "Settings")
 }
 
 /// The link now, for a window that opens after the last report.
@@ -642,7 +705,8 @@ pub fn run() {
             companion_config,
             companion_report,
             companion_status,
-            companion_connect
+            companion_connect,
+            companion_say
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -683,6 +747,9 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() == OVERLAY_LABEL {
                 overlay_windows::on_window_event(window.app_handle(), event);
+                if matches!(event, WindowEvent::Destroyed) {
+                    companion_page_gone(window.app_handle());
+                }
             } else if hides_on_close(window.label()) {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
@@ -751,7 +818,9 @@ mod tests {
         assert_eq!(events["loaded"], super::LOADED_EVENT);
         assert_eq!(events["companionStatus"], super::COMPANION_STATUS_EVENT);
         assert_eq!(events["companionConfig"], super::COMPANION_CONFIG_EVENT);
-        assert_eq!(events.len(), 8, "an event with no Rust half: {events:?}");
+        assert_eq!(events["companionSay"], super::COMPANION_SAY_EVENT);
+        assert_eq!(events.len(), 9, "an event with no Rust half: {events:?}");
+        assert_eq!(fixture["debug"]["pretendSayEnv"], super::PRETEND_SAY_ENV);
     }
 
     /// `FRITZ_SHOW_SETTINGS=<section>` opens the control window there; any
@@ -1080,6 +1149,60 @@ mod tests {
             let first = body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap();
             assert_eq!(first, "from_the_avatar(webview.label())?;", "{name}");
         }
+    }
+
+    /// The pretend say is read only where the build says debug: the one
+    /// call passes `cfg!(debug_assertions)`, so a release build never asks.
+    #[test]
+    fn the_pretend_say_is_read_only_in_a_debug_build() {
+        let all = include_str!("lib.rs").replace("\r\n", "\n");
+        // The code, not these tests (which name the call too).
+        let src = &all[..all.find("#[cfg(test)]").unwrap()];
+        let calls: Vec<_> = src.match_indices("companion::pretend_say_text(").collect();
+        assert_eq!(calls.len(), 1, "one caller");
+        let call = &src[calls[0].0..];
+        assert!(call.starts_with("companion::pretend_say_text(cfg!(debug_assertions), "), "{}", &call[..80]);
+    }
+
+    /// The avatar window is built at the first size, which leaves the
+    /// bubble its room (the page's HEADROOM is 0.28: 640 × 0.72 ≈ 460).
+    #[test]
+    fn the_first_size_leaves_room_for_the_bubble() {
+        assert!((super::FIRST_SIZE.0 - 340.0).abs() < f64::EPSILON && (super::FIRST_SIZE.1 - 640.0).abs() < f64::EPSILON);
+        let src = include_str!("overlay_windows.rs");
+        assert!(src.contains(".inner_size(crate::FIRST_SIZE.0, crate::FIRST_SIZE.1)"), "build_window uses FIRST_SIZE");
+        let framing = include_str!("../../src/avatar/framing.ts");
+        assert!(framing.contains("export const HEADROOM = 0.28;"), "the page's headroom");
+        assert!((super::FIRST_SIZE.1 * (1.0 - 0.28) - 460.0_f64).abs() < 1.0);
+    }
+
+    /// He starts at FIRST_SIZE in the work area's bottom right; a work area
+    /// too short for it gets a shorter window, never one placed off its top
+    /// (where the bubble goes).
+    #[test]
+    fn he_first_stands_inside_the_work_area() {
+        use crate::windows_ext::Bounds;
+        let big = Bounds { left: 0, top: 0, right: 3840, bottom: 2400 };
+        let r = super::first_rect_in(big, 192).unwrap();
+        assert_eq!((r.x, r.y, r.width, r.height), (3840 - 680 - 48, 2400 - 1280 - 48, 680, 1280));
+        // 1366x768 at 125%, a 48-pixel taskbar: 800 pixels tall won't fit.
+        let short = Bounds { left: 0, top: 0, right: 1366, bottom: 720 };
+        let r = super::first_rect_in(short, 120).unwrap();
+        assert_eq!(r.y, 30, "a margin from the top, not above it");
+        assert_eq!(i64::from(r.y) + i64::from(r.height), 720 - 30);
+        assert_eq!(r.width, 425);
+        // A second monitor's work area, left of and above the primary's origin.
+        let off = Bounds { left: -1920, top: -200, right: 0, bottom: 880 };
+        let r = super::first_rect_in(off, 96).unwrap();
+        assert!(r.y >= off.top + 24 && r.x >= off.left + 24, "{r:?}");
+        assert!(super::first_rect_in(Bounds { left: 0, top: 0, right: 40, bottom: 40 }, 96).is_none());
+    }
+
+    /// The shell's limit on a turn's length is the protocol's.
+    #[test]
+    fn a_turns_length_is_the_protocols() {
+        let ts = include_str!("../../src/shared/protocol.ts");
+        assert!(ts.contains(&format!("export const SAY_MAX_CHARS = {};", crate::companion::SAY_MAX_CHARS)));
     }
 
     #[test]

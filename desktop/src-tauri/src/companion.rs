@@ -196,12 +196,52 @@ pub fn status_from(report: serde_json::Value) -> Result<CompanionStatus, String>
     })
 }
 
+/// The longest turn he can be asked, in characters once trimmed: the
+/// protocol's `SAY_MAX_CHARS` (held to protocol.ts by a test).
+pub const SAY_MAX_CHARS: usize = 8000;
+
+/// Why a turn can't be asked now, in words for whoever asked; `None` when
+/// it can. Trimmed as the page trims (Unicode's White_Space, which is
+/// `str::trim`'s). His window closed comes before the link: the page holds
+/// the session, and the last report outlives a window closed under it.
+pub fn say_refusal(text: &str, last: &CompanionStatus, avatar_open: bool) -> Option<&'static str> {
+    let t = text.trim();
+    if t.is_empty() {
+        return Some("There's nothing to ask.");
+    }
+    if t.chars().count() > SAY_MAX_CHARS {
+        return Some("That's more than he can be asked at once (8,000 characters at most).");
+    }
+    if !avatar_open {
+        return Some("His window is closed: show him first.");
+    }
+    if last.link != Link::Online {
+        return Some("He isn't connected to his brain just now.");
+    }
+    None
+}
+
+/// The text `FRITZ_PRETEND_SAY` asks for, in a debug build only (`debug`
+/// is `cfg!(debug_assertions)` at the one caller): a release build never
+/// reads it.
+pub fn pretend_say_text(debug: bool, env: Option<String>) -> Option<String> {
+    if !debug {
+        return None;
+    }
+    env.filter(|t| !t.trim().is_empty())
+}
+
 /// What the page last reported; `None` before its first report.
 static LAST: Mutex<Option<CompanionStatus>> = Mutex::new(None);
 
 /// Keep the page's report, returning the one it replaces.
 pub fn keep(s: CompanionStatus) -> Option<CompanionStatus> {
     LAST.lock().unwrap_or_else(|e| e.into_inner()).replace(s)
+}
+
+/// Forget the page's last report: his window, and its session, are gone.
+pub fn forget() {
+    LAST.lock().unwrap_or_else(|e| e.into_inner()).take();
 }
 
 /// The link now: the page's last report, or what it will be before one.
@@ -352,5 +392,49 @@ mod tests {
         assert_ne!(offline.headline(), CompanionStatus { reason: Some(Reason::Full), ..offline.clone() }.headline());
         assert_eq!(CompanionStatus::before_any_report(false).link, Link::Unconfigured);
         assert_eq!(CompanionStatus::before_any_report(true).link, Link::Connecting);
+    }
+
+    /// A turn is asked only with something to ask, his window open and the
+    /// link online; each refusal says which.
+    #[test]
+    fn a_turn_is_asked_only_when_he_can_answer() {
+        let online = CompanionStatus { link: Link::Online, ..CompanionStatus::before_any_report(true) };
+        assert_eq!(say_refusal("good evening", &online, true), None);
+        assert_eq!(say_refusal(&"x".repeat(SAY_MAX_CHARS), &online, true), None);
+        // Counted in characters, as the protocol counts them, once trimmed.
+        assert_eq!(say_refusal(&format!("  {}\u{85}", "😀".repeat(SAY_MAX_CHARS)), &online, true), None);
+        assert!(say_refusal(&"x".repeat(SAY_MAX_CHARS + 1), &online, true).unwrap().contains("8,000"));
+        for blank in ["", "   ", "\r\n\t", "\u{3000}\u{85}"] {
+            assert_eq!(say_refusal(blank, &online, true), Some("There's nothing to ask."), "{blank:?}");
+        }
+        assert!(say_refusal("hi", &online, false).unwrap().contains("window is closed"));
+        for link in [Link::Unconfigured, Link::Connecting, Link::Offline, Link::Refused] {
+            let s = CompanionStatus { link, ..online.clone() };
+            assert!(say_refusal("hi", &s, true).unwrap().contains("isn't connected"), "{link:?}");
+        }
+        // The window first: a report can outlive the window that made it.
+        assert!(say_refusal("hi", &CompanionStatus::before_any_report(true), false).unwrap().contains("window"));
+        assert_eq!(say_refusal("", &online, false), Some("There's nothing to ask."));
+    }
+
+    /// His window gone, its last report goes with it: an Ask then is
+    /// refused until a new page says it is online. (The one test that
+    /// touches the kept report.)
+    #[test]
+    fn a_closed_windows_report_is_forgotten() {
+        let online = CompanionStatus { link: Link::Online, ..CompanionStatus::before_any_report(true) };
+        keep(online.clone());
+        assert_eq!(current(true), online);
+        forget();
+        assert_eq!(current(true), CompanionStatus::before_any_report(true));
+        assert!(say_refusal("hi", &current(true), true).unwrap().contains("isn't connected"));
+    }
+
+    #[test]
+    fn the_pretend_say_is_a_debug_builds_only() {
+        assert_eq!(pretend_say_text(true, Some("good evening".into())).as_deref(), Some("good evening"));
+        assert_eq!(pretend_say_text(false, Some("good evening".into())), None);
+        assert_eq!(pretend_say_text(true, None), None);
+        assert_eq!(pretend_say_text(true, Some("  ".into())), None);
     }
 }

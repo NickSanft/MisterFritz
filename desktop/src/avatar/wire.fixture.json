@@ -10,7 +10,8 @@
     "reload": "avatar:reload",
     "loaded": "avatar:loaded",
     "companionStatus": "companion:status",
-    "companionConfig": "companion:config"
+    "companionConfig": "companion:config",
+    "companionSay": "companion:say"
   },
   "hotkeys": {
     "arrange": "avatar:arrange"
@@ -94,7 +95,8 @@
   },
   "debug": {
     "noReadyEnv": "FRITZ_PRETEND_AVATAR_NO_READY",
-    "noReadyGlobal": "__FRITZ_AVATAR_NO_READY__"
+    "noReadyGlobal": "__FRITZ_AVATAR_NO_READY__",
+    "pretendSayEnv": "FRITZ_PRETEND_SAY"
   },
   "commands": {
     "handshake": {
@@ -202,6 +204,10 @@
     "companionConnect": {
       "name": "companion_connect",
       "args": []
+    },
+    "companionSay": {
+      "name": "companion_say",
+      "args": ["text"]
     }
   },
   "cursorKeys": [

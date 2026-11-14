@@ -13,7 +13,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { STATUS_EVENT, parseStatus, type AvatarStatus } from "../avatar/status";
 import {
-  COMPANION_STATUS_EVENT, LOADED_EVENT, SETTINGS_EVENT, arrange, avatarModel, avatarStatus, companionConnect,
+  COMPANION_STATUS_EVENT, LOADED_EVENT, SETTINGS_EVENT, arrange, avatarModel, avatarStatus, companionConnect, companionSay,
   companionStatus, controlOpening, getSettings, getTokenPresent, openFolder, parseCompanionStatus, parseSettings,
   reloadModel, setParked, setSetting, setToken, type ControlSettings, type ModelInfo,
 } from "./api";
@@ -155,6 +155,7 @@ export function App(): JSX.Element {
           setUrl={(url) => set("brain.url", url, "change his brain's address")}
           saveToken={saveToken}
           reconnect={() => void attempt("reconnect", companionConnect)}
+          ask={(text) => attempt("ask him", () => companionSay(text))}
         />
 
         <Section id="fritz" sigil="butler" eyebrow="Fritz" title="Where he is" desc={here().line}>

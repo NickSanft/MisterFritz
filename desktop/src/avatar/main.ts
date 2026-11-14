@@ -8,9 +8,15 @@
  * - a transparent canvas, cleared to alpha 0, with premultiplied alpha;
  * - nothing on this page asks for focus. Input is only handled in Arrange,
  *   when the shell has made the window take clicks.
+ *
+ * The speech bubble over his head (BubbleView.ts) is drawn from the same
+ * tick: the turn it shows is state.ts's, moved on by the brain's frames and
+ * by `companion:say` (the shell's bridge: Settings › Brain's Ask now, the
+ * prompt window in PR 4).
  */
 import "../divora/tokens.css";
 import "../divora/fonts.css";
+import "./bubble.css";
 import * as THREE from "three";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -20,12 +26,15 @@ import { watchTheme } from "../divora/theme";
 import type { Theme } from "../shared/settings";
 import { tintFor } from "./tint";
 import { VRMUtils } from "@pixiv/three-vrm";
-import { frameSpan } from "./framing";
+import { HEADROOM, MARGIN, frameSpan } from "./framing";
 import { keyAction } from "./keys";
 import { POWER_EVENT, afterAsking, fetchDisplayOn, parseDisplay, shouldDraw } from "./run";
 import { AHEAD, CURSOR_EVENT, fetchCursor, gaze, parseCursor, type CursorFrame, type Gaze } from "./look";
 import { CompanionClient } from "../shared/companion";
-import { startCompanion } from "./companionLink";
+import { SAY_EVENT, parseSay, startCompanion } from "./companionLink";
+import { BubbleClock, anchorAbove, charCount, plainText } from "./bubble";
+import { createBubble } from "./BubbleView";
+import { INITIAL, cancelFirst, reduce, type TurnEvent, type TurnView } from "./state";
 import {
   NO_READY_GLOBAL,
   RELOAD_EVENT,
@@ -93,6 +102,46 @@ let motionFactor = 1;
 /** The device's one session with the brain (the control window has none:
  * it hears the link through the shell). */
 const companion = new CompanionClient();
+/** The turn the bubble shows, the bubble, and its clock (moved only by the
+ * tick, so it waits while he is parked). */
+let turn: TurnView = INITIAL;
+const bubble = createBubble(document);
+const bubbleClock = new BubbleClock();
+let wasOnline = false;
+
+/** Move the turn on, and the bubble with it: up for a new turn, held once
+ * it ends. */
+function apply(e: TurnEvent): void {
+  const was = turn;
+  turn = reduce(turn, e);
+  if (turn === was) return;
+  if (turn.turnId !== was.turnId) bubbleClock.show();
+  if (turn.ended && (!was.ended || turn.turnId !== was.turnId)) {
+    bubbleClock.end(charCount(plainText(turn.reply)) + charCount(turn.apology ?? ""));
+  }
+}
+
+/** Ask the brain: a turn still running is cancelled first (barge-in; the
+ * brain starts the new one once the old has stopped). */
+function ask(text: string): void {
+  const old = cancelFirst(turn);
+  if (old !== null) companion.cancel(old);
+  const id = companion.say(text);
+  if (id === null) {
+    console.warn("avatar: couldn't ask the brain (not online, or nothing to ask)");
+    return;
+  }
+  apply({ kind: "asked", turnId: id });
+}
+
+for (const type of ["state", "token", "progress", "done", "error"] as const) {
+  companion.on(type, (frame) => apply({ kind: "frame", frame }));
+}
+// The link lost mid-turn: the brain sends nothing more for it.
+companion.onLink((s) => {
+  if (wasOnline && s.link !== "online") apply({ kind: "lost" });
+  wasOnline = s.link === "online";
+});
 
 /** Tint `a` and set its motion from the theme (none heard yet: as he was). */
 function dress(a: VrmActor): void {
@@ -111,7 +160,7 @@ function fit(): void {
   camera.aspect = w / h;
   if (actor) {
     const { bottom, top } = actor.bounds();
-    const f = frameSpan(bottom, top, FOV);
+    const f = frameSpan(bottom, top, FOV, MARGIN, HEADROOM);
     camera.position.set(0, f.centerY, f.distance);
     camera.lookAt(0, f.centerY, 0);
   }
@@ -133,17 +182,34 @@ function watchPixelRatio(): void {
     }, { once: true });
 }
 
-/** Where the cursor says to look, from his eyes' place on the page now. */
+/** Where the cursor says to look, from his eyes' place on the page now,
+ * measured in the part of the window he stands in. */
 function lookFor(c: CursorFrame, a: VrmActor): Gaze {
   if (!c.active) return AHEAD;
   const view = { width: window.innerWidth, height: window.innerHeight };
-  return gaze(c, view, a.headScreen(camera, view.width, view.height));
+  return gaze(c, view, a.headScreen(camera, view.width, view.height), view.height * (1 - HEADROOM));
+}
+
+/** The bubble this frame: its clock moved on by the frame's time (held
+ * while the cursor is over his window), drawn over his head. */
+function paintBubble(dt: number): void {
+  const hovered = cursorFrame !== null && cursorFrame.active && cursorFrame.over;
+  const env = bubbleClock.tick(dt * 1000, hovered, motionFactor);
+  const view = { width: window.innerWidth, height: window.innerHeight };
+  const anchor = actor
+    ? actor.headScreen(camera, view.width, view.height, anchorAbove(actor.crownAboveHead))
+    : { x: view.width / 2, y: view.height * HEADROOM };
+  bubble.paint(turn, env, anchor, view);
 }
 
 const loop = new PacedLoop((dt) => {
-  if (actor && cursorFrame) actor.setLook(lookFor(cursorFrame, actor));
+  if (actor) {
+    actor.setPhase(turn.phase);
+    if (cursorFrame) actor.setLook(lookFor(cursorFrame, actor));
+  }
   actor?.update(dt);
   renderer.render(scene, camera);
+  paintBubble(dt);
   if (paintIn > 0 && --paintIn === 0) {
     paintIn = -1;
     void sendHandshake(instance, "painted");
@@ -285,7 +351,12 @@ async function main(): Promise<void> {
     await sendHandshake(instance, "ready");
   }
   // The brain, once the shell has the page: nothing it waits for stands
-  // between the page and its handshake.
+  // between the page and its handshake. Asked through the shell's bridge,
+  // listened for first, so no ask is lost to a connection made before it.
+  await listen<unknown>(SAY_EVENT, (e) => {
+    const text = parseSay(e.payload);
+    if (text !== null) ask(text);
+  });
   void startCompanion(companion);
   await listen(RELOAD_EVENT, () => void load());
   await load();

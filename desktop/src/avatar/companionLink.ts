@@ -23,6 +23,15 @@ export const CONFIG_CMD = "companion_config";
 export const REPORT_CMD = "companion_report";
 /** The token was saved, or Reconnect pressed: ask for the config again. */
 export const CONFIG_EVENT = "companion:config";
+/** The shell's bridge for a turn: `{text}` to say to the brain (Settings ›
+ * Brain's Ask; PR 4's prompt window). */
+export const SAY_EVENT = "companion:say";
+
+/** The text of a `companion:say`, or null when it isn't one. */
+export function parseSay(v: unknown): string | null {
+  const o = obj(v);
+  return o && typeof o.text === "string" ? o.text : null;
+}
 
 /** What `companion_config` answers: the token is null when there is none. */
 export interface ShellConfig {

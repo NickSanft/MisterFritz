@@ -28,7 +28,9 @@ describe("what the avatar page loads", () => {
     expect(code).toContain("src/avatar/main.ts");
     expect(code).toContain("src/divora/theme.ts");
     expect(code).toContain("src/shared/asking.ts");
-    expect(rel(r.css)).toEqual(["src/divora/fonts.css", "src/divora/tokens.css"]);
+    expect(code).toContain("src/shared/motion.ts");
+    expect(code).toContain("src/avatar/BubbleView.ts");
+    expect(rel(r.css)).toEqual(["src/avatar/bubble.css", "src/divora/fonts.css", "src/divora/tokens.css"]);
     expect(r.packages).toContain("three");
   });
 

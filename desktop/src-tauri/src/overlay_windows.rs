@@ -177,7 +177,7 @@ async fn build_window(
     let url = WebviewUrl::App(avatar_url(instance).into());
     let mut builder = WebviewWindowBuilder::new(app, OVERLAY_LABEL, url)
         .title(OVERLAY_TITLE)
-        .inner_size(300.0, 460.0)
+        .inner_size(crate::FIRST_SIZE.0, crate::FIRST_SIZE.1)
         .min_inner_size(120.0, 160.0)
         .transparent(true)
         .decorations(false)

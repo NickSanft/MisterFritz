@@ -172,7 +172,8 @@ input {
   gap: var(--s2);
 }
 
-.brain-url {
+.brain-url,
+.brain-ask {
   width: 280px;
 }
 

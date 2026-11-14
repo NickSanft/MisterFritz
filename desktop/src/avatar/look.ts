@@ -17,8 +17,9 @@ export const CURSOR_CMD = "cursor_now";
 /** How far he will look, in degrees. */
 export const MAX_YAW = 35;
 export const MAX_PITCH = 20;
-/** How far in front of the screen his eyes are, in window heights: the
- * cursor this far to the side of his head is 45° (so past the clamp). */
+/** How far in front of the screen his eyes are, in heights of the part of
+ * his window he stands in (`span`, below the bubble's headroom): the cursor
+ * this far to the side of his head is 45° (so past the clamp). */
 export const VIEW_DISTANCE = 1.2;
 /** The share of the turn his head takes; his eyes take the rest. The head's
  * is what shows on a model without eyes (the placeholder). */
@@ -77,16 +78,23 @@ const DEG = 180 / Math.PI;
 
 /**
  * The gaze toward the cursor `c`, for a page `view` CSS pixels big, from his
- * head at `head` (CSS pixels on the page). Ahead when there is nothing to
- * look at.
+ * head at `head` (CSS pixels on the page). `span` is the height he is framed
+ * in (CSS pixels; the whole page by default): distances are measured in it,
+ * so the room kept over his head for the bubble doesn't change his look.
+ * Ahead when there is nothing to look at.
  */
-export function gaze(c: CursorFrame, view: { width: number; height: number }, head: { x: number; y: number }): Gaze {
-  if (!c.active || c.width <= 0 || c.height <= 0 || view.width <= 0 || view.height <= 0) return AHEAD;
+export function gaze(
+  c: CursorFrame,
+  view: { width: number; height: number },
+  head: { x: number; y: number },
+  span = view.height,
+): Gaze {
+  if (!c.active || c.width <= 0 || c.height <= 0 || view.width <= 0 || view.height <= 0 || !(span > 0)) return AHEAD;
   // Physical to CSS pixels, by the window's own size: the page needn't know
   // which monitor's scale it is on.
   const x = (c.x * view.width) / c.width;
   const y = (c.y * view.height) / c.height;
-  const d = VIEW_DISTANCE * view.height;
+  const d = VIEW_DISTANCE * span;
   return {
     yaw: clamp(Math.atan2(x - head.x, d) * DEG, MAX_YAW),
     pitch: clamp(Math.atan2(head.y - y, d) * DEG, MAX_PITCH),

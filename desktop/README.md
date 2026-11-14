@@ -44,7 +44,7 @@ The tray's *Settings…* opens the control window: his brain (where it is,
 the token, and whether he is connected), show or hide him, arrange him, his
 eyes following the cursor, the theme, which model he wears (with its folder,
 and loading it again after you drop in a new export), his logs, and the
-foreground log. Closing it only hides it. The rest (the hotkeys,
+foreground log, and a question to ask him. Closing it only hides it. The rest (the hotkeys,
 `avatar.vrmPath`, `brain.clientId` and `brain.clientName`) is still set by
 editing `settings.json` with Fritz quit, until the sections for them land.
 
@@ -67,6 +67,29 @@ why and when. The protocol's TypeScript (`src/shared/protocol.ts` and its
 fixtures) is generated from the brain's `companion_protocol.py` by
 `python scripts/gen_protocol_ts.py` at the repository's root; the brain's
 pytest fails while they differ.
+
+## His speech bubble
+
+His replies show in a bubble over his head, on its own panel in the mood's
+`--surface-2` (it floats over whatever is on the desktop, so it never
+trusts the desktop behind it). Settings › Brain's *Ask him something* is
+how to ask him for now (the prompt window comes next): he glances up while
+he thinks, the reply streams in, a tool's notice shows as a smaller line,
+and the brain's last word on the reply replaces what streamed. It holds 6
+seconds, or longer for a long reply (50 ms a character, at most 30
+seconds), and longer while the cursor is over his window (only while his
+eyes follow the cursor: otherwise the app hears nothing of it), then
+fades. A turn that fails shows his apology; asking again while he answers
+stops the first reply. Pictures aren't shown in the bubble yet: it says
+how many came. With no motion, the bubble only fades in and out, and he
+doesn't glance or tilt. While he is hidden (the tray, the hotkey, or a
+fullscreen app on his monitor) the bubble waits, so a reply that came
+meanwhile is there to read when he is back.
+
+His window is 340×640 the first time (shorter on a screen that hasn't the
+room), the top 28% kept clear for the bubble (he stands as tall as he did in
+300×460). A window you arranged before keeps its size, so he looks smaller
+in it until you arrange him taller.
 
 ## Build
 
@@ -119,7 +142,9 @@ cargo test --locked --features custom-protocol --lib --manifest-path src-tauri/C
 
 `FRITZ_SHOW_SETTINGS` set to anything shows the control window at start, for
 a run nobody clicks; set to a section (`brain`, `appearance`, `model`, …) it
-opens there. Without a token it opens at Brain anyway.
+opens there. Without a token it opens at Brain anyway. In a debug build,
+`FRITZ_PRETEND_SAY` asks the brain its text once he first connects, as Ask
+would (a release build never reads it).
 
 ## The placeholder model
 

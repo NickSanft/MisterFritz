@@ -86,6 +86,8 @@ describe("the control window's wire", () => {
     expect(CMD.companionStatus).toBe(c.companionStatus.name);
     expect(c.companionStatus.args).toEqual([]);
     expect(CMD.companionConnect).toBe(c.companionConnect.name);
+    expect(CMD.companionSay).toBe(c.companionSay.name);
+    expect(Object.keys(args.companionSay("good evening"))).toEqual(c.companionSay.args);
     expect(c.companionConnect.args).toEqual([]);
     expect(Object.values(CMD)).not.toContain(c.companionConfig.name);
     expect(COMPANION_STATUS_EVENT).toBe(fixture.events.companionStatus);

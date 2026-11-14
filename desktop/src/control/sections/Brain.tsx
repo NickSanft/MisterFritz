@@ -1,8 +1,10 @@
 /**
- * Settings › Brain: where his brain is, the token he connects with, and
- * whether he is connected. The avatar's page holds the connection; this
- * window only hears of it (`companion:status`) and is never given the
- * token: what is typed is sent to the shell once, then cleared.
+ * Settings › Brain: where his brain is, the token he connects with, whether
+ * he is connected, and a question to try him with. The avatar's page holds
+ * the connection; this window only hears of it (`companion:status`) and is
+ * never given the token: what is typed is sent to the shell once, then
+ * cleared. An Ask goes the same way, through the shell to his page, and the
+ * reply shows in his bubble, not here.
  *
  * What it says comes from view.ts (`connectionLines`, `identityLine`).
  */
@@ -26,12 +28,17 @@ export interface BrainProps {
   saveToken(token: string): Promise<boolean>;
   /** Connect again with the saved token. */
   reconnect(): void;
+  /** Ask him something; whether the shell took it (if not, it says why). */
+  ask(text: string): Promise<boolean>;
 }
 
 export function Brain(props: BrainProps): JSX.Element {
   const [urlDraft, setUrlDraft] = createSignal<string | null>(null);
   const [token, setToken] = createSignal("");
   const [saving, setSaving] = createSignal(false);
+  const [question, setQuestion] = createSignal("");
+  const [asking, setAsking] = createSignal(false);
+  const [asked, setAsked] = createSignal(false);
 
   const url = () => props.url ?? "";
   const lines = () => connectionLines(props.link, props.avatar, props.tokenPresent, url());
@@ -65,6 +72,29 @@ export function Brain(props: BrainProps): JSX.Element {
       setSaving(false);
     }
   };
+
+  const online = () => props.link?.link === "online";
+  const askable = () => online() && question().trim() !== "" && !asking();
+  const ask = async () => {
+    if (!askable()) return;
+    setAsking(true);
+    try {
+      // Taken, the field clears and says where the answer is; refused, it
+      // stays, and the shell says why.
+      if (await props.ask(question())) {
+        setQuestion("");
+        setAsked(true);
+      }
+    } finally {
+      setAsking(false);
+    }
+  };
+  const askDesc = () =>
+    asked()
+      ? "He's answering on your desktop."
+      : online()
+        ? "Try him: his answer shows over his head."
+        : "Once he's connected, you can try him from here.";
 
   return (
     <Section
@@ -146,6 +176,33 @@ export function Brain(props: BrainProps): JSX.Element {
       <Show when={who()}>
         <Row title="Who he is to it" desc={who()!} />
       </Show>
+      <Row title="Ask him something" desc={askDesc()}>
+        <div class="row-line">
+          <input
+            type="text"
+            class="field brain-ask"
+            value={question()}
+            placeholder="Good evening"
+            aria-label="Ask him something"
+            spellcheck={true}
+            autocomplete="off"
+            disabled={!online()}
+            onInput={(e) => {
+              setQuestion(e.currentTarget.value);
+              setAsked(false);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void ask();
+              }
+            }}
+          />
+          <button type="button" class="btn btn-secondary" disabled={!askable()} onClick={() => void ask()}>
+            Ask
+          </button>
+        </div>
+      </Row>
     </Section>
   );
 }

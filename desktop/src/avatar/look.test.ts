@@ -48,6 +48,21 @@ describe("where he looks", () => {
     }
   });
 
+  /** The bubble's headroom: distances are in the height he is framed in, so
+   * the default (the whole page) is PR 2's look, and a window grown taller
+   * for the bubble, measured by his part of it, looks the same. */
+  it("measures distances in the height he stands in", () => {
+    const c = at(head.x + 120, head.y - 40);
+    expect(gaze(c, view, head, view.height)).toEqual(gaze(c, view, head));
+    const d = VIEW_DISTANCE * 300;
+    const g = gaze(at(head.x + d * Math.tan((20 * Math.PI) / 180), head.y), view, head, 300);
+    expect(g.yaw).toBeCloseTo(20, 6);
+    // A shorter span is nearer the screen: the same cursor is further round.
+    expect(Math.abs(gaze(c, view, head, 300).yaw)).toBeGreaterThan(Math.abs(gaze(c, view, head).yaw));
+    expect(gaze(c, view, head, 0)).toEqual(AHEAD);
+    expect(gaze(c, view, head, Number.NaN)).toEqual(AHEAD);
+  });
+
   it("ahead when there is nothing to look at", () => {
     expect(gaze({ ...at(10, 10), active: false }, view, head)).toEqual(AHEAD);
     expect(gaze({ ...at(10, 10), width: 0 }, view, head)).toEqual(AHEAD);

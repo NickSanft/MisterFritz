@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createSignal } from "solid-js";
 import { fireEvent, render } from "@solidjs/testing-library";
 import fixture from "../../avatar/wire.fixture.json";
 import { parseStatus, type AvatarStatus } from "../../avatar/status";
@@ -19,13 +20,16 @@ function mount(more: Partial<BrainProps> = {}) {
     setUrl: vi.fn(async () => true),
     saveToken: vi.fn(async () => true),
     reconnect: vi.fn(),
+    ask: vi.fn(async () => true),
     ...more,
   };
   const view = render(() => <Brain {...props} />);
   const address = () => view.getByLabelText("His brain's address") as HTMLInputElement;
   const token = () => view.getByLabelText("His token") as HTMLInputElement;
-  const button = () => view.getByRole("button") as HTMLButtonElement;
-  return { view, props, address, token, button };
+  const button = () => view.getByRole("button", { name: /connect/i }) as HTMLButtonElement;
+  const question = () => view.getByLabelText("Ask him something") as HTMLInputElement;
+  const askButton = () => view.getByRole("button", { name: "Ask" }) as HTMLButtonElement;
+  return { view, props, address, token, button, question, askButton };
 }
 
 const settle = () => new Promise((r) => setTimeout(r, 0));
@@ -144,6 +148,93 @@ describe("Settings › Brain", () => {
     expect(props.saveToken).not.toHaveBeenCalled();
     fireEvent.input(token(), { target: { value: "   " } });
     expect(button(), "blank is no token").toHaveTextContent("Reconnect");
+  });
+
+  it("asks him something while he's connected, then says where the answer is", async () => {
+    const { props, question, askButton, view } = mount();
+    expect(askButton()).toBeDisabled();
+    fireEvent.input(question(), { target: { value: "good evening" } });
+    expect(askButton()).toBeEnabled();
+    fireEvent.click(askButton());
+    await settle();
+    expect(props.ask).toHaveBeenCalledWith("good evening");
+    expect(question().value).toBe("");
+    expect(view.getByText("He's answering on your desktop.")).toBeInTheDocument();
+    // Typing again is a new question.
+    fireEvent.input(question(), { target: { value: "and the weather?" } });
+    expect(view.queryByText("He's answering on your desktop.")).toBeNull();
+    fireEvent.keyDown(question(), { key: "Enter" });
+    await settle();
+    expect(props.ask).toHaveBeenLastCalledWith("and the weather?");
+  });
+
+  it("keeps a question the shell refused", async () => {
+    const { question, askButton, view } = mount({ ask: vi.fn(async () => false) });
+    fireEvent.input(question(), { target: { value: "good evening" } });
+    fireEvent.click(askButton());
+    await settle();
+    expect(question().value).toBe("good evening");
+    expect(view.queryByText("He's answering on your desktop.")).toBeNull();
+  });
+
+  it("asks nothing blank, and nothing until he's connected", async () => {
+    const blank = mount();
+    fireEvent.input(blank.question(), { target: { value: "   " } });
+    expect(blank.askButton()).toBeDisabled();
+    fireEvent.keyDown(blank.question(), { key: "Enter" });
+    await settle();
+    expect(blank.props.ask).not.toHaveBeenCalled();
+    blank.view.unmount();
+    for (const name of ["offline", "refused", "connecting", "unconfigured"] as const) {
+      const away = mount({ link: link(name) });
+      expect(away.question(), name).toBeDisabled();
+      expect(away.askButton(), name).toBeDisabled();
+      expect(away.view.getByText("Once he's connected, you can try him from here.")).toBeInTheDocument();
+      away.view.unmount();
+    }
+    const unknown = mount({ link: null });
+    expect(unknown.question()).toBeDisabled();
+  });
+
+  /** A question typed while connected, then the link drops: it isn't sent
+   * into a session that isn't there. */
+  it("won't ask once the link has gone, even with a question typed", async () => {
+    const [now, setNow] = createSignal<LinkStatus>(link("online"));
+    const ask = vi.fn(async () => true);
+    const props: BrainProps = {
+      url: URL, avatar: SHOWN, tokenPresent: true, setUrl: vi.fn(async () => true), saveToken: vi.fn(async () => true),
+      reconnect: vi.fn(), ask, get link() { return now(); },
+    };
+    const view = render(() => <Brain {...props} />);
+    const question = view.getByLabelText("Ask him something") as HTMLInputElement;
+    const askButton = view.getByRole("button", { name: "Ask" }) as HTMLButtonElement;
+    fireEvent.input(question, { target: { value: "good evening" } });
+    expect(askButton).toBeEnabled();
+    setNow(link("offline"));
+    expect(askButton).toBeDisabled();
+    expect(question).toBeDisabled();
+    fireEvent.keyDown(question, { key: "Enter" });
+    fireEvent.click(askButton);
+    await settle();
+    expect(ask).not.toHaveBeenCalled();
+    setNow(link("online"));
+    expect(question.value, "kept for when he's back").toBe("good evening");
+    fireEvent.keyDown(question, { key: "Enter" });
+    await settle();
+    expect(ask).toHaveBeenCalledWith("good evening");
+  });
+
+  it("asks once at a time", async () => {
+    let answer: (ok: boolean) => void = () => {};
+    const ask = vi.fn(() => new Promise<boolean>((r) => (answer = r)));
+    const { question, askButton } = mount({ ask });
+    fireEvent.input(question(), { target: { value: "good evening" } });
+    fireEvent.click(askButton());
+    fireEvent.keyDown(question(), { key: "Enter" });
+    expect(askButton()).toBeDisabled();
+    answer(true);
+    await settle();
+    expect(ask).toHaveBeenCalledOnce();
   });
 
   it("waits for the settings before the address can be changed", () => {

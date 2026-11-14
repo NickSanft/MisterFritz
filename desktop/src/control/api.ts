@@ -22,6 +22,7 @@ export const CMD = {
   setToken: "set_token",
   companionStatus: "companion_status",
   companionConnect: "companion_connect",
+  companionSay: "companion_say",
 } as const;
 
 export { SETTINGS_EVENT };
@@ -141,6 +142,7 @@ export const args = {
   openFolder: (which: Folder) => ({ which }),
   mode: (mode: "arrange" | "locked") => ({ mode }),
   setToken: (token: string) => ({ token }),
+  companionSay: (text: string) => ({ text }),
 };
 
 export async function getSettings(): Promise<ControlSettings | null> {
@@ -199,4 +201,11 @@ export async function companionStatus(): Promise<LinkStatus | null> {
 /** Have the avatar's page connect again now. */
 export async function companionConnect(): Promise<void> {
   await invoke(CMD.companionConnect);
+}
+
+/** Ask the brain something, through his window: the reply shows in his
+ * bubble. The shell's refusal says why not (nothing to ask, his window
+ * closed, not connected). */
+export async function companionSay(text: string): Promise<void> {
+  await invoke(CMD.companionSay, args.companionSay(text));
 }

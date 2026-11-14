@@ -10,9 +10,11 @@ import {
   CONFIG_CMD,
   CONFIG_EVENT,
   REPORT_CMD,
+  SAY_EVENT,
   configArgs,
   configFrom,
   oneAtATime,
+  parseSay,
   parseShellConfig,
   reportArgs,
   startCompanion,
@@ -235,6 +237,16 @@ describe("the companion link's wire", () => {
     expect(Object.keys(reportArgs(status))).toEqual(c.companionReport.args);
     expect(Object.keys(reportArgs(status).report).sort()).toEqual(fixture.companionStatusKeys);
     expect(CONFIG_EVENT).toBe(fixture.events.companionConfig);
+    expect(SAY_EVENT).toBe(fixture.events.companionSay);
+  });
+
+  /** The shell's bridge for a turn: `{text}`, and nothing else is one. */
+  it("reads a say strictly", () => {
+    expect(parseSay({ text: "good evening" })).toBe("good evening");
+    expect(parseSay({ text: "" })).toBe("");
+    for (const bad of [null, "good evening", ["good evening"], {}, { text: 1 }, { words: "hi" }]) {
+      expect(parseSay(bad), JSON.stringify(bad)).toBeNull();
+    }
   });
 
   it("reads the config strictly", () => {

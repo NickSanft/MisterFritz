@@ -1,0 +1,112 @@
+/*
+ * The speech bubble over Fritz's head. Static: everything that moves (its
+ * place, opacity, scale and blur) is written by the paced loop's tick
+ * (BubbleView.ts), never by CSS (scripts/check-no-css-animation.mjs).
+ *
+ * Its panel is opaque --surface-2 in every mood: it floats over whatever is
+ * on the desktop, so the text is only ever read against the panel (plan 14,
+ * "AA contrast on the actual background"). Text is --text-hi, the secondary
+ * line --text-mid; both pass AA on --surface-2 in every mood and theme
+ * (bubble.test.ts), and the dimmer text tokens, which don't, are never used.
+ */
+.bubble {
+  position: fixed;
+  z-index: 1;
+  display: none;
+  flex-direction: column;
+  box-sizing: border-box;
+  /* Its own width, up to the max-width the page sets: never squeezed by
+     where it last stood. */
+  width: max-content;
+  min-width: 48px;
+  padding: var(--s3) var(--s4);
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-2);
+  color: var(--text-hi);
+  font: 400 var(--t-body) / 1.45 var(--font-ui);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  user-select: none;
+  transform-origin: var(--tail-x, 50%) 100%;
+}
+
+/* The tail, pointing down at his head. */
+.bubble::after {
+  content: "";
+  position: absolute;
+  left: calc(var(--tail-x, 50%) - 6px);
+  bottom: -7px;
+  width: 12px;
+  height: 12px;
+  box-sizing: border-box;
+  background: var(--surface-2);
+  border-right: 1px solid var(--line-strong);
+  border-bottom: 1px solid var(--line-strong);
+  transform: rotate(45deg);
+}
+.bubble.no-tail::after {
+  display: none;
+}
+
+/* Everything it says, in one column inside the panel: the newest at the
+   bottom, the oldest clipped at the top when it outgrows the room over his
+   head (so a long apology never spills past the panel). The fade at the top
+   never takes more than a third of what shows. */
+.bubble-clip {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  min-height: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+.bubble-clip.clipped {
+  mask-image: linear-gradient(to bottom, transparent 0, #000 min(2.2em, 33%));
+}
+.bubble-content {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.bubble-text {
+  display: none;
+}
+
+/* A tool at work, and the apology: a smaller line after an orb. */
+.bubble-progress,
+.bubble-apology {
+  display: none;
+  align-items: baseline;
+  gap: var(--s2);
+}
+.bubble-progress {
+  font: 500 var(--t-xs) / 1.4 var(--font-ui);
+  color: var(--text-mid);
+}
+.bubble-apology {
+  color: var(--text-hi);
+}
+.orb {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--indigo);
+  box-shadow: 0 0 6px var(--indigo);
+  transform: translateY(-1px);
+}
+.orb.warn {
+  background: var(--warning);
+  box-shadow: 0 0 6px var(--warning);
+}
+
+/* Interrupted, or pictures it can't show yet. */
+.bubble-note {
+  display: none;
+  font: 500 var(--t-xs) / 1.4 var(--font-ui);
+  color: var(--text-mid);
+}
