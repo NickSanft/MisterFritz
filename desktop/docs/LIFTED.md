@@ -19,7 +19,10 @@ not touched these files since.
 | `src/avatar/status.ts` | `src/overlay/status.ts` | Cut to the avatar's status and commands |
 | `src/avatar/wire.fixture.json` | `src/overlay/wire.fixture.json` | Cut to what the avatar keeps; `parked`, the commands and Fritz's events added |
 | `src/divora/tokens.css` | `src/styles.css`, lines 17-265 | Verbatim: the tokens, moods, accents, light theme and motion levels; `scripts/sync-divora-tokens.mjs` (`pnpm sync:divora`) checks it against the pinned commit |
-| `src/divora/components.css` | `src/styles.css`, lines 375-381 and 496-672 | `.eyebrow` (from Tailwind's `@layer utilities`, which comes after `components` in the cascade) and the buttons and the toggle (from `@layer components`), taken out of their layers; the control window only |
+| `src/divora/components.css` | `src/styles.css`, lines 375-381, 496-672, 1079-1121, 1319-1329 and 267-281 | `.eyebrow` (from Tailwind's `@layer utilities`, which comes after `components` in the cascade), the buttons, the toggle and the segmented control (from `@layer components`), taken out of their layers; the grain on the body, fixed to the window, above everything (z-index 100, not 60), with no vignette; the functional-motion switch verbatim; the control window only |
+| `src/divora/components/Toggle.tsx`, `Segmented.tsx`, `blurOnPointer.ts` and the two tests | `src/components/` | Verbatim |
+| `src/divora/sigils/Sigil.tsx` and its test | `src/components/Sigil.tsx`, `Sigil.test.tsx` | `github` removed (GitHub's own mark); Fritz's own glyphs (`butler`, `desk`, `calendar`, `inbox`, `weather`, `listening`, `thinking`, `speaking`) added in the same hand, with a test of their own |
+| `src/test-setup.ts` | `src/test-setup.ts` | Verbatim; vitest's "dom" project follows DivoraVoice's config (jsdom, the Solid plugin), without hot reload |
 
 Not lifted, but following DivoraVoice: `src/divora/theme.ts` maps `theme.motion` to a motion level as its `src/App.tsx` (lines 168-177) and `src/overlay.tsx` (lines 111-124) do; the rest of that file is Fritz's own.
 

@@ -73,6 +73,19 @@ button {
 .section {
   max-width: 680px;
   margin: 0 auto var(--s7);
+  /* Where FRITZ_SHOW_SETTINGS=<section> leaves it. */
+  scroll-margin-top: var(--s5);
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.section-sigil {
+  color: var(--indigo);
+  flex: none;
 }
 
 .section h2 {

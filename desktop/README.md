@@ -30,16 +30,19 @@ on the placeholder.
 
 Both windows wear `settings.theme`: the mood (`ink`, `dusk`, `midnight`),
 the accent (`brand`, `abyssal`, `ember`), dark or light, and the motion
-(0 to 1: functional, ambient, rich). He takes a tint from it, his outlines
-leaning toward the mood and a rim light in the accent. With no motion, or
-while Windows asks for less (its *Animation effects* switch) and
-`theme.motionUser` isn't set, he only blinks and breathes: no sway, and his
-eyes stay ahead.
+(0 to 1: functional, ambient, rich), set in Settings › Appearance or the
+tray's *Appearance* menu, and changed in both windows at once. He takes a
+tint from it, his outlines leaning toward the mood and a rim light in the
+accent. With no motion, or while Windows asks for less (its *Animation
+effects* switch) and *Keep his motion when Windows asks for less*
+(`theme.motionUser`) is off, he only blinks and breathes: no sway, and his
+eyes stay ahead. The parchment grain (`theme.grain`) is the control
+window's alone.
 
 The tray's *Settings…* opens the control window: show or hide him, arrange
-him, his eyes following the cursor, which model he wears (with its folder,
-and loading it again after you drop in a new export), his logs, and the
-foreground log. Closing it only hides it. The rest (the hotkeys,
+him, his eyes following the cursor, the theme, which model he wears (with
+its folder, and loading it again after you drop in a new export), his logs,
+and the foreground log. Closing it only hides it. The rest (the hotkeys,
 `avatar.vrmPath`) is still set by editing `settings.json` with Fritz quit,
 until the sections for them land.
 
@@ -88,9 +91,13 @@ takes another commit's tokens and pins it).
 ## Test
 
 ```powershell
-pnpm test:run                                                        # the page
+pnpm test:run                                                        # the pages ("node" and "dom" projects)
 cargo test --locked --features custom-protocol --lib --manifest-path src-tauri/Cargo.toml   # the shell
 ```
+
+`FRITZ_SHOW_SETTINGS` set to anything shows the control window at start, for
+a run nobody clicks; set to a section (`appearance`, `model`, …) it opens
+there.
 
 ## The placeholder model
 

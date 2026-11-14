@@ -217,19 +217,33 @@ async fn get_settings() -> Settings {
     settings::get()
 }
 
-/// Set one setting by its camelCase path; every window hears the result, in
-/// the order the changes were made.
+/// Set one setting by its camelCase path, from a window or the tray: every
+/// window hears the result, in the order the changes were made, and the
+/// tray's Appearance ticks follow a change to the theme (moved in place,
+/// never a rebuilt menu: see tray.rs).
+pub(crate) fn change_setting(
+    app: &AppHandle,
+    path: &str,
+    value: serde_json::Value,
+) -> Result<Settings, String> {
+    let after = settings::set(path, value, |after| {
+        let _ = app.emit(SETTINGS_EVENT, after);
+    })?;
+    tracing::info!(path, "setting changed");
+    if tray::follows(path) {
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || tray::retick(&handle));
+    }
+    Ok(after)
+}
+
 #[tauri::command]
 async fn set_setting(
     app: AppHandle,
     path: String,
     value: serde_json::Value,
 ) -> Result<Settings, String> {
-    let after = settings::set(&path, value, |after| {
-        let _ = app.emit(SETTINGS_EVENT, after);
-    })?;
-    tracing::info!(path, "setting changed");
-    Ok(after)
+    change_setting(&app, &path, value)
 }
 
 /// Whether the display is on: for a page that starts after the last
@@ -256,8 +270,26 @@ pub const CONTROL_LABEL: &str = "control";
 /// "Load it again", after the owner drops a new export in).
 pub const RELOAD_EVENT: &str = "avatar:reload";
 /// Shows the control window at start: for a test run, which can't click the
-/// tray.
+/// tray. Set to a section's name (`appearance`), it opens there.
 const SHOW_SETTINGS_ENV: &str = "FRITZ_SHOW_SETTINGS";
+/// The control window's sections, by the ids its page gives them, in order.
+pub const CONTROL_SECTIONS: [&str; 5] = ["fritz", "appearance", "model", "diagnostics", "about"];
+
+/// The section the control window opens at: the one `FRITZ_SHOW_SETTINGS`
+/// names, if it names one (any other value only shows the window).
+fn opening(env: Option<&str>) -> Option<&'static str> {
+    let want = env?.trim();
+    CONTROL_SECTIONS
+        .iter()
+        .copied()
+        .find(|s| s.eq_ignore_ascii_case(want))
+}
+
+/// Where the control window's page scrolls to once it has loaded.
+#[tauri::command]
+async fn control_opening() -> Option<&'static str> {
+    opening(std::env::var(SHOW_SETTINGS_ENV).ok().as_deref())
+}
 
 /// Show the control window and give it the keyboard (it is an ordinary
 /// window; only the avatar's must never take focus). By SetForegroundWindow,
@@ -496,7 +528,8 @@ pub fn run() {
             avatar_model,
             open_folder,
             reload_model,
-            avatar_loaded
+            avatar_loaded,
+            control_opening
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -599,6 +632,34 @@ mod tests {
         assert_eq!(events["reload"], super::RELOAD_EVENT);
         assert_eq!(events["loaded"], super::LOADED_EVENT);
         assert_eq!(events.len(), 6, "an event with no Rust half: {events:?}");
+    }
+
+    /// `FRITZ_SHOW_SETTINGS=<section>` opens the control window there; any
+    /// other value only shows it. The sections are the page's ids (the
+    /// fixture holds both sides to them).
+    #[test]
+    fn the_control_window_opens_where_it_is_told() {
+        use super::opening;
+        assert_eq!(opening(None), None);
+        assert_eq!(opening(Some("1")), None);
+        assert_eq!(opening(Some("")), None);
+        assert_eq!(opening(Some("appearance")), Some("appearance"));
+        assert_eq!(opening(Some(" Appearance ")), Some("appearance"));
+        assert_eq!(opening(Some("model")), Some("model"));
+        assert_eq!(opening(Some("appearances")), None);
+        assert_eq!(opening(Some("brain")), None, "not until the Brain section");
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../src/avatar/wire.fixture.json")).unwrap();
+        let want: Vec<&str> = fixture["controlSections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap())
+            .collect();
+        assert_eq!(super::CONTROL_SECTIONS.to_vec(), want);
+        for s in super::CONTROL_SECTIONS {
+            assert_eq!(opening(Some(s)), Some(s));
+        }
     }
 
     #[test]

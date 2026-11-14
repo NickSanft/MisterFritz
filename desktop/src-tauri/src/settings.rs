@@ -174,6 +174,28 @@ impl Default for Theme {
     }
 }
 
+/// What `theme.theme`, `theme.mood` and `theme.accent` may be: tokens.css's
+/// blocks, the pages' (src/shared/settings.ts) and the tray's choices.
+pub const THEMES: [&str; 2] = ["dark", "light"];
+pub const MOODS: [&str; 3] = ["ink", "dusk", "midnight"];
+pub const ACCENTS: [&str; 3] = ["brand", "abyssal", "ember"];
+
+/// The motion level `theme.motion` stands for, snapped as the pages snap it
+/// (src/divora/theme.ts's `motionLevel`, after DivoraVoice): none is
+/// functional, under 0.8 ambient, the rest rich. The tray ticks the level
+/// the setting stands for, as Settings › Appearance's Motion row does; while
+/// Windows asks for less motion and `motionUser` is off, the windows show
+/// functional whatever it is.
+pub fn motion_level(m: f32) -> &'static str {
+    if m.is_nan() || m <= 0.0 {
+        "functional"
+    } else if m < 0.8 {
+        "ambient"
+    } else {
+        "rich"
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Hotkeys {
@@ -293,9 +315,9 @@ pub fn repair(s: &mut Settings) -> Vec<String> {
         s.brain.client_id = d.brain.client_id.clone();
     }
     for (field, value, ok, default) in [
-        ("theme.theme", &mut s.theme.theme, &["dark", "light"][..], &d.theme.theme),
-        ("theme.mood", &mut s.theme.mood, &["ink", "dusk", "midnight"][..], &d.theme.mood),
-        ("theme.accent", &mut s.theme.accent, &["brand", "abyssal", "ember"][..], &d.theme.accent),
+        ("theme.theme", &mut s.theme.theme, &THEMES[..], &d.theme.theme),
+        ("theme.mood", &mut s.theme.mood, &MOODS[..], &d.theme.mood),
+        ("theme.accent", &mut s.theme.accent, &ACCENTS[..], &d.theme.accent),
     ] {
         if !ok.contains(&value.as_str()) {
             fixed.push(format!("{field} is {value:?}, not one of {ok:?}"));
@@ -753,6 +775,23 @@ mod tests {
                 assert_eq!(&got[k], v, "{k}");
             }
         }
+    }
+
+    /// The tray snaps `theme.motion` as the pages do: the fixture's rows,
+    /// which theme.test.ts reads too, and each level's own value.
+    #[test]
+    fn motion_snaps_as_the_pages_snap_it() {
+        let fixture: Value = serde_json::from_str(include_str!("../../src/avatar/wire.fixture.json")).unwrap();
+        let rows = fixture["motionSnap"].as_array().unwrap();
+        assert!(rows.len() >= 6);
+        for row in rows {
+            let m = row[0].as_f64().unwrap() as f32;
+            assert_eq!(motion_level(m), row[1].as_str().unwrap(), "{m}");
+        }
+        for (level, m) in fixture["motionLevels"].as_object().unwrap() {
+            assert_eq!(motion_level(m.as_f64().unwrap() as f32), level);
+        }
+        assert_eq!(motion_level(f32::NAN), "functional");
     }
 
     /// The file is camelCase, as the pages see it.

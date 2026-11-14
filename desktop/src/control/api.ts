@@ -16,6 +16,7 @@ export const CMD = {
   openFolder: "open_folder",
   reloadModel: "reload_model",
   mode: "set_avatar_mode",
+  controlOpening: "control_opening",
 } as const;
 
 export { SETTINGS_EVENT };
@@ -23,6 +24,15 @@ export { SETTINGS_EVENT };
 export const LOADED_EVENT = "avatar:loaded";
 
 export type Folder = "logs" | "avatar";
+
+/** The window's sections, by their ids, in order: what `control_opening`
+ * may answer (the shell's CONTROL_SECTIONS; the fixture holds both). */
+export const SECTIONS = ["fritz", "appearance", "model", "diagnostics", "about"] as const;
+export type SectionId = (typeof SECTIONS)[number];
+
+export function parseSection(v: unknown): SectionId | null {
+  return (SECTIONS as readonly unknown[]).includes(v) ? (v as SectionId) : null;
+}
 
 /** The settings the control window reads (the shell has more). */
 export interface ControlSettings {
@@ -127,6 +137,11 @@ export async function openFolder(which: Folder): Promise<void> {
 
 export async function reloadModel(): Promise<void> {
   await invoke(CMD.reloadModel);
+}
+
+/** The section to open at (`FRITZ_SHOW_SETTINGS=appearance`), if any. */
+export async function controlOpening(): Promise<SectionId | null> {
+  return parseSection(await invoke<unknown>(CMD.controlOpening));
 }
 
 export async function arrange(): Promise<void> {

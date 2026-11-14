@@ -168,6 +168,10 @@
         "wearing",
         "error"
       ]
+    },
+    "controlOpening": {
+      "name": "control_opening",
+      "args": []
     }
   },
   "cursorKeys": [
@@ -238,5 +242,12 @@
     [0.79, "ambient"],
     [0.8, "rich"],
     [1, "rich"]
+  ],
+  "controlSections": [
+    "fritz",
+    "appearance",
+    "model",
+    "diagnostics",
+    "about"
   ]
 }

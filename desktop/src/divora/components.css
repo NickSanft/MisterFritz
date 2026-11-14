@@ -1,7 +1,8 @@
 /* Lifted from DivoraVoiceMod (MIT, Copyright (c) 2026 Divora Contributors),
  * src/styles.css at 62ed6a5: .eyebrow (lines 375-381, from Tailwind's
- * utilities layer), the buttons and the
- * toggle switch (lines 496-672, from its components layer). See
+ * utilities layer), the buttons and the toggle switch (496-672) and the
+ * segmented control (1079-1121, from its components layer), the grain
+ * (1319-1329, adapted below) and the functional-motion switch (267-281). See
  * desktop/LICENSES/DivoraVoiceMod.txt. The control window only: the avatar
  * page draws nothing with CSS animation or transitions. */
 
@@ -189,4 +190,83 @@
 .toggle:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* ---------- Segmented ---------- */
+.seg {
+  display: inline-flex;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 3px;
+  gap: 2px;
+}
+
+.seg-btn {
+  font-size: var(--t-xs);
+  font-weight: 600;
+  padding: 5px 11px;
+  border-radius: 7px;
+  color: var(--text-mid);
+  transition: all 0.14s;
+}
+
+.seg-btn:hover {
+  color: var(--text-hi);
+}
+
+.seg-btn.is-on {
+  background: var(--surface-4);
+  color: var(--text-hi);
+  box-shadow: var(--shadow-1);
+}
+
+.seg-btn.is-on.is-accent {
+  background: var(--grad);
+  color: #fff;
+}
+
+/* v1.54.0: an option that can't be picked right now (its title says why). */
+.seg-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.seg-btn:disabled:not(.is-on):hover {
+  color: var(--text-mid);
+}
+
+/* ---------- Grain ---------- */
+/* styles.css 1319-1329's .grain::after, on the body and fixed to the
+   window rather than absolute in an app root, above everything (the
+   upstream z-index was 60 under its own modals). The vignette, its
+   neighbour, is not lifted: off in the house look. */
+body.grain::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 100;
+  opacity: var(--grain-opacity);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+  mix-blend-mode: var(--grain-blend);
+}
+
+/* ---------- Motion: functional ---------- */
+/* styles.css 267-281, verbatim: at the functional level (Settings or
+   Windows asking for less motion) the window's transitions go instant. */
+/* Phase 11.1: make Motion = functional actually quiet the whole app
+   (not just the Spell Circle). Decorative animations + most
+   transitions go effectively-instant. Spell-circle JS still has its
+   own `motion > 0` gating that prevents the orbit / particles from
+   doing any work at all; this rule covers things like the cast
+   reveal, hotkey-capture shimmer, and component hover transitions
+   that previously kept playing in functional mode. */
+:root[data-motion="functional"] *,
+:root[data-motion="functional"] *::before,
+:root[data-motion="functional"] *::after {
+  animation-duration: 0.001ms !important;
+  animation-delay: 0ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
 }

@@ -3,7 +3,9 @@ import fixture from "../avatar/wire.fixture.json";
 import {
   LOADED_CMD, RELOAD_EVENT, loadedArgs, parseStatus, vrmFetchError, type AvatarStatus,
 } from "../avatar/status";
-import { CMD, LOADED_EVENT, SETTINGS_EVENT, args, parseModelInfo, parseSettings, type ModelInfo } from "./api";
+import {
+  CMD, LOADED_EVENT, SECTIONS, SETTINGS_EVENT, args, parseModelInfo, parseSection, parseSettings, type ModelInfo,
+} from "./api";
 import { megabytes, modelLines, standing } from "./view";
 
 /** A status sample from the fixture, read as the page reads one. */
@@ -57,6 +59,16 @@ describe("the control window's wire", () => {
     expect(vrmFetchError("none")).toBeNull();
     expect(vrmFetchError("C:\\m\\fritz.vrm is larger than 268435456 bytes")).toContain("larger");
     expect(vrmFetchError(new Error("read failed"))).toBe("read failed");
+  });
+
+  /** FRITZ_SHOW_SETTINGS=<section>: the shell answers with one of the
+   * page's section ids, and anything else is no section. */
+  it("opens at a section the page has", () => {
+    expect(CMD.controlOpening).toBe(fixture.commands.controlOpening.name);
+    expect(fixture.commands.controlOpening.args).toEqual([]);
+    expect([...SECTIONS]).toEqual(fixture.controlSections);
+    for (const s of SECTIONS) expect(parseSection(s)).toBe(s);
+    for (const bad of [null, "", "Appearance", "brain", 1, {}]) expect(parseSection(bad)).toBeNull();
   });
 
   it("asks only for the folders the shell opens", () => {
