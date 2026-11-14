@@ -16,7 +16,7 @@ import {
   LOADED_EVENT, SETTINGS_EVENT, arrange, avatarModel, avatarStatus, getSettings, openFolder, parseSettings, reloadModel,
   setParked, setSetting, type ControlSettings, type ModelInfo,
 } from "./api";
-import { applyTheme } from "./theme";
+import { applyTheme, reducedMotion } from "../divora/theme";
 import { modelLines, standing } from "./view";
 
 function Toggle(props: { on: boolean; label: string; onChange: (on: boolean) => void; disabled?: boolean }): JSX.Element {
@@ -68,10 +68,11 @@ export function App(): JSX.Element {
   const [version, setVersion] = createSignal("");
   const [problem, setProblem] = createSignal<string | null>(null);
 
+  const reduced = reducedMotion();
   const took = (s: ControlSettings | null) => {
     if (!s) return;
     setSettings(s);
-    applyTheme(document.documentElement, s.theme);
+    applyTheme(document.documentElement, s.theme, reduced.now());
   };
   /** Run a command, showing what went wrong rather than nothing. */
   const attempt = async (what: string, act: () => Promise<unknown>) => {
@@ -92,6 +93,7 @@ export function App(): JSX.Element {
 
   const unlisten: Promise<UnlistenFn>[] = [];
   const onFocus = () => void refresh();
+  let offReduced = () => {};
   onMount(() => {
     unlisten.push(listen<unknown>(STATUS_EVENT, (e) => {
       const s = parseStatus(e.payload);
@@ -104,11 +106,17 @@ export function App(): JSX.Element {
     // The owner may have dropped a model in the folder since: look again
     // whenever the window comes forward.
     window.addEventListener("focus", onFocus);
+    // Windows asking for less motion (or no longer) changes the level.
+    offReduced = reduced.onChange(() => {
+      const s = settings();
+      if (s) applyTheme(document.documentElement, s.theme, reduced.now());
+    });
     void getVersion().then(setVersion, () => setVersion("?"));
     void refresh();
   });
   onCleanup(() => {
     window.removeEventListener("focus", onFocus);
+    offReduced();
     for (const u of unlisten) void u.then((f) => f());
   });
 

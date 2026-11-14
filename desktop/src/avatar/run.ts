@@ -26,13 +26,8 @@ export async function fetchDisplayOn(): Promise<boolean> {
   }
 }
 
-/** A state once the start-up question is answered (the display, the
- * cursor): the answer, unless an event arrived while it was being asked. A
- * reply isn't ordered against events, and any event is newer than the
- * question. */
-export function afterAsking<T>(answer: T, eventsBefore: number, eventsNow: number, current: T): T {
-  return eventsNow === eventsBefore ? answer : current;
-}
+/** Shared by every page now (src/shared/asking.ts). */
+export { afterAsking } from "../shared/asking";
 
 /** Whether the paced loop should be drawing. Not before the shell has said
  * anything, not while he is parked (hidden, or stepped aside for a

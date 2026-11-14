@@ -1,8 +1,11 @@
 /* Lifted from DivoraVoiceMod (MIT, Copyright (c) 2026 Divora Contributors),
- * src/styles.css lines 17-265 at 62ed6a5: the design tokens, the colour
- * moods and accents, the light theme and the motion levels. See
- * desktop/LICENSES/DivoraVoiceMod.txt. PR 3's theme.ts sets the attributes
- * these key on, and its sync script keeps this in step with the source. */
+ * src/styles.css lines 17-265
+ * at 62ed6a5ba37c4bafadb761d30cb92ecbc76e9c90:
+ * the design tokens, the colour moods and accents, the light theme and the
+ * motion levels. See desktop/LICENSES/DivoraVoiceMod.txt. theme.ts sets the
+ * attributes these key on; scripts/sync-divora-tokens.mjs checks this against
+ * the commit named above (the one place the pin is kept) and --write moves
+ * it. */
 
 :root {
   /* Surfaces (dusk-violet darks) */

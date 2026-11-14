@@ -5,10 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "pnpm lint:paced && tsc --noEmit && vite build",
+    "build": "pnpm lint:paced && pnpm lint:css-motion && tsc --noEmit && vite build && node scripts/check-no-css-animation.mjs --dist",
     "preview": "vite preview",
     "tauri": "tauri",
     "lint:paced": "node scripts/check-paced.mjs",
+    "lint:css-motion": "node scripts/check-no-css-animation.mjs",
+    "sync:divora": "node scripts/sync-divora-tokens.mjs",
     "placeholder": "python scripts/make_placeholder_vrm.py",
     "test": "vitest",
     "test:run": "vitest run"

@@ -15,7 +15,9 @@
  */
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import { VRMLoaderPlugin, VRMUtils, type VRM, type VRMHumanBoneName } from "@pixiv/three-vrm";
+import {
+  VRMExpressionMaterialColorBind, VRMLoaderPlugin, VRMUtils, type VRM, type VRMHumanBoneName,
+} from "@pixiv/three-vrm";
 import { AHEAD, EYE_TAU, HEAD_SHARE_PITCH, HEAD_SHARE_YAW, HEAD_TAU, approach, type Gaze } from "./look";
 
 const RAD = Math.PI / 180;
@@ -35,6 +37,36 @@ const BLINK_OPEN = 0.1;
 const ARM_DOWN = 1.22;
 const FOREARM_BEND = 0.12;
 
+/** How far `setTint` moves an outline from the model's own colour toward the
+ * theme's: a lean, not a repaint. */
+export const OUTLINE_MIX = 0.35;
+
+/** The rim's falloff the tint gives a model whose own rim is off: VRM 1.0's
+ * default, a light at the silhouette. A VRoid 0.x export leaves its rim black
+ * with a falloff of 1, which would spread the accent over half his body. */
+export const RIM_FRESNEL = 5;
+
+/** An MToon material (three-vrm's), as far as the tint reaches into it. */
+interface Toon {
+  isMToonMaterial: true;
+  outlineColorFactor: THREE.Color;
+  parametricRimColorFactor: THREE.Color;
+  parametricRimFresnelPowerFactor: number;
+  parametricRimLiftFactor: number;
+}
+
+/** What the model's file says, kept so every tint starts from it. */
+interface Authored {
+  outline: THREE.Color;
+  rim: THREE.Color;
+  fresnel: number;
+  lift: number;
+}
+
+function isToon(m: unknown): m is Toon {
+  return (m as Partial<Toon> | null)?.isMToonMaterial === true;
+}
+
 export class VrmActor {
   private t = 0;
   private nextBlink: number;
@@ -50,6 +82,18 @@ export class VrmActor {
    * head, in the direction of `eyes`. It is told the whole gaze; it works
    * out the eyes' part from where the head already points. */
   readonly lookTarget = new THREE.Object3D();
+  /** The theme's motion factor (theme.ts): 1 is everything, 0 leaves only
+   * the blink and the breathing. */
+  private motion = 1;
+  /** Each MToon material's own outline and rim, as the file has them:
+   * every tint starts from these, so tints never compound. */
+  private readonly authored = new WeakMap<Toon, Authored>();
+  /** The tint now, and the colours an expression owns: three-vrm puts those
+   * back to the file's every frame (its colour binds), so the tint is laid on
+   * them again after each update. */
+  private tint: { toward: THREE.Color; glow: THREE.Color } | null = null;
+  private boundRim = new Set<Toon>();
+  private boundOutline = new Set<Toon>();
 
   private constructor(
     readonly vrm: VRM,
@@ -98,6 +142,10 @@ export class VrmActor {
     this.look(dt);
     this.blink(dt);
     this.vrm.update(dt);
+    if (this.tint) {
+      for (const m of this.boundRim) m.parametricRimColorFactor.add(this.tint.glow);
+      for (const m of this.boundOutline) m.outlineColorFactor.lerp(this.tint.toward, OUTLINE_MIX);
+    }
   }
 
   /** Look this way (degrees; right and up positive, as the page sees it).
@@ -109,6 +157,59 @@ export class VrmActor {
   /** Where he looks now, on the way to the last `setLook`. */
   get gaze(): Gaze {
     return { ...this.eyes };
+  }
+
+  /** The theme's motion factor (0 to 1): it scales his sway, and at 0 he
+   * looks ahead whatever `setLook` says (plan 14: with no motion, only the
+   * blink and the breathing move). Neither the blink nor the breathing is
+   * ever scaled. */
+  setMotion(factor: number): void {
+    this.motion = Math.min(1, Math.max(0, factor));
+  }
+
+  /** Lean his MToon outlines toward `outline` and add `rim` (sRGB hex) to his
+   * rim light, `rimStrength` of it: always from the model's own colours, so
+   * a second tint replaces the first. Where the model's own rim is off
+   * (black), its falloff shows nothing, so the tint gives it a rim's
+   * (RIM_FRESNEL, no lift); a rim the model lights itself keeps its shape.
+   * Other materials are left alone. */
+  setTint(outline: string, rim: string, rimStrength: number): void {
+    const toward = new THREE.Color(outline);
+    const glow = new THREE.Color(rim).multiplyScalar(rimStrength);
+    this.tint = { toward, glow };
+    this.vrm.scene.traverse((o) => {
+      const material = (o as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
+      if (!material) return;
+      for (const m of Array.isArray(material) ? material : [material]) {
+        if (!isToon(m)) continue;
+        let own = this.authored.get(m);
+        if (!own) {
+          own = {
+            outline: m.outlineColorFactor.clone(),
+            rim: m.parametricRimColorFactor.clone(),
+            fresnel: m.parametricRimFresnelPowerFactor,
+            lift: m.parametricRimLiftFactor,
+          };
+          this.authored.set(m, own);
+        }
+        m.outlineColorFactor.copy(own.outline).lerp(toward, OUTLINE_MIX);
+        m.parametricRimColorFactor.copy(own.rim).add(glow);
+        const off = own.rim.r === 0 && own.rim.g === 0 && own.rim.b === 0;
+        m.parametricRimFresnelPowerFactor = off ? Math.max(own.fresnel, RIM_FRESNEL) : own.fresnel;
+        m.parametricRimLiftFactor = off ? 0 : own.lift;
+      }
+    });
+    // The colours an expression owns, looked for now (not at load), so an
+    // expression registered since is seen.
+    this.boundRim = new Set();
+    this.boundOutline = new Set();
+    for (const e of this.vrm.expressionManager?.expressions ?? []) {
+      for (const b of e.binds) {
+        if (!(b instanceof VRMExpressionMaterialColorBind) || !isToon(b.material)) continue;
+        if (b.type === "rimColor") this.boundRim.add(b.material);
+        else if (b.type === "outlineColor") this.boundOutline.add(b.material);
+      }
+    }
   }
 
   /** His eyes' place on a page `width` × `height` CSS pixels big, seen by
@@ -125,10 +226,11 @@ export class VrmActor {
   /** Ease toward the aim: the eyes quickly, the head a share of the way and
    * slower, on top of the breathing's nod. */
   private look(dt: number): void {
-    this.eyes.yaw = approach(this.eyes.yaw, this.aim.yaw, dt, EYE_TAU);
-    this.eyes.pitch = approach(this.eyes.pitch, this.aim.pitch, dt, EYE_TAU);
-    this.headTurn.yaw = approach(this.headTurn.yaw, this.aim.yaw * HEAD_SHARE_YAW, dt, HEAD_TAU);
-    this.headTurn.pitch = approach(this.headTurn.pitch, this.aim.pitch * HEAD_SHARE_PITCH, dt, HEAD_TAU);
+    const aim = this.motion === 0 ? AHEAD : this.aim;
+    this.eyes.yaw = approach(this.eyes.yaw, aim.yaw, dt, EYE_TAU);
+    this.eyes.pitch = approach(this.eyes.pitch, aim.pitch, dt, EYE_TAU);
+    this.headTurn.yaw = approach(this.headTurn.yaw, aim.yaw * HEAD_SHARE_YAW, dt, HEAD_TAU);
+    this.headTurn.pitch = approach(this.headTurn.pitch, aim.pitch * HEAD_SHARE_PITCH, dt, HEAD_TAU);
     const head = this.bone("head");
     if (head) {
       // Facing +Z, turning about Y toward +X turns him to the page's right,
@@ -187,7 +289,7 @@ export class VrmActor {
     if (left) left.rotation.z = 0.015 * s * k;
     if (right) right.rotation.z = -0.015 * s * k;
     const hips = this.bone("hips");
-    if (hips) hips.rotation.y = 0.02 * Math.sin(this.t * 0.31);
+    if (hips) hips.rotation.y = 0.02 * Math.sin(this.t * 0.31) * this.motion;
     const head = this.bone("head");
     if (head) head.rotation.x = 0.01 * Math.sin(this.t * 0.47 + 1) * k;
   }

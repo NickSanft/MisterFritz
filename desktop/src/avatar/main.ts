@@ -3,16 +3,22 @@
  * in it, drawn by the paced loop, answering the shell's handshake.
  *
  * The rules the spike exists to test, kept here so they stay true:
- * - no requestAnimationFrame and no CSS animation (scripts/check-paced.mjs);
+ * - no requestAnimationFrame and no CSS animation, in anything this page
+ *   loads (scripts/check-paced.mjs, scripts/check-no-css-animation.mjs);
  * - a transparent canvas, cleared to alpha 0, with premultiplied alpha;
  * - nothing on this page asks for focus. Input is only handled in Arrange,
  *   when the shell has made the window take clicks.
  */
+import "../divora/tokens.css";
+import "../divora/fonts.css";
 import * as THREE from "three";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { PacedLoop } from "./PacedLoop";
 import { VrmActor } from "./VrmActor";
+import { watchTheme } from "../divora/theme";
+import type { Theme } from "../shared/settings";
+import { tintFor } from "./tint";
 import { VRMUtils } from "@pixiv/three-vrm";
 import { frameSpan } from "./framing";
 import { keyAction } from "./keys";
@@ -78,6 +84,19 @@ let cursorFrame: CursorFrame | null = null;
 let cursorEvents = 0;
 let paintIn = -1; // frames until the painted handshake; -1 = not due
 let lastBeat = 0;
+/** The owner's theme, once heard, and the motion it allows: kept, so a model
+ * loaded later is tinted and paced the same. */
+let theme: Theme | null = null;
+let motionFactor = 1;
+
+/** Tint `a` and set its motion from the theme (none heard yet: as he was). */
+function dress(a: VrmActor): void {
+  a.setMotion(motionFactor);
+  if (theme) {
+    const t = tintFor(theme);
+    a.setTint(t.outline, t.rim, t.rimStrength);
+  }
+}
 
 function fit(): void {
   if (renderer.getPixelRatio() !== pixelRatio()) renderer.setPixelRatio(pixelRatio());
@@ -184,6 +203,7 @@ async function loadActor(): Promise<void> {
     VRMUtils.deepDispose(old.vrm.scene);
   }
   actor = next;
+  dress(next);
   scene.add(next.vrm.scene);
   fit();
   await reportLoaded(wearing, error);
@@ -236,6 +256,14 @@ async function main(): Promise<void> {
     if (!c) return;
     cursorEvents += 1;
     cursorFrame = c;
+  });
+  // The theme: the page's tokens (for what it draws in HTML) and his tint
+  // and motion. Listening is awaited; the answer to the question isn't, so
+  // nothing new stands between the page and its ready handshake.
+  await watchTheme(document.documentElement, (t, motion) => {
+    theme = t;
+    motionFactor = motion.factor;
+    if (actor) dress(actor);
   });
   // Where it is now: a cursor that hasn't moved since he opened sends
   // nothing, and an event before this page listened was lost.

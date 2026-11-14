@@ -732,6 +732,29 @@ mod tests {
         validate(&s).unwrap();
     }
 
+    /// The pages read the theme with these defaults in mind (theme.ts,
+    /// settings.ts): the fixture holds both sides to them. `motion` is an
+    /// f32, so it is compared as near as an f32 holds 0.6.
+    #[test]
+    fn the_theme_defaults_are_the_fixtures() {
+        let fixture: Value = serde_json::from_str(include_str!("../../src/avatar/wire.fixture.json")).unwrap();
+        let want = fixture["themeDefaults"].as_object().unwrap();
+        let got = serde_json::to_value(Theme::default()).unwrap();
+        let got = got.as_object().unwrap();
+        let mut keys: Vec<&String> = got.keys().collect();
+        keys.sort();
+        let mut wanted: Vec<&String> = want.keys().collect();
+        wanted.sort();
+        assert_eq!(keys, wanted);
+        for (k, v) in want {
+            if k == "motion" {
+                assert!((got[k].as_f64().unwrap() - v.as_f64().unwrap()).abs() < 1e-6, "{k}");
+            } else {
+                assert_eq!(&got[k], v, "{k}");
+            }
+        }
+    }
+
     /// The file is camelCase, as the pages see it.
     #[test]
     fn the_file_is_camel_case() {

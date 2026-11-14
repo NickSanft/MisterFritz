@@ -28,6 +28,14 @@ The hotkeys are `hotkeys.arrange` (Ctrl+Alt+A) and `hotkeys.park`
 turn, and on any model his head turns part of the way, which is what shows
 on the placeholder.
 
+Both windows wear `settings.theme`: the mood (`ink`, `dusk`, `midnight`),
+the accent (`brand`, `abyssal`, `ember`), dark or light, and the motion
+(0 to 1: functional, ambient, rich). He takes a tint from it, his outlines
+leaning toward the mood and a rim light in the accent. With no motion, or
+while Windows asks for less (its *Animation effects* switch) and
+`theme.motionUser` isn't set, he only blinks and breathes: no sway, and his
+eyes stay ahead.
+
 The tray's *Settings…* opens the control window: show or hide him, arrange
 him, his eyes following the cursor, which model he wears (with its folder,
 and loading it again after you drop in a new export), his logs, and the
@@ -42,7 +50,7 @@ Studio C++ Build Tools. From `desktop/`:
 
 ```powershell
 pnpm install
-pnpm build                                     # checks, type-checks and bundles the page into dist/
+pnpm build                                     # checks, type-checks and bundles the pages into dist/
 cargo build --release --locked --features custom-protocol --manifest-path src-tauri/Cargo.toml
 ```
 
@@ -63,6 +71,19 @@ The app is `src-tauri/target/release/mister-fritz-desktop.exe`.
   module on some machines, so `pnpm tauri build` fails with "An Application
   Control policy has blocked this file". The two commands above are what it
   runs, minus the installer, and need no CLI.
+
+`pnpm build` refuses an avatar page that could animate outside its paced
+loop. `scripts/check-paced.mjs` reads our own modules `avatar.html` reaches
+(`scripts/reach.mjs` follows the imports; packages are listed, not read) for
+requestAnimationFrame, setAnimationLoop, the Web Animations API and motion
+set from code. `scripts/check-no-css-animation.mjs` reads every stylesheet
+the page reaches for @keyframes, animation, transition and smooth
+scrolling, then, after `vite build`, the built page's stylesheets, packages'
+included; a built page it refuses is removed, so the cargo build that
+follows stops rather than embed it. `pnpm sync:divora` compares
+`src/divora/tokens.css` with DivoraVoice's tokens at the commit its header
+pins (it reads GitHub, so it isn't part of the build; `--sha <sha> --write`
+takes another commit's tokens and pins it).
 
 ## Test
 

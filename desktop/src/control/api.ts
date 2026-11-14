@@ -5,6 +5,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { parseStatus, type AvatarStatus } from "../avatar/status";
+import { SETTINGS_EVENT, parseTheme, type Theme } from "../shared/settings";
 
 export const CMD = {
   getSettings: "get_settings",
@@ -17,7 +18,7 @@ export const CMD = {
   mode: "set_avatar_mode",
 } as const;
 
-export const SETTINGS_EVENT = "settings:changed";
+export { SETTINGS_EVENT };
 /** The avatar's page has loaded a model: ask `avatar_model` again. */
 export const LOADED_EVENT = "avatar:loaded";
 
@@ -28,7 +29,7 @@ export interface ControlSettings {
   avatar: { lookatCursor: boolean; vrmPath: string | null };
   hotkeys: { arrange: string; park: string };
   diagnostics: { foregroundLog: boolean };
-  theme: { theme: string; mood: string; accent: string };
+  theme: Theme;
 }
 
 export interface ModelInfo {
@@ -56,18 +57,17 @@ export function parseSettings(v: unknown): ControlSettings | null {
   const avatar = obj(o?.avatar);
   const hotkeys = obj(o?.hotkeys);
   const diagnostics = obj(o?.diagnostics);
-  const theme = obj(o?.theme);
+  const theme = parseTheme(o?.theme);
   if (!avatar || !hotkeys || !diagnostics || !theme) return null;
   if (typeof avatar.lookatCursor !== "boolean") return null;
   if (avatar.vrmPath !== null && typeof avatar.vrmPath !== "string") return null;
   if (typeof hotkeys.arrange !== "string" || typeof hotkeys.park !== "string") return null;
   if (typeof diagnostics.foregroundLog !== "boolean") return null;
-  for (const k of ["theme", "mood", "accent"]) if (typeof theme[k] !== "string") return null;
   return {
     avatar: { lookatCursor: avatar.lookatCursor, vrmPath: avatar.vrmPath as string | null },
     hotkeys: { arrange: hotkeys.arrange, park: hotkeys.park },
     diagnostics: { foregroundLog: diagnostics.foregroundLog },
-    theme: { theme: theme.theme as string, mood: theme.mood as string, accent: theme.accent as string },
+    theme,
   };
 }
 

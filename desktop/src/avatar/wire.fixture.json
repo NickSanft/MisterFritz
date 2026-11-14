@@ -217,5 +217,26 @@
   "folders": [
     "avatar",
     "logs"
+  ],
+  "themeDefaults": {
+    "theme": "dark",
+    "mood": "ink",
+    "accent": "brand",
+    "motion": 0.6,
+    "grain": true,
+    "motionUser": false
+  },
+  "motionLevels": {
+    "functional": 0,
+    "ambient": 0.6,
+    "rich": 1
+  },
+  "motionSnap": [
+    [0, "functional"],
+    [0.01, "ambient"],
+    [0.6, "ambient"],
+    [0.79, "ambient"],
+    [0.8, "rich"],
+    [1, "rich"]
   ]
 }

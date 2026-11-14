@@ -4,7 +4,6 @@ import {
   LOADED_CMD, RELOAD_EVENT, loadedArgs, parseStatus, vrmFetchError, type AvatarStatus,
 } from "../avatar/status";
 import { CMD, LOADED_EVENT, SETTINGS_EVENT, args, parseModelInfo, parseSettings, type ModelInfo } from "./api";
-import { applyTheme, themeAttributes } from "./theme";
 import { megabytes, modelLines, standing } from "./view";
 
 /** A status sample from the fixture, read as the page reads one. */
@@ -77,7 +76,7 @@ describe("the control window's wire", () => {
       avatar: { lookatCursor: true, vrmPath: null },
       hotkeys: { arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" },
       diagnostics: { foregroundLog: false },
-      theme: { theme: "dark", mood: "ink", accent: "brand" },
+      theme: { theme: "dark", mood: "ink", accent: "brand", motion: 0.6, grain: true, motionUser: false },
     });
     expect(parseSettings({ ...settings, avatar: { ...settings.avatar, vrmPath: "D:/m/fritz.vrm" } })?.avatar.vrmPath)
       .toBe("D:/m/fritz.vrm");
@@ -87,6 +86,7 @@ describe("the control window's wire", () => {
     expect(parseSettings({ ...settings, hotkeys: { ...settings.hotkeys, park: null } })).toBeNull();
     expect(parseSettings({ ...settings, diagnostics: {} })).toBeNull();
     expect(parseSettings({ ...settings, theme: { ...settings.theme, mood: 1 } })).toBeNull();
+    expect(parseSettings({ ...settings, theme: { ...settings.theme, mood: "violet" } })).toBeNull();
     const { avatar: _, ...noAvatar } = settings;
     expect(parseSettings(noAvatar)).toBeNull();
   });
@@ -173,21 +173,5 @@ describe("what the control window says", () => {
     const big = modelLines({ ...info, bytes: 300 * 1024 * 1024, tooBig: true, changed: true });
     expect(big.title).toBe("Your model is too large to load");
     expect(big.detail).not.toContain("placeholder");
-  });
-
-  it("the look the settings ask for", () => {
-    expect(themeAttributes({ theme: "dark", mood: "ink", accent: "brand" }))
-      .toEqual({ "data-theme": null, "data-mood": "ink", "data-accent": null });
-    expect(themeAttributes({ theme: "light", mood: "dusk", accent: "ember" }))
-      .toEqual({ "data-theme": "light", "data-mood": null, "data-accent": "ember" });
-    expect(themeAttributes({ theme: "dark", mood: "midnight", accent: "abyssal" }))
-      .toEqual({ "data-theme": null, "data-mood": "midnight", "data-accent": "abyssal" });
-    const attrs = new Map<string, string>([["data-accent", "ember"]]);
-    const root = {
-      setAttribute: (n: string, v: string) => void attrs.set(n, v),
-      removeAttribute: (n: string) => void attrs.delete(n),
-    } as unknown as HTMLElement;
-    applyTheme(root, { theme: "dark", mood: "ink", accent: "brand" });
-    expect([...attrs.entries()]).toEqual([["data-mood", "ink"]]);
   });
 });

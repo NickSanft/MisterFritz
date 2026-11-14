@@ -18,8 +18,25 @@ not touched these files since.
 | `src-tauri/src/windows_ext.rs` (part) | `divora-capture/src/native/window.rs` | `foreground_window`, `try_foreground`, `can_take_foreground`, `make_layered_opaque`; the rest of the file is Fritz's own or follows Lorraine (below) |
 | `src/avatar/status.ts` | `src/overlay/status.ts` | Cut to the avatar's status and commands |
 | `src/avatar/wire.fixture.json` | `src/overlay/wire.fixture.json` | Cut to what the avatar keeps; `parked`, the commands and Fritz's events added |
-| `src/divora/tokens.css` | `src/styles.css`, lines 17-265 | Verbatim: the tokens, moods, accents, light theme and motion levels (PR 3's sync script keeps it in step) |
+| `src/divora/tokens.css` | `src/styles.css`, lines 17-265 | Verbatim: the tokens, moods, accents, light theme and motion levels; `scripts/sync-divora-tokens.mjs` (`pnpm sync:divora`) checks it against the pinned commit |
 | `src/divora/components.css` | `src/styles.css`, lines 375-381 and 496-672 | `.eyebrow` (from Tailwind's `@layer utilities`, which comes after `components` in the cascade) and the buttons and the toggle (from `@layer components`), taken out of their layers; the control window only |
+
+Not lifted, but following DivoraVoice: `src/divora/theme.ts` maps `theme.motion` to a motion level as its `src/App.tsx` (lines 168-177) and `src/overlay.tsx` (lines 111-124) do; the rest of that file is Fritz's own.
+
+## The fonts (SIL Open Font License 1.1)
+
+DivoraVoice loads its faces from Fontsource packages; the body self-hosts the
+same files, at the versions DivoraVoice's lockfile pins, each package's
+sha512 checked against it. Only the latin subset is kept.
+
+| Here | From | Licence |
+|---|---|---|
+| `src/divora/fonts/bricolage-grotesque-latin-wght-normal.woff2` | `@fontsource-variable/bricolage-grotesque` 5.2.10, `files/` | [../LICENSES/BricolageGrotesque-OFL.txt](../LICENSES/BricolageGrotesque-OFL.txt) |
+| `src/divora/fonts/space-grotesk-latin-wght-normal.woff2` | `@fontsource-variable/space-grotesk` 5.2.10, `files/` | [../LICENSES/SpaceGrotesk-OFL.txt](../LICENSES/SpaceGrotesk-OFL.txt) |
+| `src/divora/fonts/space-mono-latin-{400,700}-normal.woff2` | `@fontsource/space-mono` 5.2.9, `files/` | [../LICENSES/SpaceMono-OFL.txt](../LICENSES/SpaceMono-OFL.txt) |
+
+`src/divora/fonts.css` holds those packages' latin `@font-face` rules, with
+the family names tokens.css expects.
 
 ## LorraineAtelier (the owner's own app, private)
 
