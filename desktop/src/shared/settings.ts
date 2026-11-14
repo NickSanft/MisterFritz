@@ -35,6 +35,23 @@ function obj(v: unknown): Record<string, unknown> | null {
   return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
 }
 
+/** `settings.brain`: where the brain is, and who this desk is to it. The
+ * shell checks each when it is set (a ws:// or wss:// URL; the protocol's
+ * client id; a name of 1 to 64 characters). */
+export interface Brain {
+  url: string;
+  clientId: string;
+  clientName: string;
+}
+
+/** `settings.brain` from the wire, or null when it isn't one. */
+export function parseBrain(v: unknown): Brain | null {
+  const b = obj(v);
+  if (!b) return null;
+  if (typeof b.url !== "string" || typeof b.clientId !== "string" || typeof b.clientName !== "string") return null;
+  return { url: b.url, clientId: b.clientId, clientName: b.clientName };
+}
+
 /** `settings.theme` from the wire, or null when it isn't one: an unknown
  * name, a motion outside 0 to 1, a missing flag. The shell puts a bad value
  * back to its default at load and refuses one from a window, so null means

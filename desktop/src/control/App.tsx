@@ -1,11 +1,11 @@
 /**
- * The control window (tray > Settings…): where Fritz is, how the house
- * looks, his model, and diagnostics. Plan 14 spreads it across PRs 2-4 and
- * 8: Brain comes later in PR 3, Hotkeys with PR 4, Voice with PR 8.
+ * The control window (tray > Settings…): his brain, where Fritz is, how the
+ * house looks, his model, and diagnostics. Plan 14 spreads it across PRs
+ * 2-4 and 8: Hotkeys come with PR 4, Voice with PR 8.
  *
- * What it shows comes from the shell (status events, settings:changed and
- * a fresh read whenever the window is focused); what it says comes from
- * view.ts, which is tested.
+ * What it shows comes from the shell (status events, settings:changed,
+ * companion:status and a fresh read whenever the window is focused); what
+ * it says comes from view.ts, which is tested.
  */
 import { createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -13,13 +13,18 @@ import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { STATUS_EVENT, parseStatus, type AvatarStatus } from "../avatar/status";
 import {
-  LOADED_EVENT, SETTINGS_EVENT, arrange, avatarModel, avatarStatus, controlOpening, getSettings, openFolder, parseSettings,
-  reloadModel, setParked, setSetting, type ControlSettings, type ModelInfo,
+  COMPANION_STATUS_EVENT, LOADED_EVENT, SETTINGS_EVENT, arrange, avatarModel, avatarStatus, companionConnect,
+  companionStatus, controlOpening, getSettings, getTokenPresent, openFolder, parseCompanionStatus, parseSettings,
+  reloadModel, setParked, setSetting, setToken, type ControlSettings, type ModelInfo,
 } from "./api";
+import type { LinkStatus } from "../shared/companion";
+import { afterAsking } from "../shared/asking";
 import { Toggle } from "../divora/components/Toggle";
+import { Sigil } from "../divora/sigils/Sigil";
 import { reducedMotion } from "../divora/theme";
 import { Row, Section } from "./layout";
 import { Appearance } from "./sections/Appearance";
+import { Brain } from "./sections/Brain";
 import { modelLines, standing } from "./view";
 import { wearTheme } from "./wear";
 
@@ -29,6 +34,11 @@ export function App(): JSX.Element {
   const [model, setModel] = createSignal<ModelInfo | null>(null);
   const [version, setVersion] = createSignal("");
   const [problem, setProblem] = createSignal<string | null>(null);
+  const [link, setLink] = createSignal<LinkStatus | null>(null);
+  const [tokenPresent, setTokenPresent] = createSignal<boolean | null>(null);
+  /** Link reports heard, so a late answer to `companion_status` can't undo
+   * a newer one. */
+  let linkEvents = 0;
 
   const reduced = reducedMotion();
   const [lessMotion, setLessMotion] = createSignal(reduced.now());
@@ -37,21 +47,29 @@ export function App(): JSX.Element {
     setSettings(s);
     wearTheme(document, s.theme, reduced.now());
   };
-  /** Run a command, showing what went wrong rather than nothing. */
-  const attempt = async (what: string, act: () => Promise<unknown>) => {
+  /** Run a command, showing what went wrong rather than nothing; whether
+   * it went through. */
+  const attempt = async (what: string, act: () => Promise<unknown>): Promise<boolean> => {
     setProblem(null);
     try {
       await act();
+      return true;
     } catch (e) {
       setProblem(`Couldn't ${what}: ${typeof e === "string" ? e : String(e)}`);
+      return false;
     }
   };
   const refresh = () =>
     attempt("ask Fritz how he is", async () => {
-      const [st, se, mo] = await Promise.all([avatarStatus(), getSettings(), avatarModel()]);
+      const heard = linkEvents;
+      const [st, se, mo, tp, li] = await Promise.all([
+        avatarStatus(), getSettings(), avatarModel(), getTokenPresent(), companionStatus(),
+      ]);
       if (st) setStatus(st);
       took(se);
       setModel(mo);
+      setTokenPresent(tp);
+      if (li) setLink(afterAsking<LinkStatus | null>(li, heard, linkEvents, link()));
     });
 
   const unlisten: Promise<UnlistenFn>[] = [];
@@ -63,6 +81,16 @@ export function App(): JSX.Element {
       if (s) setStatus(s);
     }));
     unlisten.push(listen<unknown>(SETTINGS_EVENT, (e) => took(parseSettings(e.payload))));
+    // The avatar's page says where the brain's link stands, on every change.
+    unlisten.push(listen<unknown>(COMPANION_STATUS_EVENT, (e) => {
+      const s = parseCompanionStatus(e.payload);
+      if (!s) return;
+      linkEvents += 1;
+      setLink(s);
+      // The token may have been saved some other way than this window's
+      // Connect (or the file taken away): ask again with each report.
+      void getTokenPresent().then(setTokenPresent, () => {});
+    }));
     // The avatar's page has loaded a model (at start, or after Load): what it
     // wears now, and why if not the export.
     unlisten.push(listen<unknown>(LOADED_EVENT, () => void avatarModel().then(setModel, () => {})));
@@ -91,6 +119,11 @@ export function App(): JSX.Element {
 
   const set = (path: string, value: unknown, what: string) =>
     attempt(what, async () => took(await setSetting(path, value)));
+  const saveToken = async (token: string) => {
+    const ok = await attempt("save the token", () => setToken(token));
+    if (ok) setTokenPresent(true);
+    return ok;
+  };
 
   const here = () => standing(status());
   const lines = () => modelLines(model());
@@ -100,6 +133,9 @@ export function App(): JSX.Element {
       <header class="titlebar" data-tauri-drag-region>
         <span class="brand" data-tauri-drag-region>Mister Fritz</span>
         <span class="eyebrow" data-tauri-drag-region>Settings</span>
+        <span class="titlebar-local" data-tauri-drag-region>
+          <Sigil name="lock" size={13} /> LOCAL · NO ACCOUNT
+        </span>
         <div class="titlebar-buttons">
           <button type="button" class="icon-btn" aria-label="Minimise" onClick={() => void getCurrentWindow().minimize()}>
             –
@@ -111,6 +147,16 @@ export function App(): JSX.Element {
       </header>
 
       <main class="sections">
+        <Brain
+          url={settings()?.brain.url ?? null}
+          link={link()}
+          avatar={status()}
+          tokenPresent={tokenPresent()}
+          setUrl={(url) => set("brain.url", url, "change his brain's address")}
+          saveToken={saveToken}
+          reconnect={() => void attempt("reconnect", companionConnect)}
+        />
+
         <Section id="fritz" sigil="butler" eyebrow="Fritz" title="Where he is" desc={here().line}>
           <Row
             title={here().offerShow ? "Show him" : "Hide him"}

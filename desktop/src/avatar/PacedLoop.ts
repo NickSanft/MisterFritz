@@ -12,18 +12,10 @@
  * instead of firing a catch-up burst that would fast-forward the scene.
  */
 
-/** What the loop needs from the page; tests pass a fake. */
-export interface Clock {
-  now(): number;
-  setTimeout(fn: () => void, ms: number): unknown;
-  clearTimeout(handle: unknown): void;
-}
+import { browserClock, type Clock } from "../shared/clock";
 
-export const browserClock: Clock = {
-  now: () => performance.now(),
-  setTimeout: (fn, ms) => window.setTimeout(fn, ms),
-  clearTimeout: (handle) => window.clearTimeout(handle as number),
-};
+/** What the loop needs from the page; tests pass a fake. */
+export type { Clock };
 
 /** The longest step a frame is told about, in seconds: after a stall the
  * scene (and three-vrm's spring bones) move on by this much, not by the gap. */

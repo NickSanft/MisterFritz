@@ -1,6 +1,6 @@
 # Mister Fritz — the desktop body
 
-Fritz's body on the Windows desktop: a Tauri 2 app that will talk to the brain
+Fritz's body on the Windows desktop: a Tauri 2 app that talks to the brain
 over the `/companion` WebSocket ([plan 14](../plans/14-desktop-companion.md),
 [build plan](../plans/14-desktop-companion-build.md)). Windows only.
 
@@ -17,6 +17,7 @@ opens it):
 | File | What |
 |---|---|
 | `settings.json` | The settings ([`settings.rs`](src-tauri/src/settings.rs)), saved as they change. A file that doesn't parse is moved to `settings.corrupt-<time>.json` and the defaults used; one that can't be read is left alone and not saved over that run |
+| `companion.token` | The brain's `COMPANION_TOKEN`, saved by Settings › Brain ([`companion.rs`](src-tauri/src/companion.rs)). Never in the settings or a log, and given only to his own window |
 | `startup.log`, `crash.log` | A line per start, stop and resume, and every panic. Kept across runs (the previous one as `.old` past 64 KiB): read these after a start that died |
 | `logs\fritz.log` | This run's detailed log, started afresh each run |
 | `diagnostics\foreground.log` | Spike 0's foreground logger, **off** unless `diagnostics.foregroundLog` is `true` (read at start): it writes other apps' window titles |
@@ -39,12 +40,33 @@ effects* switch) and *Keep his motion when Windows asks for less*
 eyes stay ahead. The parchment grain (`theme.grain`) is the control
 window's alone.
 
-The tray's *Settings…* opens the control window: show or hide him, arrange
-him, his eyes following the cursor, the theme, which model he wears (with
-its folder, and loading it again after you drop in a new export), his logs,
-and the foreground log. Closing it only hides it. The rest (the hotkeys,
-`avatar.vrmPath`) is still set by editing `settings.json` with Fritz quit,
-until the sections for them land.
+The tray's *Settings…* opens the control window: his brain (where it is,
+the token, and whether he is connected), show or hide him, arrange him, his
+eyes following the cursor, the theme, which model he wears (with its folder,
+and loading it again after you drop in a new export), his logs, and the
+foreground log. Closing it only hides it. The rest (the hotkeys,
+`avatar.vrmPath`, `brain.clientId` and `brain.clientName`) is still set by
+editing `settings.json` with Fritz quit, until the sections for them land.
+
+## His brain
+
+He connects to the brain's `/companion` WebSocket at `brain.url`
+(`ws://127.0.0.1:8001/companion`, the admin panel's port), with the brain's
+`COMPANION_TOKEN`: start the brain with `COMPANION_ENABLED=true` and a
+`COMPANION_TOKEN` of 32 characters or more in its `.env`, then paste the
+token into Settings › Brain and press *Connect*. Until there is a token,
+Settings shows at every start, opened at Brain.
+
+His own window holds the connection (the control window only hears of it):
+it says hello, is online once the brain welcomes it, and answers the brain's
+pings. A wrong token, a protocol version the brain doesn't speak, or a hello
+it can't read is a refusal, which he never retries by himself (*Reconnect*,
+or a new token, tries again). Anything else (the brain down, full or quiet)
+he retries after 1, 2, 4, 8, 16, then every 30 seconds, and Settings says
+why and when. The protocol's TypeScript (`src/shared/protocol.ts` and its
+fixtures) is generated from the brain's `companion_protocol.py` by
+`python scripts/gen_protocol_ts.py` at the repository's root; the brain's
+pytest fails while they differ.
 
 ## Build
 
@@ -96,8 +118,8 @@ cargo test --locked --features custom-protocol --lib --manifest-path src-tauri/C
 ```
 
 `FRITZ_SHOW_SETTINGS` set to anything shows the control window at start, for
-a run nobody clicks; set to a section (`appearance`, `model`, …) it opens
-there.
+a run nobody clicks; set to a section (`brain`, `appearance`, `model`, …) it
+opens there. Without a token it opens at Brain anyway.
 
 ## The placeholder model
 

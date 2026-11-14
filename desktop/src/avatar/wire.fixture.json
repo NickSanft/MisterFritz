@@ -8,7 +8,9 @@
     "power": "power:display",
     "cursor": "cursor",
     "reload": "avatar:reload",
-    "loaded": "avatar:loaded"
+    "loaded": "avatar:loaded",
+    "companionStatus": "companion:status",
+    "companionConfig": "companion:config"
   },
   "hotkeys": {
     "arrange": "avatar:arrange"
@@ -172,6 +174,34 @@
     "controlOpening": {
       "name": "control_opening",
       "args": []
+    },
+    "getTokenPresent": {
+      "name": "get_token_present",
+      "args": []
+    },
+    "setToken": {
+      "name": "set_token",
+      "args": [
+        "token"
+      ]
+    },
+    "companionConfig": {
+      "name": "companion_config",
+      "args": []
+    },
+    "companionReport": {
+      "name": "companion_report",
+      "args": [
+        "report"
+      ]
+    },
+    "companionStatus": {
+      "name": "companion_status",
+      "args": []
+    },
+    "companionConnect": {
+      "name": "companion_connect",
+      "args": []
     }
   },
   "cursorKeys": [
@@ -244,10 +274,67 @@
     [1, "rich"]
   ],
   "controlSections": [
+    "brain",
     "fritz",
     "appearance",
     "model",
     "diagnostics",
     "about"
-  ]
+  ],
+  "companionConfigKeys": [
+    "clientId",
+    "clientName",
+    "token",
+    "url"
+  ],
+  "companionStatusKeys": [
+    "displayName",
+    "identity",
+    "link",
+    "reason",
+    "retryIn",
+    "threadId"
+  ],
+  "companionStatusSamples": {
+    "unconfigured": {
+      "link": "unconfigured",
+      "reason": null,
+      "retryIn": null,
+      "identity": null,
+      "displayName": null,
+      "threadId": null
+    },
+    "connecting": {
+      "link": "connecting",
+      "reason": null,
+      "retryIn": null,
+      "identity": null,
+      "displayName": null,
+      "threadId": null
+    },
+    "online": {
+      "link": "online",
+      "reason": null,
+      "retryIn": null,
+      "identity": "desktop-nick-pc",
+      "displayName": "Nick",
+      "threadId": "desktop-nick-pc#desktop"
+    },
+    "offline": {
+      "link": "offline",
+      "reason": "unreachable",
+      "retryIn": 4,
+      "identity": null,
+      "displayName": null,
+      "threadId": null
+    },
+    "refused": {
+      "link": "refused",
+      "reason": "token",
+      "retryIn": null,
+      "identity": null,
+      "displayName": null,
+      "threadId": null
+    }
+  }
 }

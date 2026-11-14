@@ -63,8 +63,10 @@ from starlette.websockets import WebSocket
 import fritz_utils
 import identity_store
 from bot_adapters import fritz_error, run_blocking
-from companion_protocol import (PROTOCOL_VERSION, AudioEnd, BadFrame, Cancel, Done, Error, Hello, Ping,
-                                Pong, Progress, Say, State, Subscribe, Token, Welcome, parse_client_frame)
+from companion_protocol import (CLOSE_BAD_FRAME, CLOSE_BAD_TOKEN, CLOSE_FULL, CLOSE_GONE_QUIET,
+                                CLOSE_NO_HELLO, CLOSE_UNSUPPORTED, PROTOCOL_VERSION, AudioEnd, BadFrame,
+                                Cancel, Done, Error, Hello, Ping, Pong, Progress, Say, State, Subscribe,
+                                Token, Welcome, parse_client_frame)
 from fritz_utils import MessageSource, canonical_user_id, resolve_identity
 from observability import audit_log
 
@@ -75,12 +77,7 @@ HELLO_TIMEOUT_S = 5.0
 PING_EVERY_S = 20.0
 UNANSWERED_PINGS_ALLOWED = 2
 
-CLOSE_GONE_QUIET = 4000
-CLOSE_BAD_FRAME = 4400
-CLOSE_BAD_TOKEN = 4401
-CLOSE_NO_HELLO = 4408
-CLOSE_FULL = 4409
-CLOSE_UNSUPPORTED = 4426
+# The close codes (CLOSE_*) are companion_protocol's, imported above.
 
 # What this server does today. PR 9 adds the audio caps.
 SERVER_CAPS = ["text"]

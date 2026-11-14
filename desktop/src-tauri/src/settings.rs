@@ -20,8 +20,9 @@
 //! - a value Fritz can't use (a hand edit gone wrong) is put back to its
 //!   default at load, alone, rather than blocking every later change.
 //!
-//! The companion token is not here (plan 14 build § 4.2): it gets a file of
-//! its own in PR 3.
+//! The companion token is not here (plan 14 build § 4.2): it has a file of
+//! its own, `companion.token` (companion.rs), since every window hears the
+//! settings on every change and settings.json is read when debugging.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -289,6 +290,81 @@ pub fn client_id_from(machine: &str) -> String {
     }
 }
 
+/// The longest brain URL kept, in characters.
+pub const URL_MAX_CHARS: usize = 2048;
+/// The protocol's longest client name (`ClientInfo.name`), in characters:
+/// a longer one is a hello the brain refuses, every time.
+pub const CLIENT_NAME_MAX_CHARS: usize = 64;
+
+/// `s` without `prefix`, matched ignoring ASCII case.
+fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = s.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix).then(|| &s[prefix.len()..])
+}
+
+/// What is wrong with `url` as the brain's address, if anything: it must be
+/// a `ws://` or `wss://` URL with a host (and a port, if any, of digits),
+/// with no space or control character, of at most 2048 characters. Anything
+/// else the page's WebSocket refuses or can never reach.
+pub fn brain_url_problem(url: &str) -> Option<&'static str> {
+    if url.chars().count() > URL_MAX_CHARS {
+        return Some("is longer than 2048 characters");
+    }
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Some("has a space or a control character in it");
+    }
+    if url.contains('#') {
+        return Some("has a #fragment, which a WebSocket address can't have");
+    }
+    let Some(rest) = strip_prefix_ci(url, "ws://").or_else(|| strip_prefix_ci(url, "wss://")) else {
+        return Some("isn't a ws:// or wss:// address");
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let (host, port) = if host_port.starts_with('[') {
+        match host_port.find(']') {
+            Some(end) => (&host_port[..=end], &host_port[end + 1..]),
+            None => return Some("has an IPv6 host with no closing bracket"),
+        }
+    } else {
+        host_port.split_at(host_port.find(':').unwrap_or(host_port.len()))
+    };
+    if host.is_empty() || host == "[]" {
+        return Some("has no host");
+    }
+    if let Some(digits) = port.strip_prefix(':') {
+        if digits.is_empty() || digits.len() > 5 || !digits.bytes().all(|b| b.is_ascii_digit()) || digits.parse::<u32>().map_or(true, |n| n > 65_535) {
+            return Some("has a port that isn't a number up to 65535");
+        }
+    } else if !port.is_empty() {
+        return Some("has something after its host that isn't a port");
+    }
+    None
+}
+
+/// What is wrong with `name` as this desk's name to the brain, if anything.
+pub fn client_name_problem(name: &str) -> Option<&'static str> {
+    if name.trim().is_empty() {
+        Some("is empty")
+    } else if name.chars().count() > CLIENT_NAME_MAX_CHARS {
+        Some("is longer than 64 characters")
+    } else if name.chars().any(char::is_control) {
+        Some("has a control character in it")
+    } else {
+        None
+    }
+}
+
+/// A value for a message: at most 100 characters of it, quoted.
+fn shown(value: &str) -> String {
+    let cut: String = value.chars().take(100).collect();
+    if cut.len() < value.len() {
+        format!("{cut:?}…")
+    } else {
+        format!("{cut:?}")
+    }
+}
+
 fn is_client_id(s: &str) -> bool {
     let b = s.as_bytes();
     !b.is_empty()
@@ -313,6 +389,14 @@ pub fn repair(s: &mut Settings) -> Vec<String> {
             s.brain.client_id
         ));
         s.brain.client_id = d.brain.client_id.clone();
+    }
+    if let Some(why) = brain_url_problem(&s.brain.url) {
+        fixed.push(format!("brain.url {} {why}", shown(&s.brain.url)));
+        s.brain.url.clone_from(&d.brain.url);
+    }
+    if let Some(why) = client_name_problem(&s.brain.client_name) {
+        fixed.push(format!("brain.clientName {} {why}", shown(&s.brain.client_name)));
+        s.brain.client_name.clone_from(&d.brain.client_name);
     }
     for (field, value, ok, default) in [
         ("theme.theme", &mut s.theme.theme, &THEMES[..], &d.theme.theme),
@@ -603,11 +687,17 @@ fn save_to(path: &Path, settings: &Settings, writable: bool) -> bool {
     }
 }
 
-/// Write `settings` to `path` atomically and durably: a temporary file of
-/// this save's own, flushed to disk, then renamed over the old file. A
-/// rename refused for a moment (a virus scanner or sync client holding the
-/// file) is tried again; a write that can't be made atomic isn't made.
+/// Write `settings` to `path` atomically and durably (`write_atomic`).
 pub fn write(path: &Path, settings: &Settings) -> io::Result<()> {
+    write_atomic(path, &serde_json::to_vec_pretty(settings)?)
+}
+
+/// Write `bytes` to `path` atomically and durably: a temporary file of this
+/// write's own, flushed to disk, then renamed over the old file. A rename
+/// refused for a moment (a virus scanner or sync client holding the file)
+/// is tried again; a write that can't be made atomic isn't made. The
+/// settings and the companion token are both written so.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     static N: AtomicU64 = AtomicU64::new(0);
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
@@ -618,10 +708,9 @@ pub fn write(path: &Path, settings: &Settings) -> io::Result<()> {
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed)
     ));
-    let bytes = serde_json::to_vec_pretty(settings)?;
     let written = (|| {
         let mut f = File::create(&tmp)?;
-        f.write_all(&bytes)?;
+        f.write_all(bytes)?;
         f.sync_all()
     })();
     if let Err(e) = written {
@@ -1014,13 +1103,14 @@ mod tests {
         fs::write(
             d.join(FILE),
             r#"{"hotkeys":{"park":"Win+Shift+H","arrange":"Ctrl+Shift+F9"},
-               "brain":{"clientId":"Nick-Laptop"},"theme":{"mood":"violet"}}"#,
+               "brain":{"clientId":"Nick-Laptop","url":"http://127.0.0.1:8001/companion","clientName":" "},
+               "theme":{"mood":"violet"}}"#,
         )
         .unwrap();
         let (loaded, repaired) = load_from(&d);
         assert_eq!(loaded, Loaded::Read);
-        assert_eq!(repaired.len(), 3, "{repaired:?}");
-        for field in ["hotkeys.park", "brain.clientId", "theme.mood"] {
+        assert_eq!(repaired.len(), 5, "{repaired:?}");
+        for field in ["hotkeys.park", "brain.clientId", "brain.url", "brain.clientName", "theme.mood"] {
             assert!(repaired.iter().any(|r| r.contains(field)), "{field}: {repaired:?}");
         }
         let s = get();
@@ -1028,6 +1118,8 @@ mod tests {
         assert_eq!(s.hotkeys.arrange, "Ctrl+Shift+F9", "the good ones are kept");
         assert_eq!(s.theme.mood, "ink");
         assert!(is_client_id(&s.brain.client_id));
+        assert_eq!(s.brain.url, Brain::default().url);
+        assert_eq!(s.brain.client_name, Brain::default().client_name);
         assert_eq!(read(&d.join(FILE)).0, s, "the repair is saved");
         set("avatar.lookatCursor", json!(false), |_| {}).unwrap();
         assert!(!get().avatar.lookat_cursor);
@@ -1120,6 +1212,55 @@ mod tests {
         assert_eq!(next.avatar.vrm_path, None);
     }
 
+    /// The brain's address and this desk's name, as a window may set them:
+    /// any ws:// or wss:// URL with a host, and a name of up to 64
+    /// characters (code points, as the protocol counts them).
+    #[test]
+    fn a_window_sets_where_the_brain_is_and_what_the_desk_is_called() {
+        let s = Settings::default();
+        for url in [
+            "ws://127.0.0.1:8001/companion",
+            "wss://h:1/p",
+            "WS://LOCALHOST:8001/companion",
+            "ws://[::1]:8001/companion",
+            "ws://fritz.lan/companion?x=1",
+            "wss://brain.example",
+        ] {
+            let next = with_value(&s, "brain.url", json!(url)).unwrap_or_else(|e| panic!("{url}: {e}"));
+            assert_eq!(next.brain.url, url);
+        }
+        let exactly = format!("ws://h/{}", "x".repeat(2041));
+        assert_eq!(exactly.chars().count(), URL_MAX_CHARS);
+        assert!(with_value(&s, "brain.url", json!(exactly)).is_ok());
+        let emoji = "😀".repeat(CLIENT_NAME_MAX_CHARS);
+        for name in ["Nick's PC", "x", emoji.as_str(), " Desk "] {
+            let next = with_value(&s, "brain.clientName", json!(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(next.brain.client_name, name);
+        }
+        assert!(brain_url_problem(&Brain::default().url).is_none());
+        assert!(client_name_problem(&Brain::default().client_name).is_none());
+    }
+
+    /// This desk's id and name are held to the protocol's rules as the
+    /// generated protocol.ts has them (tests/test_gen_protocol_ts.py holds
+    /// that file to companion_protocol.py).
+    #[test]
+    fn the_desks_id_and_name_follow_the_protocol() {
+        let ts = include_str!("../../src/shared/protocol.ts");
+        assert!(
+            ts.contains(&format!("export const CLIENT_NAME_MAX_CHARS = {CLIENT_NAME_MAX_CHARS};")),
+            "CLIENT_NAME_MAX_CHARS"
+        );
+        assert!(
+            ts.contains("export const CLIENT_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;"),
+            "is_client_id implements ^[a-z0-9][a-z0-9-]{{0,31}}$: change both together"
+        );
+        for (id, ok) in [("a", true), ("0-a", true), (&*"a".repeat(32), true), (&*"a".repeat(33), false),
+                         ("-a", false), ("A", false), ("a_b", false), ("", false), ("é", false)] {
+            assert_eq!(is_client_id(id), ok, "{id:?}");
+        }
+    }
+
     #[test]
     fn what_a_window_cant_set() {
         let s = Settings::default();
@@ -1138,6 +1279,24 @@ mod tests {
             ("avatar.scale", json!(0), "between 0.25 and 4"),
             ("avatar.vrmPath", json!("  "), "empty"),
             ("brain.clientId", json!("Bad Id"), "client id"),
+            ("brain.url", json!("http://127.0.0.1:8001/companion"), "isn't a ws:// or wss://"),
+            ("brain.url", json!("ws://"), "no host"),
+            ("brain.url", json!("ws://:8001/companion"), "no host"),
+            ("brain.url", json!("ws:// x/companion"), "a space"),
+            ("brain.url", json!("ws://x\u{0}/companion"), "control character"),
+            ("brain.url", json!("ws://host:80a/companion"), "port"),
+            ("brain.url", json!("ws://host:99999/companion"), "port"),
+            ("brain.url", json!("ws://host:/companion"), "port"),
+            ("brain.url", json!("ws://[::1/companion"), "closing bracket"),
+            ("brain.url", json!("ws://h/companion#x"), "fragment"),
+            ("brain.url", json!("ws://h#x"), "fragment"),
+            ("brain.url", json!("ws://[::1]x/companion"), "after its host"),
+            ("brain.url", json!(format!("ws://h/{}", "x".repeat(2042))), "longer than 2048"),
+            ("brain.url", json!(3), "brain.url"),
+            ("brain.clientName", json!(""), "empty"),
+            ("brain.clientName", json!("   "), "empty"),
+            ("brain.clientName", json!("x".repeat(65)), "longer than 64"),
+            ("brain.clientName", json!("Nick\u{7}PC"), "control character"),
             ("hotkeys.arrange", json!("Ctrl+Alt+Nope"), "hotkeys.arrange"),
         ] {
             let err = with_value(&s, path, value).unwrap_err();

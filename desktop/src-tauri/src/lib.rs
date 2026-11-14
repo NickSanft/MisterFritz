@@ -3,12 +3,14 @@
 //! in it, a tray, and global hotkeys. Windows only.
 //!
 //! What it keeps lives in `%APPDATA%\com.divora.fritz\`: `settings.json`,
-//! `startup.log` and `crash.log` (`logs.rs`), `logs\fritz.log` (this run's),
-//! and, if the owner turns it on, `diagnostics\foreground.log`. A VRoid
-//! export at `avatar\fritz.vrm`, or wherever `avatar.vrmPath` says, replaces
-//! the committed placeholder.
+//! `companion.token` (the brain's token, `companion.rs`), `startup.log` and
+//! `crash.log` (`logs.rs`), `logs\fritz.log` (this run's), and, if the owner
+//! turns it on, `diagnostics\foreground.log`. A VRoid export at
+//! `avatar\fritz.vrm`, or wherever `avatar.vrmPath` says, replaces the
+//! committed placeholder.
 
 mod avatar_state;
+mod companion;
 mod cover;
 mod cursor;
 mod foreground_log;
@@ -44,6 +46,11 @@ const FIRST_MARGIN: f64 = 24.0;
 
 /// Sent to every window when a setting changes, with all of them.
 pub const SETTINGS_EVENT: &str = "settings:changed";
+/// Sent to every window when the avatar's page reports the brain's link.
+pub const COMPANION_STATUS_EVENT: &str = "companion:status";
+/// Sent to the avatar's page to ask for its config again and connect anew:
+/// the token was saved, or the owner pressed Reconnect.
+pub const COMPANION_CONFIG_EVENT: &str = "companion:config";
 
 fn data_dir() -> PathBuf {
     settings::app_dir()
@@ -273,22 +280,29 @@ pub const RELOAD_EVENT: &str = "avatar:reload";
 /// tray. Set to a section's name (`appearance`), it opens there.
 const SHOW_SETTINGS_ENV: &str = "FRITZ_SHOW_SETTINGS";
 /// The control window's sections, by the ids its page gives them, in order.
-pub const CONTROL_SECTIONS: [&str; 5] = ["fritz", "appearance", "model", "diagnostics", "about"];
+pub const CONTROL_SECTIONS: [&str; 6] = ["brain", "fritz", "appearance", "model", "diagnostics", "about"];
 
 /// The section the control window opens at: the one `FRITZ_SHOW_SETTINGS`
-/// names, if it names one (any other value only shows the window).
-fn opening(env: Option<&str>) -> Option<&'static str> {
-    let want = env?.trim();
-    CONTROL_SECTIONS
-        .iter()
-        .copied()
-        .find(|s| s.eq_ignore_ascii_case(want))
+/// names, if it names one; else, with no token yet, Brain (the first run
+/// opens where he is connected).
+fn opening(env: Option<&str>, token_present: bool) -> Option<&'static str> {
+    let named = env.and_then(|want| {
+        CONTROL_SECTIONS
+            .iter()
+            .copied()
+            .find(|s| s.eq_ignore_ascii_case(want.trim()))
+    });
+    named.or_else(|| (!token_present).then_some("brain"))
+}
+
+fn token_present() -> bool {
+    companion::read_token(&data_dir()).is_some()
 }
 
 /// Where the control window's page scrolls to once it has loaded.
 #[tauri::command]
 async fn control_opening() -> Option<&'static str> {
-    opening(std::env::var(SHOW_SETTINGS_ENV).ok().as_deref())
+    opening(std::env::var(SHOW_SETTINGS_ENV).ok().as_deref(), token_present())
 }
 
 /// Show the control window and give it the keyboard (it is an ordinary
@@ -381,6 +395,12 @@ pub struct Wearing {
 /// goes into a window.
 const LOAD_ERROR_CHARS: usize = 300;
 
+/// `s` without its control characters (line breaks, escapes), cut to `max`
+/// characters: text a page reports, made fit for a log line or a window.
+pub(crate) fn printable(s: &str, max: usize) -> String {
+    s.chars().filter(|c| !c.is_control()).take(max).collect()
+}
+
 /// The page's report, checked: `"export"` or `"placeholder"`, and an error
 /// cut to printable text of a sensible length.
 pub fn wearing_from(what: &str, error: Option<String>) -> Result<Wearing, String> {
@@ -390,7 +410,7 @@ pub fn wearing_from(what: &str, error: Option<String>) -> Result<Wearing, String
         other => return Err(format!("{other:?} isn't a model the page wears")),
     };
     let error = error
-        .map(|e| e.chars().filter(|c| !c.is_control()).take(LOAD_ERROR_CHARS).collect::<String>())
+        .map(|e| printable(&e, LOAD_ERROR_CHARS))
         .filter(|e| !e.trim().is_empty());
     Ok(Wearing { what, error, file: None })
 }
@@ -497,6 +517,93 @@ async fn reload_model(app: AppHandle) {
     let _ = app.emit_to(OVERLAY_LABEL, RELOAD_EVENT, ());
 }
 
+/// What the avatar's page connects with: the brain's URL, the token (null
+/// when there is none) and this desk's id and name.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionConfig {
+    pub url: String,
+    pub token: Option<String>,
+    pub client_id: String,
+    pub client_name: String,
+}
+
+fn companion_config_for(s: &Settings, token: Option<String>) -> CompanionConfig {
+    CompanionConfig {
+        url: s.brain.url.clone(),
+        token,
+        client_id: s.brain.client_id.clone(),
+        client_name: s.brain.client_name.clone(),
+    }
+}
+
+/// The brain's session is the avatar page's alone (the control window
+/// hears of it through the shell): only that page is given the token, and
+/// only it reports the link.
+fn from_the_avatar(label: &str) -> Result<(), String> {
+    if label == OVERLAY_LABEL {
+        Ok(())
+    } else {
+        Err(format!("only Fritz's own window may do that, not {label:?}"))
+    }
+}
+
+/// Whether there is a token, for the control window (never the token).
+#[tauri::command]
+async fn get_token_present() -> bool {
+    token_present()
+}
+
+/// Save the token the owner pasted (checked: `companion::token_from`), and
+/// have the avatar's page connect with it. The token is never logged.
+#[tauri::command]
+async fn set_token(app: AppHandle, token: String) -> Result<(), String> {
+    let t = companion::token_from(&token)?;
+    companion::write_token(&data_dir(), &t).map_err(|e| format!("Couldn't save the token: {e}"))?;
+    tracing::info!("the companion token was saved");
+    let _ = app.emit_to(OVERLAY_LABEL, COMPANION_CONFIG_EVENT, ());
+    Ok(())
+}
+
+/// The avatar's page asks what to connect with; any other window is refused.
+#[tauri::command]
+async fn companion_config(webview: tauri::Webview) -> Result<CompanionConfig, String> {
+    from_the_avatar(webview.label())?;
+    Ok(companion_config_for(&settings::get(), companion::read_token(&data_dir())))
+}
+
+/// The avatar's page says where the link stands (on every change): kept for
+/// `companion_status`, logged when the link or its reason changes (a new
+/// wait between tries is no news), and every window is told.
+#[tauri::command]
+async fn companion_report(app: AppHandle, webview: tauri::Webview, report: serde_json::Value) -> Result<(), String> {
+    from_the_avatar(webview.label())?;
+    let s = companion::status_from(report)?;
+    let was = companion::keep(s.clone());
+    if was.as_ref().map(companion::CompanionStatus::headline) != Some(s.headline()) {
+        if s.link == companion::Link::Refused {
+            tracing::warn!("{}", s.describe());
+        } else {
+            tracing::info!("{}", s.describe());
+        }
+    }
+    let _ = app.emit(COMPANION_STATUS_EVENT, &s);
+    Ok(())
+}
+
+/// The link now, for a window that opens after the last report.
+#[tauri::command]
+async fn companion_status() -> companion::CompanionStatus {
+    companion::current(token_present())
+}
+
+/// The owner's Reconnect: the avatar's page asks for its config again and
+/// connects anew, even with nothing changed.
+#[tauri::command]
+async fn companion_connect(app: AppHandle) {
+    let _ = app.emit_to(OVERLAY_LABEL, COMPANION_CONFIG_EVENT, ());
+}
+
 pub fn run() {
     logs::install_panic_hook();
     logs::startup(&format!(
@@ -529,7 +636,13 @@ pub fn run() {
             open_folder,
             reload_model,
             avatar_loaded,
-            control_opening
+            control_opening,
+            get_token_present,
+            set_token,
+            companion_config,
+            companion_report,
+            companion_status,
+            companion_connect
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -556,7 +669,12 @@ pub fn run() {
             avatar_state::start_saver(handle.clone());
             open_avatar(&handle);
             cursor::start(handle.clone());
-            if std::env::var_os(SHOW_SETTINGS_ENV).is_some() {
+            let has_token = token_present();
+            if companion::shows_control_at_start(has_token, std::env::var_os(SHOW_SETTINGS_ENV).is_some()) {
+                if !has_token {
+                    logs::startup("no companion token yet: Settings opens at Brain");
+                    tracing::info!("no companion token yet: Settings opens at Brain");
+                }
                 show_control(&handle);
             }
             logs::startup("started");
@@ -631,15 +749,17 @@ mod tests {
         assert_eq!(events["cursor"], crate::cursor::CURSOR_EVENT);
         assert_eq!(events["reload"], super::RELOAD_EVENT);
         assert_eq!(events["loaded"], super::LOADED_EVENT);
-        assert_eq!(events.len(), 6, "an event with no Rust half: {events:?}");
+        assert_eq!(events["companionStatus"], super::COMPANION_STATUS_EVENT);
+        assert_eq!(events["companionConfig"], super::COMPANION_CONFIG_EVENT);
+        assert_eq!(events.len(), 8, "an event with no Rust half: {events:?}");
     }
 
     /// `FRITZ_SHOW_SETTINGS=<section>` opens the control window there; any
-    /// other value only shows it. The sections are the page's ids (the
-    /// fixture holds both sides to them).
+    /// other value only shows it. With no token yet, it opens at Brain. The
+    /// sections are the page's ids (the fixture holds both sides to them).
     #[test]
     fn the_control_window_opens_where_it_is_told() {
-        use super::opening;
+        let opening = |env| super::opening(env, true);
         assert_eq!(opening(None), None);
         assert_eq!(opening(Some("1")), None);
         assert_eq!(opening(Some("")), None);
@@ -647,7 +767,12 @@ mod tests {
         assert_eq!(opening(Some(" Appearance ")), Some("appearance"));
         assert_eq!(opening(Some("model")), Some("model"));
         assert_eq!(opening(Some("appearances")), None);
-        assert_eq!(opening(Some("brain")), None, "not until the Brain section");
+        assert_eq!(opening(Some("brain")), Some("brain"));
+        // The first run: no token, so Brain, unless a section is named.
+        assert_eq!(super::opening(None, false), Some("brain"));
+        assert_eq!(super::opening(Some("1"), false), Some("brain"));
+        assert_eq!(super::opening(Some("model"), false), Some("model"));
+        assert_eq!(super::CONTROL_SECTIONS[0], "brain", "first in the window");
         let fixture: Value =
             serde_json::from_str(include_str!("../../src/avatar/wire.fixture.json")).unwrap();
         let want: Vec<&str> = fixture["controlSections"]
@@ -888,7 +1013,8 @@ mod tests {
                 .map(str::trim)
                 .filter(|p| !p.is_empty())
                 .map(|p| p.split(':').next().unwrap().trim())
-                .filter(|p| *p != "app")
+                // The app and the calling webview are Tauri's, not the page's.
+                .filter(|p| *p != "app" && *p != "webview")
                 .map(wire_key)
                 .collect();
             let want: Vec<&str> = cmd["args"]
@@ -899,5 +1025,66 @@ mod tests {
                 .collect();
             assert_eq!(params, want, "{name}");
         }
+    }
+
+    /// Only the avatar's page is given the token, and only it reports.
+    #[test]
+    fn only_the_avatars_page_holds_the_brains_session() {
+        assert!(super::from_the_avatar(crate::overlay_machine::OVERLAY_LABEL).is_ok());
+        for other in [super::CONTROL_LABEL, "prompt", ""] {
+            assert!(super::from_the_avatar(other).is_err(), "{other:?}");
+        }
+    }
+
+    /// The page reads these keys from `companion_config`, and the control
+    /// window these from a report; every sample the fixture holds is a
+    /// report the shell keeps, as it was sent.
+    #[test]
+    fn the_companion_config_and_status_are_the_wire_contract() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../src/avatar/wire.fixture.json")).unwrap();
+        let keys = |v: &Value| {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort_unstable();
+            k
+        };
+        let want = |name: &str| -> Vec<String> {
+            fixture[name].as_array().unwrap().iter().map(|k| k.as_str().unwrap().to_owned()).collect()
+        };
+        let config = serde_json::to_value(super::companion_config_for(
+            &crate::settings::Settings::default(),
+            Some("t0k".into()),
+        ))
+        .unwrap();
+        assert_eq!(keys(&config), want("companionConfigKeys"));
+        assert_eq!(config["token"], "t0k");
+        let none = serde_json::to_value(super::companion_config_for(&crate::settings::Settings::default(), None)).unwrap();
+        assert_eq!(none["token"], Value::Null);
+        let status = serde_json::to_value(crate::companion::CompanionStatus::before_any_report(true)).unwrap();
+        assert_eq!(keys(&status), want("companionStatusKeys"));
+        for (name, sample) in fixture["companionStatusSamples"].as_object().unwrap() {
+            let kept = crate::companion::status_from(sample.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(&serde_json::to_value(kept).unwrap(), sample, "{name}");
+        }
+    }
+
+    /// The check is in the commands, before anything else: there is no app
+    /// manifest, so nothing else stops another window calling them (and
+    /// `companion_config` hands over the token).
+    #[test]
+    fn the_avatar_only_commands_check_who_is_calling_first() {
+        let src = include_str!("lib.rs").replace("\r\n", "\n");
+        for name in ["companion_config", "companion_report"] {
+            let at = src.find(&format!("async fn {name}(")).unwrap_or_else(|| panic!("no command {name}"));
+            let body = &src[at + src[at..].find('{').unwrap() + 1..];
+            let first = body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap();
+            assert_eq!(first, "from_the_avatar(webview.label())?;", "{name}");
+        }
+    }
+
+    #[test]
+    fn printable_text_has_no_control_characters_and_a_length() {
+        assert_eq!(super::printable("a\r\nb\u{1b}c", 10), "abc");
+        assert_eq!(super::printable("😀😀😀", 2), "😀😀");
     }
 }

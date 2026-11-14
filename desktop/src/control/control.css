@@ -19,7 +19,8 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-button {
+button,
+input {
   font: inherit;
   cursor: pointer;
   border: 0;
@@ -51,8 +52,12 @@ button {
   font-size: var(--t-h3);
 }
 
-.titlebar-buttons {
+.titlebar .titlebar-local {
   margin-left: auto;
+}
+
+.titlebar-buttons {
+  margin-left: var(--s2);
   display: flex;
   gap: var(--s1);
 }
@@ -154,6 +159,33 @@ button {
 
 .dot.tone-warn {
   background: var(--warning);
+}
+
+.dot.tone-bad {
+  background: var(--danger);
+}
+
+/* A control with something beside it: a field and its button. */
+.row-line {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.brain-url {
+  width: 280px;
+}
+
+/* The brain is on this PC. */
+.place {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  color: var(--text-mid);
+  white-space: nowrap;
 }
 
 .problem {

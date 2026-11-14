@@ -2,9 +2,12 @@
  * src/styles.css at 62ed6a5: .eyebrow (lines 375-381, from Tailwind's
  * utilities layer), the buttons and the toggle switch (496-672) and the
  * segmented control (1079-1121, from its components layer), the grain
- * (1319-1329, adapted below) and the functional-motion switch (267-281). See
- * desktop/LICENSES/DivoraVoiceMod.txt. The control window only: the avatar
- * page draws nothing with CSS animation or transitions. */
+ * (1319-1329, adapted below), the functional-motion switch (267-281), the
+ * titlebar's LOCAL mark (1161-1169) and .mono (367-369, from its utilities
+ * layer); and the text field, from the inline
+ * style src/screens/SettingsScreen.tsx gives its fields (3298-3306), as a
+ * class. See desktop/LICENSES/DivoraVoiceMod.txt. The control window only:
+ * the avatar page draws nothing with CSS animation or transitions. */
 
 .eyebrow {
   font-family: var(--font-mono);
@@ -269,4 +272,28 @@ body.grain::after {
   animation-delay: 0ms !important;
   animation-iteration-count: 1 !important;
   transition-duration: 0.001ms !important;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.titlebar-local {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  letter-spacing: 0.05em;
+}
+
+.field {
+  height: 30px;
+  padding: 0 var(--s2);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-1);
+  color: var(--text-hi);
+  font-size: var(--t-sm);
 }

@@ -5,7 +5,8 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { parseStatus, type AvatarStatus } from "../avatar/status";
-import { SETTINGS_EVENT, parseTheme, type Theme } from "../shared/settings";
+import type { Link, LinkStatus, Reason } from "../shared/companion";
+import { SETTINGS_EVENT, parseBrain, parseTheme, type Brain, type Theme } from "../shared/settings";
 
 export const CMD = {
   getSettings: "get_settings",
@@ -17,17 +18,23 @@ export const CMD = {
   reloadModel: "reload_model",
   mode: "set_avatar_mode",
   controlOpening: "control_opening",
+  getTokenPresent: "get_token_present",
+  setToken: "set_token",
+  companionStatus: "companion_status",
+  companionConnect: "companion_connect",
 } as const;
 
 export { SETTINGS_EVENT };
 /** The avatar's page has loaded a model: ask `avatar_model` again. */
 export const LOADED_EVENT = "avatar:loaded";
+/** The avatar's page reported the brain's link (a `LinkStatus`). */
+export const COMPANION_STATUS_EVENT = "companion:status";
 
 export type Folder = "logs" | "avatar";
 
 /** The window's sections, by their ids, in order: what `control_opening`
  * may answer (the shell's CONTROL_SECTIONS; the fixture holds both). */
-export const SECTIONS = ["fritz", "appearance", "model", "diagnostics", "about"] as const;
+export const SECTIONS = ["brain", "fritz", "appearance", "model", "diagnostics", "about"] as const;
 export type SectionId = (typeof SECTIONS)[number];
 
 export function parseSection(v: unknown): SectionId | null {
@@ -36,6 +43,7 @@ export function parseSection(v: unknown): SectionId | null {
 
 /** The settings the control window reads (the shell has more). */
 export interface ControlSettings {
+  brain: Brain;
   avatar: { lookatCursor: boolean; vrmPath: string | null };
   hotkeys: { arrange: string; park: string };
   diagnostics: { foregroundLog: boolean };
@@ -68,12 +76,14 @@ export function parseSettings(v: unknown): ControlSettings | null {
   const hotkeys = obj(o?.hotkeys);
   const diagnostics = obj(o?.diagnostics);
   const theme = parseTheme(o?.theme);
-  if (!avatar || !hotkeys || !diagnostics || !theme) return null;
+  const brain = parseBrain(o?.brain);
+  if (!brain || !avatar || !hotkeys || !diagnostics || !theme) return null;
   if (typeof avatar.lookatCursor !== "boolean") return null;
   if (avatar.vrmPath !== null && typeof avatar.vrmPath !== "string") return null;
   if (typeof hotkeys.arrange !== "string" || typeof hotkeys.park !== "string") return null;
   if (typeof diagnostics.foregroundLog !== "boolean") return null;
   return {
+    brain,
     avatar: { lookatCursor: avatar.lookatCursor, vrmPath: avatar.vrmPath as string | null },
     hotkeys: { arrange: hotkeys.arrange, park: hotkeys.park },
     diagnostics: { foregroundLog: diagnostics.foregroundLog },
@@ -102,12 +112,35 @@ export function parseModelInfo(v: unknown): ModelInfo | null {
   };
 }
 
+const LINKS: readonly Link[] = ["unconfigured", "connecting", "online", "offline", "refused"];
+const REASONS: readonly Reason[] = ["token", "version", "hello", "full", "quiet", "unreachable", null];
+
+/** The link as the avatar's page reported it, or null when it isn't one. */
+export function parseCompanionStatus(v: unknown): LinkStatus | null {
+  const o = obj(v);
+  if (!o) return null;
+  if (!LINKS.includes(o.link as Link) || !REASONS.includes(o.reason as Reason)) return null;
+  if (o.retryIn !== null && !(typeof o.retryIn === "number" && Number.isInteger(o.retryIn) && o.retryIn >= 0)) return null;
+  for (const k of ["identity", "displayName", "threadId"]) {
+    if (o[k] !== null && typeof o[k] !== "string") return null;
+  }
+  return {
+    link: o.link as Link,
+    reason: o.reason as Reason,
+    retryIn: o.retryIn as number | null,
+    identity: o.identity as string | null,
+    displayName: o.displayName as string | null,
+    threadId: o.threadId as string | null,
+  };
+}
+
 /** The argument objects, by the keys the shell's commands take. */
 export const args = {
   setSetting: (path: string, value: unknown) => ({ path, value }),
   setParked: (on: boolean) => ({ on }),
   openFolder: (which: Folder) => ({ which }),
   mode: (mode: "arrange" | "locked") => ({ mode }),
+  setToken: (token: string) => ({ token }),
 };
 
 export async function getSettings(): Promise<ControlSettings | null> {
@@ -146,4 +179,24 @@ export async function controlOpening(): Promise<SectionId | null> {
 
 export async function arrange(): Promise<void> {
   await invoke(CMD.mode, args.mode("arrange"));
+}
+
+/** Whether there is a token (the window is never given the token itself). */
+export async function getTokenPresent(): Promise<boolean> {
+  return (await invoke<unknown>(CMD.getTokenPresent)) === true;
+}
+
+/** Save the token the owner pasted; the shell's refusal says why not. The
+ * avatar's page connects with it at once. */
+export async function setToken(token: string): Promise<void> {
+  await invoke(CMD.setToken, args.setToken(token));
+}
+
+export async function companionStatus(): Promise<LinkStatus | null> {
+  return parseCompanionStatus(await invoke<unknown>(CMD.companionStatus));
+}
+
+/** Have the avatar's page connect again now. */
+export async function companionConnect(): Promise<void> {
+  await invoke(CMD.companionConnect);
 }

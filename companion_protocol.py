@@ -2,8 +2,8 @@
 
 plans/14-desktop-companion-build.md § 2 specifies it, and this module is its
 source of truth. companion_api speaks it, and the desktop app's TypeScript is
-to be generated from it (scripts/gen_protocol_ts.py), so the two ends cannot
-drift apart unnoticed.
+generated from it (scripts/gen_protocol_ts.py, held to it by
+tests/test_gen_protocol_ts.py), so the two ends cannot drift apart unnoticed.
 
 Text frames are UTF-8 JSON objects with a `type`. Binary frames carry audio
 only (Phase 2) and are always followed by an `audio_end`. The version is
@@ -32,6 +32,17 @@ from typing import Annotated, Literal, Union
 from pydantic import BaseModel, Field, StringConstraints, TypeAdapter, ValidationError
 
 PROTOCOL_VERSION = 1
+
+# The codes the server closes a session with (§ 2.2), here so the desktop's
+# TypeScript has them too: companion_api closes with them, and the client
+# tells a refusal it must not retry (a wrong token, an unsupported version,
+# a hello it can't read) from a reason to try again (full, gone quiet).
+CLOSE_GONE_QUIET = 4000
+CLOSE_BAD_FRAME = 4400
+CLOSE_BAD_TOKEN = 4401
+CLOSE_NO_HELLO = 4408
+CLOSE_FULL = 4409
+CLOSE_UNSUPPORTED = 4426
 
 # The client's id becomes the canonical identity "desktop-<id>", so it is
 # held to a charset canonical_user_id keeps intact.

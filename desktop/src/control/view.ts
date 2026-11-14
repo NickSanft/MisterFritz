@@ -3,6 +3,7 @@
  * tested without a window.
  */
 import type { AvatarStatus } from "../avatar/status";
+import type { LinkStatus } from "../shared/companion";
 import type { ModelInfo } from "./api";
 
 export interface Standing {
@@ -96,4 +97,100 @@ export function modelLines(m: ModelInfo | null): ModelLines {
     detail: `Put your VRoid export at ${m.path}, then load it.`,
     tone: "quiet",
   };
+}
+
+export interface ConnectionLines {
+  title: string;
+  detail: string;
+  /** `bad` when the brain refused him (he won't try again by himself),
+   * `warn` while he keeps trying. */
+  tone: "ok" | "warn" | "bad" | "quiet";
+}
+
+/** Whether he connects, from what the avatar's page last reported. `url`
+ * is the brain's address in the settings; `tokenPresent` is null until the
+ * shell has said. */
+export function connectionLines(
+  s: LinkStatus | null,
+  avatar: AvatarStatus | null,
+  tokenPresent: boolean | null,
+  url: string,
+): ConnectionLines {
+  if (tokenPresent === false) {
+    return {
+      title: "He needs his brain's token",
+      detail: "Paste COMPANION_TOKEN from the brain's .env, then press Connect.",
+      tone: "warn",
+    };
+  }
+  if (tokenPresent === null || !s) return { title: "Asking how he's connected…", detail: "", tone: "quiet" };
+  // His page holds the connection: with his window closed there is none.
+  if (avatar && (!avatar.open || avatar.phase === "closed" || avatar.phase === "closing")) {
+    return { title: "His window is closed", detail: "Show him and he'll connect to his brain.", tone: "quiet" };
+  }
+  const wait = s.retryIn === null ? "Trying again now." : `Trying again in ${s.retryIn} s.`;
+  switch (s.link) {
+    case "unconfigured":
+    case "connecting":
+      return { title: "Connecting…", detail: `To his brain at ${url}.`, tone: "quiet" };
+    case "online":
+      return { title: "Connected", detail: `To his brain at ${url}.`, tone: "ok" };
+    case "offline":
+      if (s.reason === "full") {
+        return {
+          title: "His brain has all the desks it allows",
+          detail: `COMPANION_MAX_CLIENTS desks are connected to it already. ${wait}`,
+          tone: "warn",
+        };
+      }
+      if (s.reason === "quiet") {
+        return { title: "His brain stopped answering", detail: `At ${url}. ${wait}`, tone: "warn" };
+      }
+      // A socket that never opened can't say whether the brain is down or
+      // its /companion route is off.
+      return {
+        title: "Can't reach his brain",
+        detail: `Nothing answers at ${url}: is the brain running, with COMPANION_ENABLED on? ${wait}`,
+        tone: "warn",
+      };
+    case "refused":
+      if (s.reason === "token") {
+        return {
+          title: "His brain refused the token",
+          detail: "Paste COMPANION_TOKEN from the brain's .env again, then Connect.",
+          tone: "bad",
+        };
+      }
+      if (s.reason === "version") {
+        return {
+          title: "His brain speaks another version",
+          detail: "Fritz and his brain need updating to the same release. Reconnect once they are.",
+          tone: "bad",
+        };
+      }
+      return {
+        title: "His brain couldn't read his hello",
+        detail: "The brain's log says why. Reconnect once it's mended.",
+        tone: "bad",
+      };
+  }
+}
+
+/** Who the brain takes this desk to be, while online; else null. */
+export function identityLine(s: LinkStatus | null): string | null {
+  if (!s || s.link !== "online" || !s.identity) return null;
+  const who = s.displayName ? `${s.identity}, talking with ${s.displayName}` : s.identity;
+  return s.threadId ? `${who}, in the thread ${s.threadId}.` : `${who}.`;
+}
+
+/** Whether the brain's address is this PC (a loopback host). */
+export function onThisPc(url: string): boolean {
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+  return host === "localhost" || host.endsWith(".localhost") || host === "::1" || /^127(\.\d{1,3}){3}$/.test(host);
 }

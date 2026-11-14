@@ -24,6 +24,8 @@ import { frameSpan } from "./framing";
 import { keyAction } from "./keys";
 import { POWER_EVENT, afterAsking, fetchDisplayOn, parseDisplay, shouldDraw } from "./run";
 import { AHEAD, CURSOR_EVENT, fetchCursor, gaze, parseCursor, type CursorFrame, type Gaze } from "./look";
+import { CompanionClient } from "../shared/companion";
+import { startCompanion } from "./companionLink";
 import {
   NO_READY_GLOBAL,
   RELOAD_EVENT,
@@ -88,6 +90,9 @@ let lastBeat = 0;
  * loaded later is tinted and paced the same. */
 let theme: Theme | null = null;
 let motionFactor = 1;
+/** The device's one session with the brain (the control window has none:
+ * it hears the link through the shell). */
+const companion = new CompanionClient();
 
 /** Tint `a` and set its motion from the theme (none heard yet: as he was). */
 function dress(a: VrmActor): void {
@@ -279,6 +284,9 @@ async function main(): Promise<void> {
   if ((window as unknown as Record<string, unknown>)[NO_READY_GLOBAL] !== true) {
     await sendHandshake(instance, "ready");
   }
+  // The brain, once the shell has the page: nothing it waits for stands
+  // between the page and its handshake.
+  void startCompanion(companion);
   await listen(RELOAD_EVENT, () => void load());
   await load();
 }

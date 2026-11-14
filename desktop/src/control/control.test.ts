@@ -4,9 +4,11 @@ import {
   LOADED_CMD, RELOAD_EVENT, loadedArgs, parseStatus, vrmFetchError, type AvatarStatus,
 } from "../avatar/status";
 import {
-  CMD, LOADED_EVENT, SECTIONS, SETTINGS_EVENT, args, parseModelInfo, parseSection, parseSettings, type ModelInfo,
+  CMD, COMPANION_STATUS_EVENT, LOADED_EVENT, SECTIONS, SETTINGS_EVENT, args, parseCompanionStatus, parseModelInfo,
+  parseSection, parseSettings, type ModelInfo,
 } from "./api";
-import { megabytes, modelLines, standing } from "./view";
+import { connectionLines, identityLine, megabytes, modelLines, onThisPc, standing } from "./view";
+import type { LinkStatus } from "../shared/companion";
 
 /** A status sample from the fixture, read as the page reads one. */
 function status(name: keyof typeof fixture.statusSamples): AvatarStatus {
@@ -68,7 +70,45 @@ describe("the control window's wire", () => {
     expect(fixture.commands.controlOpening.args).toEqual([]);
     expect([...SECTIONS]).toEqual(fixture.controlSections);
     for (const s of SECTIONS) expect(parseSection(s)).toBe(s);
-    for (const bad of [null, "", "Appearance", "brain", 1, {}]) expect(parseSection(bad)).toBeNull();
+    for (const bad of [null, "", "Appearance", "Brain", 1, {}]) expect(parseSection(bad)).toBeNull();
+    expect(SECTIONS[0], "Brain comes first").toBe("brain");
+  });
+
+  /** The brain's link: the window saves the token and asks for the link,
+   * and never asks for the token itself (`companion_config` is the avatar
+   * page's alone). */
+  it("hears of the brain's link, and only saves the token", () => {
+    const c = fixture.commands;
+    expect(CMD.getTokenPresent).toBe(c.getTokenPresent.name);
+    expect(c.getTokenPresent.args).toEqual([]);
+    expect(CMD.setToken).toBe(c.setToken.name);
+    expect(Object.keys(args.setToken("t0k"))).toEqual(c.setToken.args);
+    expect(CMD.companionStatus).toBe(c.companionStatus.name);
+    expect(c.companionStatus.args).toEqual([]);
+    expect(CMD.companionConnect).toBe(c.companionConnect.name);
+    expect(c.companionConnect.args).toEqual([]);
+    expect(Object.values(CMD)).not.toContain(c.companionConfig.name);
+    expect(COMPANION_STATUS_EVENT).toBe(fixture.events.companionStatus);
+  });
+
+  it("reads the link strictly", () => {
+    for (const [name, sample] of Object.entries(fixture.companionStatusSamples)) {
+      expect(parseCompanionStatus(sample), name).toEqual(sample);
+    }
+    const online = fixture.companionStatusSamples.online;
+    for (const bad of [
+      { ...online, link: "sideways" },
+      { ...online, reason: "sulking" },
+      { ...online, retryIn: -1 },
+      { ...online, retryIn: 1.5 },
+      { ...online, retryIn: "4" },
+      { ...online, identity: 3 },
+      { ...online, threadId: undefined },
+      [online],
+      null,
+    ]) {
+      expect(parseCompanionStatus(bad), JSON.stringify(bad)).toBeNull();
+    }
   });
 
   it("asks only for the folders the shell opens", () => {
@@ -77,6 +117,7 @@ describe("the control window's wire", () => {
 
   const settings = {
     version: 1,
+    brain: { url: "ws://127.0.0.1:8001/companion", clientId: "nick-pc", clientName: "NICK-PC" },
     avatar: { rect: null, scale: 1, parked: false, vrmPath: null, lookatCursor: true },
     hotkeys: { prompt: "Ctrl+Alt+F", ptt: "Ctrl+Alt+Space", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" },
     diagnostics: { foregroundLog: false },
@@ -85,6 +126,7 @@ describe("the control window's wire", () => {
 
   it("reads the settings it uses, strictly", () => {
     expect(parseSettings(settings)).toEqual({
+      brain: { url: "ws://127.0.0.1:8001/companion", clientId: "nick-pc", clientName: "NICK-PC" },
       avatar: { lookatCursor: true, vrmPath: null },
       hotkeys: { arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" },
       diagnostics: { foregroundLog: false },
@@ -101,6 +143,9 @@ describe("the control window's wire", () => {
     expect(parseSettings({ ...settings, theme: { ...settings.theme, mood: "violet" } })).toBeNull();
     const { avatar: _, ...noAvatar } = settings;
     expect(parseSettings(noAvatar)).toBeNull();
+    expect(parseSettings({ ...settings, brain: { ...settings.brain, url: null } })).toBeNull();
+    const { brain: __, ...noBrain } = settings;
+    expect(parseSettings(noBrain)).toBeNull();
   });
 
   it("reads the model's report strictly", () => {
@@ -185,5 +230,93 @@ describe("what the control window says", () => {
     const big = modelLines({ ...info, bytes: 300 * 1024 * 1024, tooBig: true, changed: true });
     expect(big.title).toBe("Your model is too large to load");
     expect(big.detail).not.toContain("placeholder");
+  });
+});
+
+describe("what the control window says of his brain", () => {
+  const URL = "ws://127.0.0.1:8001/companion";
+  const shown = { ...status("arranging"), mode: "locked" as const };
+  const link = (name: keyof typeof fixture.companionStatusSamples, more: Partial<LinkStatus> = {}): LinkStatus => {
+    const s = parseCompanionStatus(fixture.companionStatusSamples[name]);
+    if (!s) throw new Error(`the fixture's ${name} sample isn't a link`);
+    return { ...s, ...more };
+  };
+
+  it("asks for the token first", () => {
+    for (const s of [null, link("online"), link("refused")]) {
+      const l = connectionLines(s, shown, false, URL);
+      expect(l.title).toBe("He needs his brain's token");
+      expect(l.detail).toContain("COMPANION_TOKEN");
+      expect(l.tone).toBe("warn");
+    }
+  });
+
+  it("waits to hear before saying anything", () => {
+    expect(connectionLines(link("online"), shown, null, URL).tone).toBe("quiet");
+    expect(connectionLines(null, shown, true, URL).title).toContain("Asking");
+  });
+
+  it("says his window is closed, since his page holds the connection", () => {
+    for (const s of [status("closed"), status("watchdog")]) {
+      const l = connectionLines(link("online"), s, true, URL);
+      expect(l.title).toBe("His window is closed");
+      expect(l.tone).toBe("quiet");
+    }
+    // Not yet known: what the page last said stands.
+    expect(connectionLines(link("online"), null, true, URL).title).toBe("Connected");
+  });
+
+  it("connecting, and connected", () => {
+    for (const s of [link("connecting"), link("unconfigured")]) {
+      expect(connectionLines(s, shown, true, URL)).toEqual({ title: "Connecting…", detail: `To his brain at ${URL}.`, tone: "quiet" });
+    }
+    expect(connectionLines(link("online"), shown, true, URL)).toEqual({ title: "Connected", detail: `To his brain at ${URL}.`, tone: "ok" });
+  });
+
+  it("while he tries again: why, and when", () => {
+    const unreachable = connectionLines(link("offline"), shown, true, URL);
+    expect(unreachable.title).toBe("Can't reach his brain");
+    expect(unreachable.detail).toBe(`Nothing answers at ${URL}: is the brain running, with COMPANION_ENABLED on? Trying again in 4 s.`);
+    expect(unreachable.tone).toBe("warn");
+    expect(connectionLines(link("offline", { retryIn: null }), shown, true, URL).detail).toContain("Trying again now.");
+    const full = connectionLines(link("offline", { reason: "full", retryIn: 30 }), shown, true, URL);
+    expect(full.title).toContain("all the desks");
+    expect(full.detail).toBe("COMPANION_MAX_CLIENTS desks are connected to it already. Trying again in 30 s.");
+    const quiet = connectionLines(link("offline", { reason: "quiet", retryIn: 1 }), shown, true, URL);
+    expect(quiet.title).toBe("His brain stopped answering");
+    expect(quiet.tone).toBe("warn");
+  });
+
+  it("each refusal, and what to do about it", () => {
+    const token = connectionLines(link("refused"), shown, true, URL);
+    expect(token.title).toBe("His brain refused the token");
+    expect(token.detail).toContain("COMPANION_TOKEN");
+    expect(token.tone).toBe("bad");
+    const version = connectionLines(link("refused", { reason: "version" }), shown, true, URL);
+    expect(version.title).toBe("His brain speaks another version");
+    expect(version.tone).toBe("bad");
+    const hello = connectionLines(link("refused", { reason: "hello" }), shown, true, URL);
+    expect(hello.title).toBe("His brain couldn't read his hello");
+    expect(hello.detail).toContain("log");
+    expect(hello.tone).toBe("bad");
+  });
+
+  it("who he is to the brain, while online", () => {
+    expect(identityLine(link("online"))).toBe("desktop-nick-pc, talking with Nick, in the thread desktop-nick-pc#desktop.");
+    expect(identityLine(link("online", { displayName: null, threadId: null }))).toBe("desktop-nick-pc.");
+    expect(identityLine(link("offline"))).toBeNull();
+    expect(identityLine(link("online", { identity: null }))).toBeNull();
+    expect(identityLine(null)).toBeNull();
+  });
+
+  it("whether the brain is on this PC", () => {
+    for (const url of [URL, "ws://localhost:8001/companion", "WSS://LOCALHOST/x", "ws://[::1]:8001/companion",
+      "ws://127.255.0.9:1/x", "ws://fritz.localhost/x"]) {
+      expect(onThisPc(url), url).toBe(true);
+    }
+    for (const url of ["ws://10.0.0.5:8001/companion", "wss://brain.example/companion", "ws://128.0.0.1/x",
+      "ws://localhost.example/x", "ws://127.0.0.1.example/x", "not a url", ""]) {
+      expect(onThisPc(url), url).toBe(false);
+    }
   });
 });
