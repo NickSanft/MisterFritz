@@ -478,7 +478,7 @@ fn closed() -> OverlayStatus {
     OverlayCore::new().status()
 }
 
-fn bounds_of(r: OverlayRect) -> Bounds {
+pub(crate) fn bounds_of(r: OverlayRect) -> Bounds {
     Bounds {
         left: r.x,
         top: r.y,

@@ -96,7 +96,8 @@
   "debug": {
     "noReadyEnv": "FRITZ_PRETEND_AVATAR_NO_READY",
     "noReadyGlobal": "__FRITZ_AVATAR_NO_READY__",
-    "pretendSayEnv": "FRITZ_PRETEND_SAY"
+    "pretendSayEnv": "FRITZ_PRETEND_SAY",
+    "pretendPromptEnv": "FRITZ_PRETEND_PROMPT"
   },
   "sayKeys": ["id", "text"],
   "commands": {
@@ -224,6 +225,10 @@
     },
     "promptClose": {
       "name": "prompt_close",
+      "args": []
+    },
+    "promptReady": {
+      "name": "prompt_ready",
       "args": []
     }
   },

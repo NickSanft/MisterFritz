@@ -1,6 +1,6 @@
-//! The global hotkeys, from `settings.hotkeys`: Arrange and Hide/Show in
-//! this PR (prompt and push-to-talk arrive with PRs 4 and 8). Read once at
-//! start; a key changed in the settings takes effect on the next start.
+//! The global hotkeys, from `settings.hotkeys`: Arrange, Hide/Show and the
+//! prompt (push-to-talk arrives with PR 8). Read once at start; a key
+//! changed in the settings takes effect on the next start.
 //!
 //! A binding that doesn't parse, or that another of ours already has, falls
 //! back to its default (and says so) rather than leaving the action without
@@ -17,6 +17,8 @@ use crate::settings::Hotkeys;
 
 /// The id the park hotkey is handled under (the machine's own is Arrange's).
 pub const PARK: &str = "avatar:park";
+/// The id the prompt's hotkey is handled under.
+pub const PROMPT: &str = "prompt:toggle";
 
 /// The registered bindings, for the handler to tell which fired.
 static BOUND: Mutex<Vec<(Shortcut, &'static str)>> = Mutex::new(Vec::new());
@@ -30,9 +32,11 @@ pub fn parse(accel: &str) -> Result<Shortcut, String> {
 /// settings or, when that one can't be used, the default. Pure, for tests.
 pub fn bindings(h: &Hotkeys) -> Vec<(Shortcut, &'static str, String)> {
     let defaults = Hotkeys::default();
+    // In this order: an older action keeps its key over a newer one.
     let wanted = [
         (HOTKEY_ARRANGE, h.arrange.as_str(), defaults.arrange.clone()),
         (PARK, h.park.as_str(), defaults.park.clone()),
+        (PROMPT, h.prompt.as_str(), defaults.prompt.clone()),
     ];
     let mut out: Vec<(Shortcut, &'static str, String)> = Vec::new();
     for (id, accel, fallback) in wanted {
@@ -63,7 +67,7 @@ pub fn bindings(h: &Hotkeys) -> Vec<(Shortcut, &'static str, String)> {
 }
 
 /// Register the settings' hotkeys. A key another app holds is logged, not
-/// fatal: the tray does everything the hotkeys do.
+/// fatal: the tray or Settings does everything the hotkeys do.
 pub fn register(app: &AppHandle, h: &Hotkeys) {
     let mut bound = Vec::new();
     for (shortcut, id, accel) in bindings(h) {
@@ -95,7 +99,7 @@ pub fn id_of(shortcut: &Shortcut) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bindings, id_of, parse, set_bound, PARK};
+    use super::{bindings, id_of, parse, set_bound, PARK, PROMPT};
     use crate::overlay_machine::HOTKEY_ARRANGE;
     use crate::settings::Hotkeys;
 
@@ -111,7 +115,11 @@ mod tests {
         }
         assert_eq!(
             ids(&d),
-            vec![(HOTKEY_ARRANGE, "Ctrl+Alt+A".to_owned()), (PARK, "Ctrl+Alt+H".to_owned())]
+            vec![
+                (HOTKEY_ARRANGE, "Ctrl+Alt+A".to_owned()),
+                (PARK, "Ctrl+Alt+H".to_owned()),
+                (PROMPT, "Ctrl+Alt+F".to_owned()),
+            ]
         );
     }
 
@@ -120,11 +128,16 @@ mod tests {
         let h = Hotkeys {
             arrange: "Ctrl+Shift+F9".into(),
             park: " Alt+F10 ".into(),
+            prompt: "Ctrl+Alt+Shift+F13".into(),
             ..Hotkeys::default()
         };
         assert_eq!(
             ids(&h),
-            vec![(HOTKEY_ARRANGE, "Ctrl+Shift+F9".to_owned()), (PARK, "Alt+F10".to_owned())]
+            vec![
+                (HOTKEY_ARRANGE, "Ctrl+Shift+F9".to_owned()),
+                (PARK, "Alt+F10".to_owned()),
+                (PROMPT, "Ctrl+Alt+Shift+F13".to_owned()),
+            ]
         );
         assert_eq!(bindings(&h)[0].0, parse("Ctrl+Shift+F9").unwrap());
     }
@@ -155,10 +168,35 @@ mod tests {
         let h = Hotkeys { park: "Ctrl+Alt+A".into(), ..Hotkeys::default() };
         assert_eq!(
             ids(&h),
-            vec![(HOTKEY_ARRANGE, "Ctrl+Alt+A".to_owned()), (PARK, "Ctrl+Alt+H".to_owned())]
+            vec![
+                (HOTKEY_ARRANGE, "Ctrl+Alt+A".to_owned()),
+                (PARK, "Ctrl+Alt+H".to_owned()),
+                (PROMPT, "Ctrl+Alt+F".to_owned()),
+            ]
         );
         // And if the default is the one taken, the action goes without.
         let h = Hotkeys { arrange: "Ctrl+Alt+H".into(), park: "Ctrl+Alt+H".into(), ..Hotkeys::default() };
-        assert_eq!(ids(&h), vec![(HOTKEY_ARRANGE, "Ctrl+Alt+H".to_owned())]);
+        assert_eq!(
+            ids(&h),
+            vec![(HOTKEY_ARRANGE, "Ctrl+Alt+H".to_owned()), (PROMPT, "Ctrl+Alt+F".to_owned())]
+        );
+    }
+
+    /// The prompt came last, so it never takes an older action's key: set
+    /// to Arrange's, it gets its own default, and Arrange keeps its key.
+    #[test]
+    fn the_prompt_never_takes_an_older_actions_key() {
+        let h = Hotkeys { prompt: "Ctrl+Alt+A".into(), ..Hotkeys::default() };
+        assert_eq!(
+            ids(&h),
+            vec![
+                (HOTKEY_ARRANGE, "Ctrl+Alt+A".to_owned()),
+                (PARK, "Ctrl+Alt+H".to_owned()),
+                (PROMPT, "Ctrl+Alt+F".to_owned()),
+            ]
+        );
+        // Arrange set to the prompt's default: the prompt goes without.
+        let h = Hotkeys { arrange: "Ctrl+Alt+F".into(), ..Hotkeys::default() };
+        assert_eq!(ids(&h), vec![(HOTKEY_ARRANGE, "Ctrl+Alt+F".to_owned()), (PARK, "Ctrl+Alt+H".to_owned())]);
     }
 }

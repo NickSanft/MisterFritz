@@ -43,8 +43,13 @@ three-vrm drawing Fritz at 30 fps from a `setTimeout` loop (no
 first row: Fritz's process had the foreground when nobody asked it to —
 including `HIT … kept after Arrange`, when Arrange ended but he kept the
 keyboard. **`ARRANGE`** is Arrange taking the keyboard on purpose, **`TRAY`**
-the tray menu doing the same (Windows requires it before showing a menu), and
-**`alive`** the minute heartbeat with running counts. Every `HIT`, `ARRANGE`
+the tray menu doing the same (Windows requires it before showing a menu),
+**`PROMPT`** (PR 4) the prompt taking it when you open it with its key, and
+**`alive`** the minute heartbeat with running counts. A `PROMPT` line needs an
+open of yours that took the keyboard: the prompt in front without one is a
+`HIT`, and so is its window keeping the keyboard after it closed (`HIT … kept
+after the prompt closed`). The keyboard handed back to an app writes nothing;
+handed back to Settings, a `SETTINGS` line. Every `HIT`, `ARRANGE`
 and `TRAY` line is followed by the windows that had the foreground just before.
 
 The model is `%APPDATA%\com.divora.fritz\avatar\fritz.vrm` if it exists (plan 14 P6,

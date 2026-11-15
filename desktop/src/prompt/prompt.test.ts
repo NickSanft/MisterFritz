@@ -14,6 +14,7 @@ import { CMD, args } from "./api";
 
 const CSS = readFileSync(fileURLToPath(new URL("./prompt.css", import.meta.url)), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
 const PROMPT_TSX = readFileSync(fileURLToPath(new URL("./Prompt.tsx", import.meta.url)), "utf8");
+const MAIN_TSX = readFileSync(fileURLToPath(new URL("./main.tsx", import.meta.url)), "utf8");
 
 describe("the prompt's wire", () => {
   it("calls the commands the shell registers, with the arguments it takes", () => {
@@ -22,8 +23,21 @@ describe("the prompt's wire", () => {
     expect(Object.keys(args.say("good evening"))).toEqual(c.promptSay.args);
     expect(CMD.close).toBe(c.promptClose.name);
     expect(c.promptClose.args).toEqual([]);
+    expect(CMD.ready).toBe(c.promptReady.name);
+    expect(c.promptReady.args).toEqual([]);
     expect(CMD.companionStatus).toBe(c.companionStatus.name);
     expect(CMD.avatarStatus).toBe(c.status.name);
+  });
+
+  /** The page says it is ready only once it has mounted and listens, so
+   * the shell never opens an empty or deaf prompt. */
+  it("says it is ready once mounted and listening", () => {
+    const listening = MAIN_TSX.lastIndexOf("await listen<unknown>(");
+    const mounted = MAIN_TSX.indexOf("render(");
+    const ready = MAIN_TSX.indexOf("ready().catch(");
+    expect(listening).toBeGreaterThan(0);
+    expect(mounted).toBeGreaterThan(listening);
+    expect(ready).toBeGreaterThan(mounted);
   });
 
   it("hears the events every window hears", () => {

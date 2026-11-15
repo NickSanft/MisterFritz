@@ -11,6 +11,7 @@ import { parseCompanionStatus } from "../shared/link";
 export const CMD = {
   say: "prompt_say",
   close: "prompt_close",
+  ready: "prompt_ready",
   companionStatus: "companion_status",
   avatarStatus: "avatar_status",
 } as const;
@@ -35,6 +36,11 @@ export async function say(text: string): Promise<string | null> {
   } catch (e) {
     return words(e);
   }
+}
+
+/** The page has mounted and listens: the shell may open the prompt now. */
+export async function ready(): Promise<void> {
+  await invoke(CMD.ready);
 }
 
 /** Esc: the shell hands the keyboard back and hides the prompt. */

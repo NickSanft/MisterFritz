@@ -19,7 +19,7 @@ use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, W
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, HDC, HMONITOR, MONITORINFO,
-    MONITOR_DEFAULTTOPRIMARY,
+    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::System::RemoteDesktop::{
     WTSFreeMemory, WTSQuerySessionInformationW, WTSSessionInfoEx, WTSINFOEXW,
@@ -29,7 +29,9 @@ use windows::Win32::UI::HiDpi::{
     GetDpiForMonitor, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     MDT_EFFECTIVE_DPI,
 };
-use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+use windows::Win32::UI::Shell::{
+    DefSubclassProc, RemoveWindowSubclass, SHQueryUserNotificationState, SetWindowSubclass,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, GetClassNameW, GetCursorPos, GetForegroundWindow, GetShellWindow, GetTopWindow, GetWindow,
     GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow,
@@ -37,7 +39,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowPos, WindowFromPoint, GA_ROOT, GA_ROOTOWNER, GWL_EXSTYLE, GW_HWNDNEXT, GW_OWNER,
     LWA_ALPHA, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
     SWP_NOSIZE, SWP_NOZORDER, WA_INACTIVE, WM_ACTIVATE, WM_NCDESTROY, WM_STYLECHANGING,
-    WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
+    GWL_STYLE, WS_DLGFRAME, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_THICKFRAME,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
 };
 
@@ -291,16 +293,27 @@ fn monitor_info(mon: HMONITOR) -> Option<MONITORINFO> {
         .then_some(info)
 }
 
-/// The primary monitor's work area (the desktop less the taskbar) and its
-/// effective DPI, for Fritz's first placement.
-pub fn primary_work_area() -> Option<(Bounds, u32)> {
-    // SAFETY: a point and a flag; the primary monitor always exists.
-    let mon = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
+/// A monitor's work area and its effective DPI (at least 48).
+fn work_and_dpi(mon: HMONITOR) -> Option<(Bounds, u32)> {
     let info = monitor_info(mon)?;
     let (mut dx, mut dy) = (96u32, 96u32);
     // SAFETY: a monitor handle and two out-pointers.
     let _ = unsafe { GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &raw mut dx, &raw mut dy) };
     Some((Bounds::of(info.rcWork), dx.max(48)))
+}
+
+/// The primary monitor's work area (the desktop less the taskbar) and its
+/// effective DPI, for Fritz's first placement.
+pub fn primary_work_area() -> Option<(Bounds, u32)> {
+    // SAFETY: a point and a flag; the primary monitor always exists.
+    work_and_dpi(unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) })
+}
+
+/// The work area and DPI of the monitor at (`x`, `y`), or of the nearest
+/// one when no monitor has that point.
+pub fn work_area_at(x: i32, y: i32) -> Option<(Bounds, u32)> {
+    // SAFETY: a point and a flag; NEAREST always answers a monitor.
+    work_and_dpi(unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST) })
 }
 
 /// Shell surfaces that never count as covering a monitor.
@@ -326,12 +339,93 @@ pub fn covers(window: Bounds, monitor: Bounds) -> bool {
 }
 
 /// Whether `window` takes `monitor` over the way a fullscreen app does: it
-/// covers all of it and is not merely maximised. Lorraine's test (covers the
-/// monitor) assumed a maximised window leaves the taskbar showing; with an
-/// auto-hiding taskbar the work area is the whole monitor, so a maximised
-/// editor would send Fritz away all day.
-pub fn fullscreen_on(window: Bounds, monitor: Bounds, maximized: bool) -> bool {
-    !maximized && covers(window, monitor)
+/// covers all of it and is not a framed window merely maximised
+/// (`framed_maximized`). Lorraine's test (covers the monitor) assumed a
+/// maximised window leaves the taskbar showing; with an auto-hiding taskbar
+/// the work area is the whole monitor, so a maximised editor would send
+/// Fritz away all day. A borderless window maximised to fill its monitor is
+/// a fullscreen app all the same (a player, a kiosk, a presentation).
+pub fn fullscreen_on(window: Bounds, monitor: Bounds, framed_maximized: bool) -> bool {
+    !framed_maximized && covers(window, monitor)
+}
+
+/// Whether a window style has a frame (a sizing border or a caption), as an
+/// editor or a browser has and a borderless fullscreen app hasn't
+/// (Chromium's test for a fullscreen window).
+pub fn framed_style(style: u32) -> bool {
+    style & (WS_THICKFRAME.0 | WS_DLGFRAME.0) != 0
+}
+
+/// Whether `h` is maximised with a frame: the one kind of window covering a
+/// monitor that isn't fullscreen.
+///
+/// # Safety
+/// `h` may be stale, which only makes the queries fail.
+unsafe fn framed_maximized(h: HWND) -> bool {
+    // SAFETY: plain queries on a window handle.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    unsafe {
+        IsZoomed(h).as_bool() && framed_style(GetWindowLongPtrW(h, GWL_STYLE) as u32)
+    }
+}
+
+/// Whether `window` takes over any of `monitors` the way a fullscreen app
+/// does ([`fullscreen_on`]).
+pub fn fullscreen_among(window: Bounds, framed_maximized: bool, monitors: &[Bounds]) -> bool {
+    monitors.iter().any(|&m| fullscreen_on(window, m, framed_maximized))
+}
+
+/// The foreground window, if it is another app's fullscreen window on any
+/// monitor (a game, a video, a presentation), named for the log as
+/// `"{class} (pid {pid})"`. Never ours, and never the shell's.
+pub fn fullscreen_foreground() -> Option<String> {
+    // SAFETY: plain queries; every handle below may be stale, which only
+    // makes the calls fail.
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.0.is_null() {
+            return None;
+        }
+        let root = GetAncestor(fg, GA_ROOT);
+        let top = if root.0.is_null() { fg } else { root };
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(top, Some(&raw mut pid));
+        if pid == 0 || pid == std::process::id() {
+            return None;
+        }
+        let class = class_name(top);
+        if is_shell_class(&class) {
+            return None;
+        }
+        let mut w = RECT::default();
+        GetWindowRect(top, &raw mut w).ok()?;
+        let all: Vec<Bounds> = monitors().into_iter().map(|(m, _)| m).collect();
+        fullscreen_among(Bounds::of(w), framed_maximized(top), &all).then(|| format!("{class} (pid {pid})"))
+    }
+}
+
+/// What the shell's notification state says the owner is busy with, when it
+/// is something nothing should open over: a Direct3D fullscreen app (3) or
+/// presentation mode (4). Pure.
+pub fn busy_state(quns: i32) -> Option<&'static str> {
+    match quns {
+        3 => Some("a Direct3D fullscreen app"),
+        4 => Some("presentation mode"),
+        _ => None,
+    }
+}
+
+/// What the shell says the owner is busy with now ([`busy_state`] of
+/// [`notification_state`]).
+pub fn busy_now() -> Option<&'static str> {
+    notification_state().and_then(busy_state)
+}
+
+/// The shell's notification state (`SHQueryUserNotificationState`), or
+/// `None` if it won't say.
+pub fn notification_state() -> Option<i32> {
+    // SAFETY: no arguments; the state comes back by value.
+    unsafe { SHQueryUserNotificationState() }.ok().map(|s| s.0)
 }
 
 /// Whether two rectangles share any area.
@@ -435,8 +529,7 @@ fn covered_monitor(m: Bounds) -> Option<String> {
             return None;
         }
         let mut w = RECT::default();
-        let full = GetWindowRect(top, &raw mut w).is_ok()
-            && fullscreen_on(Bounds::of(w), m, IsZoomed(top).as_bool());
+        let full = GetWindowRect(top, &raw mut w).is_ok() && fullscreen_on(Bounds::of(w), m, framed_maximized(top));
         full.then(|| format!("{class} (pid {pid})"))
     }
 }
@@ -606,6 +699,7 @@ pub(crate) mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
+        busy_state, framed_style, fullscreen_among, primary_work_area, work_area_at,
         apply_toolwindow, can_take_foreground, covers, foreground_window, fullscreen_on, hwnd,
         intersects, is_app_window, is_shell_class, lock_state, make_layered_opaque, monitors,
         next_app_window, owned_by_us, passed_over_as_ours, pick_app, pin_toolwindow, session_locked,
@@ -818,6 +912,76 @@ pub(crate) mod tests {
     #[test]
     fn the_session_lock_can_be_read() {
         assert!(session_locked().is_some());
+    }
+
+    /// Another app's window is fullscreen if it takes over any one monitor
+    /// whole, unmaximised; one spanning two monitors takes over neither.
+    #[test]
+    fn fullscreen_among_table() {
+        let one = Bounds { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let two = Bounds { left: 1920, top: 0, right: 4480, bottom: 1440 };
+        let both = [one, two];
+        assert!(!fullscreen_among(one, true, &both), "maximised");
+        assert!(fullscreen_among(two, false, &both), "covering monitor 2");
+        let span = Bounds { left: 960, top: 0, right: 3000, bottom: 1440 };
+        assert!(!fullscreen_among(span, false, &both), "spanning two, covering neither whole");
+        let windowed = Bounds { left: 100, top: 100, right: 900, bottom: 700 };
+        assert!(!fullscreen_among(windowed, false, &both));
+        assert!(!fullscreen_among(one, false, &[]), "no monitors");
+    }
+
+    /// Both fullscreen tests, the foreground's and a monitor's, exempt only
+    /// a framed window merely maximised, never any maximised one.
+    #[test]
+    fn both_fullscreen_tests_exempt_only_framed_maximised_windows() {
+        let all = include_str!("windows_ext.rs").replace("\r\n", "\n");
+        let src = &all[..all.find("#[cfg(test)]").unwrap()];
+        for name in ["pub fn fullscreen_foreground(", "fn covered_monitor("] {
+            let at = src.find(name).unwrap();
+            let body = &src[at..at + src[at..].find("\n}\n").unwrap()];
+            assert!(body.contains("framed_maximized(top)"), "{name}");
+            assert!(!body.contains("IsZoomed"), "{name} reads IsZoomed only through framed_maximized");
+        }
+    }
+
+    /// A sizing border or a caption is a frame; a bare popup has none.
+    #[test]
+    fn a_frame_is_a_sizing_border_or_a_caption() {
+        use windows::Win32::UI::WindowsAndMessaging::{WS_CAPTION, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_THICKFRAME, WS_VISIBLE};
+        assert!(framed_style(WS_OVERLAPPEDWINDOW.0), "an editor");
+        assert!(framed_style((WS_POPUP | WS_THICKFRAME).0), "a frameless app that can be resized");
+        assert!(framed_style((WS_POPUP | WS_CAPTION).0));
+        assert!(!framed_style((WS_POPUP | WS_VISIBLE).0), "a borderless fullscreen app");
+        assert!(!framed_style(0));
+    }
+
+    /// Only a Direct3D fullscreen app and presentation mode are busy.
+    #[test]
+    fn only_d3d_and_presentation_mode_are_busy() {
+        for quns in -1..=7 {
+            let want = match quns {
+                3 => Some("a Direct3D fullscreen app"),
+                4 => Some("presentation mode"),
+                _ => None,
+            };
+            assert_eq!(busy_state(quns), want, "{quns}");
+        }
+    }
+
+    /// The work area at the primary's centre is the primary's.
+    #[test]
+    fn work_area_at_matches_the_primary_at_its_centre() {
+        let (work, dpi) = primary_work_area().unwrap();
+        let at = work_area_at(work.left + work.width() / 2, work.top + work.height() / 2).unwrap();
+        assert_eq!(at, (work, dpi));
+        assert!(dpi >= 48);
+    }
+
+    /// A point on no monitor finds the nearest one.
+    #[test]
+    fn a_point_off_every_monitor_finds_the_nearest() {
+        let (work, _) = work_area_at(-1_000_000, -1_000_000).unwrap();
+        assert!(monitors().iter().any(|&(_, w)| w == work));
     }
 
     /// Fullscreen is covering the monitor without being maximised. With an

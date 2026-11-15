@@ -15,7 +15,7 @@ import { STATUS_EVENT, parseStatus, type AvatarStatus } from "../avatar/status";
 import type { LinkStatus } from "../shared/companion";
 import { COMPANION_STATUS_EVENT, parseCompanionStatus } from "../shared/link";
 import { afterAsking } from "../shared/asking";
-import { avatarStatus, close, companionStatus, say } from "./api";
+import { avatarStatus, close, companionStatus, ready, say } from "./api";
 import { Prompt } from "./Prompt";
 import { status } from "./view";
 
@@ -73,6 +73,9 @@ async function main(): Promise<void> {
       ),
       root,
     );
+    // Mounted and listening: only now may the hotkey open it (a page that
+    // failed to load never says so, and the prompt never shows empty).
+    ready().catch((e) => console.warn("prompt: couldn't tell the shell it is ready", e));
   }
 }
 

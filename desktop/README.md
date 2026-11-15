@@ -6,8 +6,8 @@ over the `/companion` WebSocket ([plan 14](../plans/14-desktop-companion.md),
 
 Today it is one persistent, transparent, click-through, never-focused avatar
 window with a WebGL VRM in it, a control window (tray > Settings…), a tray,
-two hotkeys, and the prompt (*Ask Fritz*), whose window is built but which
-nothing opens yet (PR 4 of the build plan is under way). Spike 0 proved the window ([docs/SPIKE0.md](docs/SPIKE0.md)), and
+three hotkeys, and the prompt (*Ask Fritz*), Ctrl+Alt+F (PR 4 of the build
+plan is under way). Spike 0 proved the window ([docs/SPIKE0.md](docs/SPIKE0.md)), and
 its table is PR 2's acceptance.
 
 ## What it keeps, and where
@@ -24,8 +24,8 @@ opens it):
 | `diagnostics\foreground.log` | Spike 0's foreground logger, **off** unless `diagnostics.foregroundLog` is `true` (read at start): it writes other apps' window titles |
 | `avatar\fritz.vrm` | The owner's model, if there is one (or `avatar.vrmPath`) |
 
-The hotkeys are `hotkeys.arrange` (Ctrl+Alt+A) and `hotkeys.park`
-(Ctrl+Alt+H), read at start. His eyes follow the cursor while
+The hotkeys are `hotkeys.arrange` (Ctrl+Alt+A), `hotkeys.park`
+(Ctrl+Alt+H) and `hotkeys.prompt` (Ctrl+Alt+F), read at start. His eyes follow the cursor while
 `avatar.lookatCursor` is `true` (the default): on a VRoid export the eyes
 turn, and on any model his head turns part of the way, which is what shows
 on the placeholder.
@@ -73,8 +73,8 @@ pytest fails while they differ.
 
 His replies show in a bubble over his head, on its own panel in the mood's
 `--surface-2` (it floats over whatever is on the desktop, so it never
-trusts the desktop behind it). Settings › Brain's *Ask him something* is
-how to ask him for now (the prompt's hotkey comes next): he glances up while
+trusts the desktop behind it). The prompt (Ctrl+Alt+F, below) or Settings
+› Brain's *Ask him something* asks him: he glances up while
 he thinks, the reply streams in, a tool's notice shows as a smaller line,
 and the brain's last word on the reply replaces what streamed. It holds 6
 seconds, or longer for a long reply (50 ms a character, at most 30
@@ -92,10 +92,14 @@ room), the top 28% kept clear for the bubble (he stands as tall as he did in
 300×460). A window you arranged before keeps its size, so he looks smaller
 in it until you arrange him taller.
 
-## The prompt (being built)
+## The prompt
 
-*Ask Fritz* is a small window, hidden until it is asked for; PR 4's next
-commit gives it its hotkey, Ctrl+Alt+F. Enter asks him. The prompt closes
+*Ask Fritz* is a small window, hidden until Ctrl+Alt+F (`hotkeys.prompt`)
+opens it, just above Fritz on his monitor (below him if there's no room
+above; where he would stand while he is hidden), with the keyboard in it.
+The key again closes it. It doesn't open over the lock screen, another
+app's fullscreen window (a game, a video, a presentation), or while you are
+arranging him: the key then does nothing, and takes nothing. Enter asks him. The prompt closes
 once his window has sent the question on to the brain; a refusal (he isn't
 connected, his window is closed) leaves your words in it with the reason.
 Shift+Enter is a new line, ↑ in an empty field brings back the last
