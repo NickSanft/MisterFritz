@@ -25,7 +25,14 @@ opens it):
 | `avatar\fritz.vrm` | The owner's model, if there is one (or `avatar.vrmPath`) |
 
 The hotkeys are `hotkeys.arrange` (Ctrl+Alt+A), `hotkeys.park`
-(Ctrl+Alt+H) and `hotkeys.prompt` (Ctrl+Alt+F), read at start. His eyes follow the cursor while
+(Ctrl+Alt+H) and `hotkeys.prompt` (Ctrl+Alt+F), registered at start. A key
+set through the shell's `set_hotkey` (which Settings' Hotkeys section, still
+to come, calls) is bound the moment it is saved: checked (Ctrl and Alt
+together, or Win, or F13 to F24 alone; no other action's key, nor
+push-to-talk's Ctrl+Alt+Space), taken from Windows, saved, and only then is
+the old key let go, so a key another app holds is refused with the old one
+still working. A key edited into `settings.json` by hand takes effect at the
+next start. His eyes follow the cursor while
 `avatar.lookatCursor` is `true` (the default): on a VRoid export the eyes
 turn, and on any model his head turns part of the way, which is what shows
 on the placeholder.

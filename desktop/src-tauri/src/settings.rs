@@ -1298,6 +1298,7 @@ mod tests {
             ("brain.clientName", json!("x".repeat(65)), "longer than 64"),
             ("brain.clientName", json!("Nick\u{7}PC"), "control character"),
             ("hotkeys.arrange", json!("Ctrl+Alt+Nope"), "hotkeys.arrange"),
+            ("hotkeys.prompt", json!("Ctrl+Alt+Nope"), "hotkeys.prompt"),
         ] {
             let err = with_value(&s, path, value).unwrap_err();
             assert!(err.contains(says), "{path}: {err}");

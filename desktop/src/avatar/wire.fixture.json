@@ -16,6 +16,7 @@
   "hotkeys": {
     "arrange": "avatar:arrange"
   },
+  "hotkeyActions": ["arrange", "park", "prompt"],
   "handshakeStages": [
     "ready",
     "painted"
@@ -139,6 +140,14 @@
         "path",
         "value"
       ]
+    },
+    "setHotkey": {
+      "name": "set_hotkey",
+      "args": ["action", "accelerator"]
+    },
+    "hotkeysBound": {
+      "name": "hotkeys_bound",
+      "args": []
     },
     "powerDisplay": {
       "name": "power_display",

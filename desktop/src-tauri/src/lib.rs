@@ -287,7 +287,55 @@ async fn set_setting(
     path: String,
     value: serde_json::Value,
 ) -> Result<Settings, String> {
+    window_may_set(&path)?;
     change_setting(&app, &path, value)
+}
+
+/// Why a window may not set the hotkeys with `set_setting`.
+const HOTKEYS_ELSEWHERE: &str = "Hotkeys are set in Settings › Hotkeys, which binds them as it saves them.";
+
+/// What a window may not set by its path: the hotkeys, which `set_hotkey`
+/// binds as it saves them (one saved by its path alone would wait for the
+/// next start, unchecked). The shell's own `change_setting` is unaffected.
+fn window_may_set(path: &str) -> Result<(), String> {
+    if path == "hotkeys" || path.starts_with("hotkeys.") {
+        Err(HOTKEYS_ELSEWHERE.to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+/// Only the control window (Settings, and its first run) sets hotkeys.
+fn from_the_control(label: &str) -> Result<(), String> {
+    if label == CONTROL_LABEL {
+        Ok(())
+    } else {
+        Err(format!("only Fritz's Settings may do that, not {label:?}"))
+    }
+}
+
+/// Set one of Fritz's keys (`prompt`, `arrange` or `park`): checked, taken
+/// from Windows, saved, and only then is the old key let go. Refused with
+/// the reason, the old key still working. On a blocking worker: the plugin
+/// waits on the main thread.
+#[tauri::command]
+async fn set_hotkey(
+    app: AppHandle,
+    webview: tauri::Webview,
+    action: String,
+    accelerator: String,
+) -> Result<Settings, String> {
+    from_the_control(webview.label())?;
+    tauri::async_runtime::spawn_blocking(move || hotkeys::rebind(&app, &action, &accelerator))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Each action's key as Windows holds it now, or null: a setting that fell
+/// back at start, or that Windows refused, shows here as it really is.
+#[tauri::command]
+async fn hotkeys_bound() -> std::collections::BTreeMap<&'static str, Option<String>> {
+    hotkeys::bound_now()
 }
 
 /// Whether the display is on: for a page that starts after the last
@@ -901,6 +949,8 @@ pub fn run() {
             avatar_vrm,
             get_settings,
             set_setting,
+            set_hotkey,
+            hotkeys_bound,
             power_display,
             cursor_now,
             set_parked,
@@ -1369,6 +1419,32 @@ mod tests {
     }
 
     #[test]
+    fn only_the_control_window_sets_hotkeys() {
+        assert!(super::from_the_control(super::CONTROL_LABEL).is_ok());
+        for other in [crate::overlay_machine::OVERLAY_LABEL, crate::prompt::LABEL, ""] {
+            assert!(super::from_the_control(other).is_err(), "{other:?}");
+        }
+    }
+
+    /// A window sets a hotkey with `set_hotkey`, which binds it; by its
+    /// path it would only wait, unchecked, for the next start. The check
+    /// is `set_setting`'s first line.
+    #[test]
+    fn a_window_may_not_set_hotkeys_directly() {
+        for path in ["hotkeys", "hotkeys.prompt", "hotkeys.arrange", "hotkeys.park", "hotkeys.ptt"] {
+            assert_eq!(super::window_may_set(path), Err(super::HOTKEYS_ELSEWHERE.to_owned()), "{path}");
+        }
+        for path in ["avatar.lookatCursor", "theme.mood", "hotkeysExtra", "diagnostics.foregroundLog"] {
+            assert_eq!(super::window_may_set(path), Ok(()), "{path}");
+        }
+        let src = include_str!("lib.rs").replace("\r\n", "\n");
+        let at = src.find("async fn set_setting(").unwrap();
+        let body = &src[at + src[at..].find('{').unwrap() + 1..];
+        let first = body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap();
+        assert_eq!(first, "window_may_set(&path)?;");
+    }
+
+    #[test]
     fn only_the_prompt_may_use_its_commands() {
         assert!(super::from_the_prompt(crate::prompt::LABEL).is_ok());
         for other in [crate::overlay_machine::OVERLAY_LABEL, super::CONTROL_LABEL, ""] {
@@ -1542,6 +1618,7 @@ mod tests {
             ("prompt_say", "from_the_prompt"),
             ("prompt_close", "from_the_prompt"),
             ("prompt_ready", "from_the_prompt"),
+            ("set_hotkey", "from_the_control"),
         ] {
             let at = src.find(&format!("async fn {name}(")).unwrap_or_else(|| panic!("no command {name}"));
             let body = &src[at + src[at..].find('{').unwrap() + 1..];
