@@ -22,8 +22,9 @@
 //!
 //! Focus is taken with plain `SetForegroundWindow`, never tauri's or tao's
 //! focus call, which injects an Alt key press when Windows refuses
-//! (`the_overlay_never_calls_set_focus`). Locked, the window is not even
-//! focusable (`WS_EX_NOACTIVATE`); only Arrange makes it so.
+//! (`keyboard::the_shell_never_calls_set_focus`). Locked, the window is not
+//! even focusable (`WS_EX_NOACTIVATE`); only Arrange makes it so. Who gets
+//! the keyboard back is [`crate::keyboard`]'s to say.
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
@@ -41,6 +42,7 @@ use crate::overlay_machine::{
     LEASE_TICK, NOT_OPEN, NO_READY_GLOBAL, OVERLAY_LABEL, OVERLAY_STATUS_EVENT, OVERLAY_TITLE,
     PRETEND_NO_READY_ENV, R1_RUNG, WATCHDOG,
 };
+use crate::keyboard::{self, Keyboard};
 use crate::windows_ext::{self, Bounds};
 
 /// Lorraine's WebView2 arguments, byte-identical in every window this app
@@ -674,30 +676,11 @@ fn show(shared: &OverlayShared, n: &impl Native) {
     }
 }
 
-/// The window that should get the keyboard back after Arrange: `fg` if it
-/// is someone else's usable window, else the app beneath in z-order. Arrange
-/// from the tray finds the tray's own hidden window in the foreground (the
-/// menu put it there), which can never take the keyboard back.
-///
-/// Of our own windows, only the control window counts, both as `fg` and in
-/// the z-order: Arrange started from it, or from the tray while it was in
-/// use, hands the keyboard back to it, not to the app beneath (which would
-/// come up over it).
-fn return_target(fg: isize, ours: isize, n: &impl Native) -> isize {
-    let settings = n.settings_window();
-    let ours_but_returnable = |w: isize| !n.owned_by_us(w) || (w != 0 && w == settings);
-    if fg != 0 && fg != ours && ours_but_returnable(fg) && n.can_take_foreground(fg) {
-        fg
-    } else {
-        n.next_app_window(ours, settings)
-    }
-}
-
-/// Take the foreground for Arrange, remembering who to give it back to. The
-/// window must be able to activate first.
+/// Take the foreground for Arrange, remembering who to give it back to
+/// ([`keyboard::return_target`]). The window must be able to activate first.
 fn focus(shared: &OverlayShared, n: &impl Native) {
     let ours = shared.hwnd.load(Ordering::SeqCst);
-    let back = return_target(n.foreground(), ours, n);
+    let back = keyboard::return_target(n.foreground(), ours, n);
     shared.return_to.store(back, Ordering::SeqCst);
     n.set_focusable(true);
     let ok = n.try_foreground(ours);
@@ -722,11 +705,7 @@ fn return_focus(shared: &OverlayShared, n: &impl Native) {
     let fg = n.foreground();
     let settings = n.settings_window();
     let target = if fg == ours {
-        if saved != 0 && n.can_take_foreground(saved) {
-            saved
-        } else {
-            n.next_app_window(ours, settings)
-        }
+        keyboard::hand_back(saved, ours, n)
     } else if fg != 0 && n.owned_by_us(fg) && !n.can_take_foreground(fg) {
         n.next_app_window(ours, settings)
     } else {
@@ -798,7 +777,7 @@ fn arm_lease(app: &AppHandle, instance: u32, gen: u32) {
 
 /// The calls the effects make on the window and the desktop. A trait so the
 /// order the shell makes them in is tested without a window.
-trait Native {
+trait Native: Keyboard {
     fn set_ignore_cursor(&self, on: bool);
     fn set_focusable(&self, on: bool);
     fn make_layered_opaque(&self, hwnd: isize);
@@ -806,24 +785,9 @@ trait Native {
     fn show(&self);
     fn close(&self);
     fn destroy(&self);
-    fn foreground(&self) -> isize;
-    fn try_foreground(&self, hwnd: isize) -> bool;
-    fn can_take_foreground(&self, hwnd: isize) -> bool;
     fn unmark_non_rude(&self, hwnd: isize);
     fn bounds(&self, hwnd: isize) -> Option<Bounds>;
     fn move_to(&self, x: i32, y: i32);
-    /// A window of this process (the tray's hidden window, the avatar, the
-    /// control window).
-    fn owned_by_us(&self, hwnd: isize) -> bool;
-    /// The control window (tray > Settings), or 0: the one window of ours
-    /// the keyboard is handed back to after Arrange.
-    fn settings_window(&self) -> isize;
-    /// The app in use: the top ordinary app window that isn't `skip`
-    /// (always-on-top ones only if there is no other), else the desktop.
-    /// Where the keyboard goes when there's nobody saved to give it back to.
-    /// Our own windows never count, except `also` (the control window, or
-    /// 0): visible and not minimised, it is an app like any other.
-    fn next_app_window(&self, skip: isize, also: isize) -> isize;
     /// `r`, moved onto a live monitor if its middle is on none.
     fn on_screen(&self, r: OverlayRect) -> OverlayRect;
 }
@@ -885,18 +849,6 @@ impl Native for Desktop {
         }
     }
 
-    fn foreground(&self) -> isize {
-        windows_ext::foreground_window()
-    }
-
-    fn try_foreground(&self, hwnd: isize) -> bool {
-        windows_ext::try_foreground(hwnd)
-    }
-
-    fn can_take_foreground(&self, hwnd: isize) -> bool {
-        windows_ext::can_take_foreground(hwnd)
-    }
-
     fn unmark_non_rude(&self, hwnd: isize) {
         crate::non_rude::unmark_non_rude(hwnd);
     }
@@ -911,20 +863,34 @@ impl Native for Desktop {
         }
     }
 
-    fn owned_by_us(&self, hwnd: isize) -> bool {
-        windows_ext::owned_by_us(hwnd)
+    fn on_screen(&self, r: OverlayRect) -> OverlayRect {
+        onto_screen(r)
+    }
+}
+
+impl Keyboard for Desktop {
+    fn foreground(&self) -> isize {
+        windows_ext::foreground_window()
     }
 
-    fn next_app_window(&self, skip: isize, also: isize) -> isize {
-        windows_ext::next_app_window(skip, also)
+    fn try_foreground(&self, hwnd: isize) -> bool {
+        windows_ext::try_foreground(hwnd)
+    }
+
+    fn can_take_foreground(&self, hwnd: isize) -> bool {
+        windows_ext::can_take_foreground(hwnd)
+    }
+
+    fn owned_by_us(&self, hwnd: isize) -> bool {
+        windows_ext::owned_by_us(hwnd)
     }
 
     fn settings_window(&self) -> isize {
         self.1
     }
 
-    fn on_screen(&self, r: OverlayRect) -> OverlayRect {
-        onto_screen(r)
+    fn next_app_window(&self, skip: isize, also: isize) -> isize {
+        windows_ext::next_app_window(skip, also)
     }
 }
 
@@ -939,6 +905,7 @@ mod tests {
         park, return_focus, show, wait_closed, window_effect, Native, OverlayShared, BROWSER_ARGS,
         PARK_AT,
     };
+    use crate::keyboard::Keyboard;
     use crate::overlay_machine::{
         should_return_focus, Effect, OverlayRect, Phase, Setter, R1_RUNG,
     };
@@ -1006,6 +973,21 @@ mod tests {
         fn destroy(&self) {
             self.log("destroy".into());
         }
+        fn unmark_non_rude(&self, hwnd: isize) {
+            self.log(format!("unmark {hwnd}"));
+        }
+        fn bounds(&self, _hwnd: isize) -> Option<Bounds> {
+            self.bounds
+        }
+        fn move_to(&self, x: i32, y: i32) {
+            self.log(format!("move {x} {y}"));
+        }
+        fn on_screen(&self, r: OverlayRect) -> OverlayRect {
+            self.screen.unwrap_or(r)
+        }
+    }
+
+    impl Keyboard for Fake {
         fn foreground(&self) -> isize {
             self.foreground
         }
@@ -1016,17 +998,11 @@ mod tests {
         fn can_take_foreground(&self, hwnd: isize) -> bool {
             self.takeable.contains(&hwnd)
         }
-        fn unmark_non_rude(&self, hwnd: isize) {
-            self.log(format!("unmark {hwnd}"));
-        }
-        fn bounds(&self, _hwnd: isize) -> Option<Bounds> {
-            self.bounds
-        }
-        fn move_to(&self, x: i32, y: i32) {
-            self.log(format!("move {x} {y}"));
-        }
         fn owned_by_us(&self, hwnd: isize) -> bool {
             hwnd == OURS || self.ours.contains(&hwnd)
+        }
+        fn settings_window(&self) -> isize {
+            self.settings
         }
         fn next_app_window(&self, skip: isize, also: isize) -> isize {
             self.z
@@ -1038,12 +1014,6 @@ mod tests {
                         && (!self.owned_by_us(w) || w == also)
                 })
                 .unwrap_or(self.next_app)
-        }
-        fn settings_window(&self) -> isize {
-            self.settings
-        }
-        fn on_screen(&self, r: OverlayRect) -> OverlayRect {
-            self.screen.unwrap_or(r)
         }
     }
 
@@ -1061,22 +1031,6 @@ mod tests {
             right: left + 300,
             bottom: top + 460,
         })
-    }
-
-    /// A source scan, the honest limit without a window: tauri's and tao's
-    /// focus call injects an Alt key press when Windows refuses, so the shell
-    /// must never make it. The needles are built from halves so this test
-    /// doesn't find itself, and are calls (a method or a path), so its own
-    /// name doesn't either.
-    #[test]
-    fn the_overlay_never_calls_set_focus() {
-        let src = include_str!("overlay_windows.rs");
-        for needle in [concat!(".set_", "focus("), concat!("::set_", "focus(")] {
-            assert!(
-                !src.contains(needle),
-                "the avatar takes the foreground with try_foreground, never {needle}"
-            );
-        }
     }
 
     /// The build flags the spike stands on, and their order: click-through

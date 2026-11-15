@@ -13,7 +13,8 @@ not touched these files since.
 | Here | There | Changed |
 |---|---|---|
 | `src-tauri/src/overlay_machine.rs` | `src-tauri/src/overlay_machine.rs` | The recorder's inputs, state and tests removed; names are Fritz's; `Input::Park` / `Effect::Park` added (a move off screen, never a hide), with `parked` on the core and in the status; Arrange refused while parked |
-| `src-tauri/src/overlay_windows.rs` | `src-tauri/src/overlay_windows.rs` | Charm serving and the recorder removed; `.focusable(false)` and Lorraine's browser arguments added; parking, the cover watch's park and the saved spot; the status emitted from the main thread at the time it runs; handing the keyboard back rewritten; effects run under `logs::guard` |
+| `src-tauri/src/overlay_windows.rs` | `src-tauri/src/overlay_windows.rs` | Charm serving and the recorder removed; `.focusable(false)` and Lorraine's browser arguments added; parking, the cover watch's park and the saved spot; the status emitted from the main thread at the time it runs; handing the keyboard back rewritten, and its rules moved to `keyboard.rs`; effects run under `logs::guard` |
+| `src-tauri/src/keyboard.rs` (part) | `src-tauri/src/overlay_windows.rs` (`Native`) | `foreground`, `try_foreground` and `can_take_foreground`, as methods of `Keyboard`; `the_shell_never_calls_set_focus` is its `the_overlay_never_calls_set_focus`, run over every module; who gets the keyboard back (`return_target`, `hand_back`) is Fritz's own |
 | `src-tauri/src/non_rude.rs` | `divora-capture/src/native/window.rs` | `mark_non_rude` / `unmark_non_rude` only |
 | `src-tauri/src/windows_ext.rs` (part) | `divora-capture/src/native/window.rs` | `foreground_window`, `try_foreground`, `can_take_foreground`, `make_layered_opaque`; the rest of the file is Fritz's own or follows Lorraine (below) |
 | `src/avatar/status.ts` | `src/overlay/status.ts` | Cut to the avatar's status and commands |

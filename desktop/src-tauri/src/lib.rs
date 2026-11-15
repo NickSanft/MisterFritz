@@ -15,6 +15,7 @@ mod cover;
 mod cursor;
 mod foreground_log;
 mod hotkeys;
+mod keyboard;
 mod logs;
 mod non_rude;
 mod overlay_machine;
