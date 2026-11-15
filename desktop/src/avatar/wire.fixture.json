@@ -311,6 +311,7 @@
     [0.8, "rich"],
     [1, "rich"]
   ],
+  "controlWizard": "wizard",
   "controlSections": [
     "brain",
     "fritz",

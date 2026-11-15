@@ -59,6 +59,16 @@ export function parseSection(v: unknown): SectionId | null {
   return (SECTIONS as readonly unknown[]).includes(v) ? (v as SectionId) : null;
 }
 
+/** What `control_opening` answers for the first run (the shell's
+ * CONTROL_WIZARD), which takes the sections' place while it is open. */
+export const WIZARD = "wizard";
+/** Where the window opens: a section, or the first run. */
+export type Opening = SectionId | typeof WIZARD;
+
+export function parseOpening(v: unknown): Opening | null {
+  return v === WIZARD ? WIZARD : parseSection(v);
+}
+
 /** The settings the control window reads (the shell has more). */
 export interface ControlSettings {
   brain: Brain;
@@ -196,9 +206,10 @@ export async function reloadModel(): Promise<void> {
   await invoke(CMD.reloadModel);
 }
 
-/** The section to open at (`FRITZ_SHOW_SETTINGS=appearance`), if any. */
-export async function controlOpening(): Promise<SectionId | null> {
-  return parseSection(await invoke<unknown>(CMD.controlOpening));
+/** Where to open (`FRITZ_SHOW_SETTINGS=appearance`, or the first run with
+ * no token yet), if anywhere. */
+export async function controlOpening(): Promise<Opening | null> {
+  return parseOpening(await invoke<unknown>(CMD.controlOpening));
 }
 
 export async function arrange(): Promise<void> {

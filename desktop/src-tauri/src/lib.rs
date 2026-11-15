@@ -362,22 +362,91 @@ pub const CONTROL_LABEL: &str = "control";
 /// "Load it again", after the owner drops a new export in).
 pub const RELOAD_EVENT: &str = "avatar:reload";
 /// Shows the control window at start: for a test run, which can't click the
-/// tray. Set to a section's name (`appearance`), it opens there.
+/// tray. Set to a section's name (`appearance`), it opens there; set to
+/// `wizard`, at the first run.
 const SHOW_SETTINGS_ENV: &str = "FRITZ_SHOW_SETTINGS";
 /// The control window's sections, by the ids its page gives them, in order.
 pub const CONTROL_SECTIONS: [&str; 7] = ["brain", "fritz", "hotkeys", "appearance", "model", "diagnostics", "about"];
+/// What `control_opening` answers for the first run, which takes the
+/// control window's place of its sections.
+pub const CONTROL_WIZARD: &str = "wizard";
 
-/// The section the control window opens at: the one `FRITZ_SHOW_SETTINGS`
-/// names, if it names one; else, with no token yet, Brain (the first run
-/// opens where he is connected).
+/// Where the control window opens: the section `FRITZ_SHOW_SETTINGS` names,
+/// if it names one; else the first run, when it names that or there is no
+/// token yet; else nowhere in particular.
 fn opening(env: Option<&str>, token_present: bool) -> Option<&'static str> {
-    let named = env.and_then(|want| {
-        CONTROL_SECTIONS
-            .iter()
-            .copied()
-            .find(|s| s.eq_ignore_ascii_case(want.trim()))
+    let want = env.map(str::trim);
+    let named = want.and_then(|want| CONTROL_SECTIONS.iter().copied().find(|s| s.eq_ignore_ascii_case(want)));
+    let wizard = want.is_some_and(|w| w.eq_ignore_ascii_case(CONTROL_WIZARD)) || !token_present;
+    named.or_else(|| wizard.then_some(CONTROL_WIZARD))
+}
+
+/// What Settings must not open over at start, or `None`, as the prompt's
+/// gate has it: the lock screen, another app's fullscreen window in front,
+/// the shell's busy states (a Direct3D fullscreen app, presentation mode),
+/// or a fullscreen window on the monitor where Settings will stand (its
+/// hidden window, `control`, already stands there). Asked of Windows
+/// itself: the cover watch may not have looked yet.
+fn in_front_now(control: isize) -> Option<String> {
+    cover::covered_by(windows_ext::session_locked(), || {
+        windows_ext::fullscreen_foreground()
+            .or_else(|| windows_ext::busy_now().map(str::to_owned))
+            .or_else(|| windows_ext::window_bounds(control).and_then(windows_ext::covering_app))
+    })
+}
+
+/// Settings has been shown since start, by any way (the tray, the start).
+static CONTROL_SHOWN: AtomicBool = AtomicBool::new(false);
+
+/// How long Settings waits at start before looking again at what is in front.
+const SETTINGS_WAIT: Duration = Duration::from_secs(2);
+
+/// Wait while `in_front` names something, telling `waiting` once what it
+/// waits for, and `pause` between looks. Pure, for tests.
+fn wait_until_clear(
+    mut in_front: impl FnMut() -> Option<String>,
+    mut waiting: impl FnMut(&str),
+    mut pause: impl FnMut(),
+) {
+    let mut said = false;
+    while let Some(what) = in_front() {
+        if !said {
+            waiting(&what);
+            said = true;
+        }
+        pause();
+    }
+}
+
+/// Show Settings at start, as the first run or when asked to: at once, or,
+/// while something it mustn't open over is in front, once that has gone;
+/// and not at all if the owner opened it meanwhile (from the tray), which
+/// would only show it again, unasked. Never over a game, a presentation or
+/// the lock screen; the looks are made off the main thread, and the show
+/// posted back to it, where the tray's own show runs too.
+fn show_control_when_clear(app: AppHandle) {
+    let control = app.get_webview_window(CONTROL_LABEL).and_then(|w| w.hwnd().ok()).map_or(0, |h| h.0 as isize);
+    let spawned = std::thread::Builder::new().name("settings-at-start".into()).spawn(move || {
+        wait_until_clear(
+            || in_front_now(control),
+            |what| {
+                logs::startup(&format!("Settings waits: {what} is in front"));
+                tracing::info!(what, "Settings waits until nothing it mustn't open over is in front");
+            },
+            || std::thread::sleep(SETTINGS_WAIT),
+        );
+        let h = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if CONTROL_SHOWN.load(Ordering::SeqCst) {
+                tracing::info!("Settings was opened meanwhile: not shown again");
+            } else {
+                show_control(&h);
+            }
+        });
     });
-    named.or_else(|| (!token_present).then_some("brain"))
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "couldn't start the wait for Settings");
+    }
 }
 
 fn token_present() -> bool {
@@ -396,6 +465,7 @@ async fn control_opening() -> Option<&'static str> {
 /// window then waits behind, its taskbar button flashing); never tao's
 /// `set_focus`, which taps Alt into the owner's app to get its way.
 pub(crate) fn show_control(app: &AppHandle) {
+    CONTROL_SHOWN.store(true, Ordering::SeqCst);
     let Some(w) = app.get_webview_window(CONTROL_LABEL) else {
         tracing::warn!("there is no control window");
         return;
@@ -1001,10 +1071,10 @@ pub fn run() {
             let has_token = token_present();
             if companion::shows_control_at_start(has_token, std::env::var_os(SHOW_SETTINGS_ENV).is_some()) {
                 if !has_token {
-                    logs::startup("no companion token yet: Settings opens at Brain");
-                    tracing::info!("no companion token yet: Settings opens at Brain");
+                    logs::startup("no companion token yet: the first run opens in Settings");
+                    tracing::info!("no companion token yet: the first run opens in Settings");
                 }
-                show_control(&handle);
+                show_control_when_clear(handle.clone());
             }
             logs::startup("started");
             Ok(())
@@ -1101,8 +1171,9 @@ mod tests {
         assert_eq!((say["text"].as_str(), say["id"].as_u64()), (Some("good evening"), Some(7)));
     }
 
-    /// `FRITZ_SHOW_SETTINGS=<section>` opens the control window there; any
-    /// other value only shows it. With no token yet, it opens at Brain. The
+    /// `FRITZ_SHOW_SETTINGS=<section>` opens the control window there, and
+    /// `wizard` at the first run; any other value only shows it. With no
+    /// token yet, it opens at the first run unless a section is named. The
     /// sections are the page's ids (the fixture holds both sides to them).
     #[test]
     fn the_control_window_opens_where_it_is_told() {
@@ -1115,9 +1186,14 @@ mod tests {
         assert_eq!(opening(Some("model")), Some("model"));
         assert_eq!(opening(Some("appearances")), None);
         assert_eq!(opening(Some("brain")), Some("brain"));
-        // The first run: no token, so Brain, unless a section is named.
-        assert_eq!(super::opening(None, false), Some("brain"));
-        assert_eq!(super::opening(Some("1"), false), Some("brain"));
+        // The first run: no token, so the wizard, unless a section is named;
+        // or when asked for, token or not.
+        assert_eq!(super::opening(None, false), Some("wizard"));
+        assert_eq!(super::opening(Some("1"), false), Some("wizard"));
+        assert_eq!(super::opening(Some("wizard"), true), Some("wizard"));
+        assert_eq!(super::opening(Some(" Wizard "), true), Some("wizard"));
+        assert_eq!(super::opening(Some("wizards"), true), None);
+        assert_eq!(super::CONTROL_WIZARD, "wizard");
         assert_eq!(super::opening(Some("model"), false), Some("model"));
         assert_eq!(super::CONTROL_SECTIONS[0], "brain", "first in the window");
         let fixture: Value =
@@ -1131,6 +1207,55 @@ mod tests {
         assert_eq!(super::CONTROL_SECTIONS.to_vec(), want);
         for s in super::CONTROL_SECTIONS {
             assert_eq!(opening(Some(s)), Some(s));
+        }
+        assert_eq!(fixture["controlWizard"], super::CONTROL_WIZARD);
+        assert!(!super::CONTROL_SECTIONS.contains(&super::CONTROL_WIZARD), "the wizard isn't a section");
+    }
+
+    /// Settings at start waits while something it mustn't open over is in
+    /// front, says once what, and shows when that has gone; at once if
+    /// nothing is.
+    #[test]
+    fn settings_at_start_waits_for_a_clear_screen() {
+        let mut looks = vec![None, Some("Game".to_owned()), Some("the lock screen".to_owned()), Some("Game".to_owned())];
+        let (mut said, mut pauses) = (Vec::new(), 0);
+        super::wait_until_clear(|| looks.pop().flatten(), |w| said.push(w.to_owned()), || pauses += 1);
+        assert_eq!(said, ["Game"], "said once, for the first");
+        assert_eq!(pauses, 3);
+        let (mut said, mut pauses) = (Vec::<String>::new(), 0);
+        super::wait_until_clear(|| None, |w| said.push(w.to_owned()), || pauses += 1);
+        assert!(said.is_empty() && pauses == 0, "nothing in front: at once");
+    }
+
+    /// The show at start goes through the wait, never straight to the
+    /// window: the first run must not open over a game or the lock screen.
+    #[test]
+    fn settings_at_start_is_shown_only_through_the_wait() {
+        let all = include_str!("lib.rs").replace("\r\n", "\n");
+        let src = &all[..all.find("#[cfg(test)]").unwrap()];
+        let at = src.find(".setup(move |app| {").unwrap();
+        let setup = &src[at..];
+        assert!(setup.contains("show_control_when_clear(handle.clone());"));
+        assert!(!setup.contains("show_control(&handle)"), "straight to the window");
+        let at = src.find("fn show_control_when_clear(").unwrap();
+        let body = &src[at..at + src[at..].find("\n}\n").unwrap()];
+        assert!(body.contains("wait_until_clear(\n            || in_front_now(control),"), "{body}");
+        // Posted to the main thread, where the tray's show runs, and only if
+        // Settings wasn't opened meanwhile.
+        assert!(body.contains("run_on_main_thread(move || {\n            if CONTROL_SHOWN.load(Ordering::SeqCst) {"), "{body}");
+        assert!(body.contains("            } else {\n                show_control(&h);"), "{body}");
+        let at = src.find("pub(crate) fn show_control(").unwrap();
+        let first = src[at..].lines().nth(1).unwrap().trim();
+        assert_eq!(first, "CONTROL_SHOWN.store(true, Ordering::SeqCst);", "every show marks it");
+        let at = src.find("fn in_front_now(").unwrap();
+        let body = &src[at..at + src[at..].find("\n}\n").unwrap()];
+        for gate in [
+            "windows_ext::session_locked()",
+            "windows_ext::fullscreen_foreground()",
+            "windows_ext::busy_now()",
+            "windows_ext::window_bounds(control).and_then(windows_ext::covering_app)",
+        ] {
+            assert!(body.contains(gate), "{gate}");
         }
     }
 

@@ -29,6 +29,8 @@ not touched these files since.
 
 Not lifted, but following DivoraVoice: `src/divora/theme.ts` maps `theme.motion` to a motion level as its `src/App.tsx` (lines 168-177) and `src/overlay.tsx` (lines 111-124) do; the rest of that file is Fritz's own.
 
+Not lifted, but following DivoraVoice: the first run's layout (`src/control/Wizard.tsx`), a rail of the steps, the step, and a footer of *Skip setup*, *Back* and *Continue*, as its `src/components/Wizard.tsx` (lines 191-436) lays its own out; no code, and its steps are Settings' own rows.
+
 ## The fonts (SIL Open Font License 1.1)
 
 DivoraVoice loads its faces from Fontsource packages; the body self-hosts the

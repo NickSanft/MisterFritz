@@ -4,8 +4,8 @@ import {
   LOADED_CMD, RELOAD_EVENT, loadedArgs, parseStatus, vrmFetchError, type AvatarStatus,
 } from "../avatar/status";
 import {
-  CMD, COMPANION_STATUS_EVENT, HOTKEY_ACTIONS, HOTKEY_DEFAULTS, LOADED_EVENT, SECTIONS, SETTINGS_EVENT, args,
-  parseCompanionStatus, parseHotkeysBound, parseModelInfo, parseSection, parseSettings, type ModelInfo,
+  CMD, COMPANION_STATUS_EVENT, HOTKEY_ACTIONS, HOTKEY_DEFAULTS, LOADED_EVENT, SECTIONS, SETTINGS_EVENT, WIZARD, args,
+  parseCompanionStatus, parseHotkeysBound, parseModelInfo, parseOpening, parseSection, parseSettings, type ModelInfo,
 } from "./api";
 import {
   HOTKEY_DOES, connectionLines, hotkeyLine, identityLine, megabytes, modelLines, onThisPc, orPress, standing,
@@ -78,6 +78,15 @@ describe("the control window's wire", () => {
     for (const s of SECTIONS) expect(parseSection(s)).toBe(s);
     for (const bad of [null, "", "Appearance", "Brain", 1, {}]) expect(parseSection(bad)).toBeNull();
     expect(SECTIONS[0], "Brain comes first").toBe("brain");
+  });
+
+  /** The first run: the shell's CONTROL_WIZARD, which no section is. */
+  it("opens at the first run when the shell says so", () => {
+    expect(WIZARD).toBe(fixture.controlWizard);
+    expect(parseOpening("wizard")).toBe("wizard");
+    for (const s of SECTIONS) expect(parseOpening(s)).toBe(s);
+    for (const bad of [null, "", "Wizard", "wizards", 1, {}]) expect(parseOpening(bad)).toBeNull();
+    expect(parseSection("wizard"), "not a section").toBeNull();
   });
 
   /** The brain's link: the window saves the token and asks for the link,
@@ -435,5 +444,31 @@ describe("what Settings › Hotkeys says", () => {
       if (contrast(token("--text-lo", selectors), s2) < 4.5) loFails += 1;
     }
     expect(loFails, "--text-lo fails in every mood, which is why it changed").toBe(Object.keys(COMBOS).length);
+  });
+
+  /** The first run's words: its step line in --text-mid (not the
+   * eyebrow's --text-lo) on the page, the rail in --text-mid on
+   * --surface-1, and the numbers and ticks in the text's colours on
+   * --surface-3 (--success is far below 3:1 on the light surfaces). */
+  it("the first run's words are AA in every mood", () => {
+    const css = readFileSync(fileURLToPath(new URL("./control.css", import.meta.url)), "utf8").replace(/\r\n/g, "\n");
+    const rule = (sel: string) => {
+      const at = css.indexOf(`\n${sel} {`);
+      expect(at, sel).toBeGreaterThan(0);
+      return css.slice(at, css.indexOf("}", at));
+    };
+    expect(rule(".wizard-count")).toContain("color: var(--text-mid);");
+    expect(rule(".wizard-step")).toContain("color: var(--text-mid);");
+    expect(rule(".wizard-num")).toContain("color: var(--text-mid);");
+    expect(rule(".wizard-num")).toContain("background: var(--surface-3);");
+    expect(rule(".wizard-step.is-done .wizard-num")).toContain("color: var(--text-hi);");
+    expect(rule(".wizard-rail")).toContain("background: var(--surface-1);");
+    for (const [name, selectors] of Object.entries(COMBOS)) {
+      const t = (n: string) => token(n, selectors);
+      expect(contrast(t("--text-mid"), t("--bg")), `step line on ${name}`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(t("--text-mid"), t("--surface-1")), `rail on ${name}`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(t("--text-mid"), t("--surface-3")), `number on ${name}`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(t("--text-hi"), t("--surface-3")), `tick on ${name}`).toBeGreaterThanOrEqual(4.5);
+    }
   });
 });

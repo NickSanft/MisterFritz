@@ -187,13 +187,16 @@ describe("Settings › Brain", () => {
     blank.view.unmount();
     for (const name of ["offline", "refused", "connecting", "unconfigured"] as const) {
       const away = mount({ link: link(name) });
-      expect(away.question(), name).toBeDisabled();
+      // Unavailable, not disabled: a reconnect never drops the focus from it.
+      expect(away.question(), name).toHaveAttribute("aria-disabled", "true");
+      expect(away.question(), name).toBeEnabled();
       expect(away.askButton(), name).toBeDisabled();
       expect(away.view.getByText("Once he's connected, you can try him from here.")).toBeInTheDocument();
       away.view.unmount();
     }
     const unknown = mount({ link: null });
-    expect(unknown.question()).toBeDisabled();
+    expect(unknown.question()).toHaveAttribute("aria-disabled", "true");
+    expect(mount().question()).not.toHaveAttribute("aria-disabled");
   });
 
   /** A question typed while connected, then the link drops: it isn't sent
@@ -210,9 +213,11 @@ describe("Settings › Brain", () => {
     const askButton = view.getByRole("button", { name: "Ask" }) as HTMLButtonElement;
     fireEvent.input(question, { target: { value: "good evening" } });
     expect(askButton).toBeEnabled();
+    question.focus();
     setNow(link("offline"));
     expect(askButton).toBeDisabled();
-    expect(question).toBeDisabled();
+    expect(question).toHaveAttribute("aria-disabled", "true");
+    expect(document.activeElement, "the focus stays in the field").toBe(question);
     fireEvent.keyDown(question, { key: "Enter" });
     fireEvent.click(askButton);
     await settle();
@@ -235,6 +240,105 @@ describe("Settings › Brain", () => {
     answer(true);
     await settle();
     expect(ask).toHaveBeenCalledOnce();
+  });
+
+  /** A token pasted and left is saved, as the address is: the first run's
+   * Continue takes the field away, and it is never kept here. */
+  it("saves a pasted token when the field is left, and nothing when it is empty", async () => {
+    const { token, props } = mount({ tokenPresent: false });
+    fireEvent.blur(token());
+    expect(props.saveToken).not.toHaveBeenCalled();
+    fireEvent.input(token(), { target: { value: "  " } });
+    fireEvent.blur(token());
+    expect(props.saveToken).not.toHaveBeenCalled();
+    fireEvent.input(token(), { target: { value: "t0k-pasted" } });
+    fireEvent.blur(token());
+    await settle();
+    expect(props.saveToken).toHaveBeenCalledWith("t0k-pasted");
+    expect(token().value).toBe("");
+  });
+
+  /** Left for its own Connect, the field doesn't save: the press does,
+   * once, so a refusal stays said and nothing reconnects after it. */
+  it("a press on Connect saves a pasted token once, and a refusal stays", async () => {
+    const saveToken = vi.fn(async () => false);
+    const { token, button, props } = mount({ tokenPresent: true, saveToken });
+    fireEvent.input(token(), { target: { value: "abc 123" } });
+    // A press focuses the button first: the field's blur names it.
+    fireEvent.blur(token(), { relatedTarget: button() });
+    expect(saveToken).not.toHaveBeenCalled();
+    fireEvent.click(button());
+    await settle();
+    expect(saveToken).toHaveBeenCalledTimes(1);
+    expect(props.reconnect).not.toHaveBeenCalled();
+  });
+
+  /** Busy, not disabled, while it saves: a disabled button under the focus
+   * drops it to the page. A second press meanwhile does nothing. */
+  it("Connect stays where the focus can be while it saves, and saves once", async () => {
+    let done: (ok: boolean) => void = () => {};
+    const saveToken = vi.fn(() => new Promise<boolean>((r) => { done = r; }));
+    const { token, button } = mount({ tokenPresent: false, saveToken });
+    fireEvent.input(token(), { target: { value: "t0k-pasted" } });
+    fireEvent.click(button());
+    expect(button()).toBeEnabled();
+    expect(button()).toHaveAttribute("aria-busy", "true");
+    fireEvent.click(button());
+    done(true);
+    await settle();
+    expect(saveToken).toHaveBeenCalledTimes(1);
+    expect(button()).not.toHaveAttribute("aria-busy");
+  });
+
+  /** Tabbed past its Connect without pressing it, a pasted token is saved
+   * all the same; back to the field to mend it, it isn't. */
+  it("a pasted token is saved when Connect is left too, but not for the field", async () => {
+    const { token, button, props } = mount({ tokenPresent: false });
+    fireEvent.input(token(), { target: { value: "t0k-pasted" } });
+    fireEvent.blur(token(), { relatedTarget: button() });
+    fireEvent.blur(button(), { relatedTarget: token() });
+    expect(props.saveToken).not.toHaveBeenCalled();
+    fireEvent.blur(token(), { relatedTarget: button() });
+    fireEvent.blur(button(), { relatedTarget: null });
+    await settle();
+    expect(props.saveToken).toHaveBeenCalledTimes(1);
+    expect(props.saveToken).toHaveBeenCalledWith("t0k-pasted");
+  });
+
+  /** Refused with no token saved, Connect has nothing left to do: the
+   * focus it had goes to the emptied field, not to the page. */
+  it("a refused token pressed from Connect gives the focus back to the field", async () => {
+    const saveToken = vi.fn(async () => false);
+    const { token, button } = mount({ tokenPresent: false, saveToken });
+    fireEvent.input(token(), { target: { value: "abc 123" } });
+    button().focus();
+    fireEvent.click(button());
+    await settle();
+    expect(saveToken).toHaveBeenCalledTimes(1);
+    expect(button()).toBeDisabled();
+    expect(document.activeElement).toBe(token());
+    // Taken, the button stays where the focus is, as Reconnect.
+    const ok = mount({ tokenPresent: true, saveToken: vi.fn(async () => true) });
+    fireEvent.input(ok.token(), { target: { value: "t0k-pasted" } });
+    ok.button().focus();
+    fireEvent.click(ok.button());
+    await settle();
+    expect(document.activeElement).toBe(ok.button());
+  });
+
+  /** D32: Ask stays, and says the prompt's key for anywhere else, by its
+   * keycap's name; with no key held, it says nothing of one. */
+  it("names the prompt's key for anywhere else", () => {
+    const { view } = mount({ promptKey: "Ctrl+Alt+F" });
+    expect(view.getByText("Try him: his answer shows over his head. Anywhere else, press Ctrl+Alt+F.")).toBeInTheDocument();
+    view.unmount();
+    const win = mount({ promptKey: "Ctrl+Super+F", link: link("offline") });
+    expect(win.view.getByText(/^Once he's connected, you can try him from here\. Anywhere else, press Ctrl\+Win\+F\.$/))
+      .toBeInTheDocument();
+    win.view.unmount();
+    const none = mount({ promptKey: null });
+    expect(none.view.getByText("Try him: his answer shows over his head.")).toBeInTheDocument();
+    expect(none.view.queryByText(/Anywhere else/)).toBeNull();
   });
 
   it("waits for the settings before the address can be changed", () => {

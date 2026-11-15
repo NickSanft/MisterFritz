@@ -26,6 +26,14 @@ const MODEL = {
 
 let calls: { cmd: string; args: Args }[];
 let answers: Record<string, (args: Args) => unknown>;
+/** The page's listeners, by event, as Tauri's event plugin keeps them. */
+let callbacks: Map<number, (data: unknown) => void>;
+let listeners: Map<string, number[]>;
+
+/** The shell sends an event, as Tauri delivers one. */
+const emit = (event: string, payload: unknown) => {
+  for (const id of listeners.get(event) ?? []) callbacks.get(id)?.({ event, id, payload });
+};
 
 beforeEach(() => {
   calls = [];
@@ -37,11 +45,17 @@ beforeEach(() => {
     companion_status: () => fixture.companionStatusSamples.online,
     hotkeys_bound: () => ({ prompt: "Ctrl+Alt+F", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" }),
     control_opening: () => null,
-    "plugin:event|listen": (a) => a.handler,
+    "plugin:event|listen": (a) => {
+      const event = a.event as string;
+      listeners.set(event, [...(listeners.get(event) ?? []), a.handler as number]);
+      return a.handler;
+    },
     "plugin:event|unlisten": () => null,
     "plugin:app|version": () => "0.1.0",
   };
   let next = 1;
+  callbacks = new Map();
+  listeners = new Map();
   Object.assign(window, {
     matchMedia: (media: string) => ({ matches: false, media, addEventListener() {}, removeEventListener() {} }),
     __TAURI_INTERNALS__: {
@@ -52,7 +66,11 @@ beforeEach(() => {
         if (!answer) throw new Error(`the mock has no answer for ${cmd}`);
         return answer(args);
       },
-      transformCallback: () => next++,
+      transformCallback: (cb: (data: unknown) => void) => {
+        const id = next++;
+        callbacks.set(id, cb);
+        return id;
+      },
       unregisterCallback() {},
     },
     __TAURI_EVENT_PLUGIN_INTERNALS__: { unregisterListener() {} },
@@ -99,6 +117,28 @@ describe("the control window", () => {
     expect(view.queryByText(/^Working on /)).toBeNull();
   });
 
+  it("a hotkey's refusal outlives a change to another setting", async () => {
+    const why = "Another app already uses Ctrl+Alt+K: pick another.";
+    answers.set_hotkey = () => {
+      throw why;
+    };
+    const view = render(() => <App />);
+    const capture = await waitFor(() => view.getByRole("button", { name: "Ask Fritz hotkey: Ctrl Alt F" }));
+    fireEvent.click(capture, { detail: 1 });
+    press("k", { ctrlKey: true, altKey: true });
+    await waitFor(() => expect(view.getByRole("alert")).toHaveTextContent(why));
+    emit("settings:changed", { ...SETTINGS, theme: { ...SETTINGS.theme, mood: "midnight" } });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(document.documentElement.dataset.mood).toBe("midnight");
+    expect(view.getByRole("alert")).toHaveTextContent(why);
+  });
+
+  it("names the prompt's key in Brain's Ask line, as Windows holds it", async () => {
+    answers.hotkeys_bound = () => ({ prompt: "Ctrl+Super+F", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" });
+    const view = render(() => <App />);
+    await waitFor(() => expect(view.getByText(/Anywhere else, press Ctrl\+Win\+F\.$/)).toBeInTheDocument());
+  });
+
   it("says a refused key on its row, never in the window's banner", async () => {
     const why = "Another app already uses Ctrl+Alt+K: pick another.";
     answers.set_hotkey = () => {
@@ -115,5 +155,152 @@ describe("the control window", () => {
     expect(view.container.querySelector(".problem")).toBeNull();
     expect(view.getByRole("button", { name: "Hide or show him hotkey: Ctrl Alt H" })).toBeInTheDocument();
     await waitFor(() => expect(asked("hotkeys_bound").length).toBe(boundBefore + 1));
+  });
+});
+
+describe("the first run in the control window", () => {
+  const wizard = (view: ReturnType<typeof render>) => view.container.querySelector("[data-view=wizard]");
+  const sections = (view: ReturnType<typeof render>) => view.container.querySelector("main.sections");
+  const heading = (view: ReturnType<typeof render>) => view.container.querySelector("h2.wizard-title")?.textContent;
+
+  it("opens in place of the sections when the shell says so, and not otherwise", async () => {
+    answers.control_opening = () => "wizard";
+    const view = render(() => <App />);
+    await waitFor(() => expect(wizard(view)).not.toBeNull());
+    expect(sections(view)).toBeNull();
+    expect(view.container.querySelectorAll("section#brain")).toHaveLength(1);
+    view.unmount();
+    answers.control_opening = () => null;
+    const plain = render(() => <App />);
+    await waitFor(() => expect(asked("control_opening").length).toBe(2));
+    await waitFor(() => expect(sections(plain)).not.toBeNull());
+    // Let the opening's answer land before saying it changed nothing.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(wizard(plain)).toBeNull();
+  });
+
+  it("shows neither view until the shell has said where to open", async () => {
+    let answer: (at: string | null) => void = () => {};
+    answers.control_opening = () => new Promise((r) => { answer = r; });
+    const view = render(() => <App />);
+    await waitFor(() => expect(asked("get_settings")).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sections(view)).toBeNull();
+    expect(wizard(view)).toBeNull();
+    answer("wizard");
+    await waitFor(() => expect(wizard(view)).not.toBeNull());
+    expect(sections(view)).toBeNull();
+  });
+
+  it("Skip setup shows the sections again", async () => {
+    answers.control_opening = () => "wizard";
+    const view = render(() => <App />);
+    await waitFor(() => expect(wizard(view)).not.toBeNull());
+    fireEvent.click(view.getByRole("button", { name: "Skip setup" }));
+    expect(wizard(view)).toBeNull();
+    expect(sections(view)).not.toBeNull();
+  });
+
+  it("Summon brings him out, then puts the first run and the window away, in that order", async () => {
+    answers.control_opening = () => "wizard";
+    answers.set_parked = () => fixture.statusSamples.arranging;
+    answers["plugin:window|hide"] = () => null;
+    const view = render(() => <App />);
+    await waitFor(() => expect(wizard(view)).not.toBeNull());
+    for (let i = 0; i < 3; i += 1) fireEvent.click(view.getByRole("button", { name: "Continue" }));
+    fireEvent.click(view.getByRole("button", { name: "Summon Fritz" }));
+    await waitFor(() => expect(asked("plugin:window|hide")).toHaveLength(1));
+    const order = calls.map((c) => c.cmd).filter((c) => c === "set_parked" || c === "plugin:window|hide");
+    expect(order).toEqual(["set_parked", "plugin:window|hide"]);
+    expect(asked("set_parked")[0].args).toEqual({ on: false });
+    expect(asked("plugin:window|hide")[0].args).toEqual({ label: "control" });
+    expect(wizard(view)).toBeNull();
+  });
+
+  it("a summon refused leaves the first run and the window as they were, saying why", async () => {
+    answers.control_opening = () => "wizard";
+    answers.set_parked = () => {
+      throw "His window couldn't open.";
+    };
+    answers["plugin:window|hide"] = () => null;
+    const view = render(() => <App />);
+    await waitFor(() => expect(wizard(view)).not.toBeNull());
+    for (let i = 0; i < 3; i += 1) fireEvent.click(view.getByRole("button", { name: "Continue" }));
+    fireEvent.click(view.getByRole("button", { name: "Summon Fritz" }));
+    await waitFor(() => expect(view.container.querySelector(".problem")).toHaveTextContent("Couldn't summon him: His window couldn't open."));
+    expect(asked("plugin:window|hide")).toEqual([]);
+    expect(wizard(view)).not.toBeNull();
+  });
+
+  it("a token pasted on its first step is saved when the owner moves on, Connect or not", async () => {
+    answers.control_opening = () => "wizard";
+    answers.get_token_present = () => false;
+    answers.companion_status = () => fixture.companionStatusSamples.unconfigured;
+    answers.set_token = () => null;
+    const view = render(() => <App />);
+    await waitFor(() => expect(wizard(view)).not.toBeNull());
+    const token = view.getByLabelText("His token") as HTMLInputElement;
+    token.focus();
+    fireEvent.input(token, { target: { value: "t0k-pasted" } });
+    // Pressing Continue takes the focus from the field first.
+    const next = view.getByRole("button", { name: "Continue" });
+    next.focus();
+    fireEvent.click(next);
+    await waitFor(() => expect(asked("set_token").map((c) => c.args)).toEqual([{ token: "t0k-pasted" }]));
+    expect(view.container.querySelector("h2.wizard-title")?.textContent).toBe("Choose his look");
+  });
+
+  it("a token refused while the window was away is still said when it comes back", async () => {
+    answers.control_opening = () => "wizard";
+    answers.get_token_present = () => false;
+    answers.set_token = () => {
+      throw "The token has a space in it.";
+    };
+    const view = render(() => <App />);
+    await waitFor(() => expect(wizard(view)).not.toBeNull());
+    const token = view.getByLabelText("His token") as HTMLInputElement;
+    token.focus();
+    fireEvent.input(token, { target: { value: "abc 123" } });
+    // Alt-Tab: the field loses the focus to no element of the page.
+    fireEvent.blur(token, { relatedTarget: null });
+    await waitFor(() => expect(view.container.querySelector(".problem")).toHaveTextContent("The token has a space in it."));
+    const before = asked("get_settings").length;
+    window.dispatchEvent(new Event("focus"));
+    await waitFor(() => expect(asked("get_settings").length).toBe(before + 1));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(view.container.querySelector(".problem")).toHaveTextContent("Couldn't save the token: The token has a space in it.");
+  });
+
+  it("its look step opens his folder and loads his model, as Settings' Model rows do", async () => {
+    answers.control_opening = () => "wizard";
+    answers.open_folder = () => null;
+    answers.reload_model = () => null;
+    const view = render(() => <App />);
+    await waitFor(() => expect(wizard(view)).not.toBeNull());
+    fireEvent.click(view.getByRole("button", { name: "Continue" }));
+    fireEvent.click(view.getByRole("button", { name: "Open" }));
+    fireEvent.click(view.getByRole("button", { name: "Load" }));
+    await waitFor(() => expect(asked("reload_model")).toHaveLength(1));
+    expect(asked("open_folder").map((c) => c.args)).toEqual([{ which: "avatar" }]);
+    fireEvent.click(view.getByRole("button", { name: "Skip setup" }));
+    // And the same rows in Settings › Model.
+    const model = view.container.querySelector("section#model")!;
+    fireEvent.click(model.querySelector("button")!);
+    fireEvent.click([...model.querySelectorAll("button")].find((b) => b.textContent === "Load")!);
+    await waitFor(() => expect(asked("reload_model")).toHaveLength(2));
+    expect(asked("open_folder")).toHaveLength(2);
+  });
+
+  it("About's Replay opens it again, at its first step", async () => {
+    answers.control_opening = () => "wizard";
+    const view = render(() => <App />);
+    await waitFor(() => expect(wizard(view)).not.toBeNull());
+    fireEvent.click(view.getByRole("button", { name: "Continue" }));
+    fireEvent.click(view.getByRole("button", { name: "Continue" }));
+    expect(heading(view)).toBe("Learn his keys");
+    fireEvent.click(view.getByRole("button", { name: "Skip setup" }));
+    fireEvent.click(view.getByRole("button", { name: "Replay" }));
+    expect(wizard(view)).not.toBeNull();
+    expect(heading(view)).toBe("Connect his brain");
   });
 });

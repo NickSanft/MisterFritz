@@ -6,7 +6,7 @@
  * one go. A refusal is said on its row, the old key still showing and
  * still working; the settings that come back are what every row shows.
  */
-import { batch, createEffect, createSignal, For, on, type JSX } from "solid-js";
+import { batch, createEffect, createMemo, createSignal, For, on, type JSX } from "solid-js";
 import { HotkeyCapture } from "../../divora/components/HotkeyCapture";
 import { acceleratorToKeys, keysToAccelerator } from "../../divora/hotkeys";
 import { HOTKEY_ACTIONS, HOTKEY_DEFAULTS, type HotkeyAction, type HotkeysBound } from "../api";
@@ -38,8 +38,10 @@ export function Hotkeys(props: HotkeysProps): JSX.Element {
    * the new setting arrives (settings:changed) before what is held. */
   const [trying, setTrying] = createSignal<ByAction<boolean>>({});
   // What the shell holds was read again (the window came forward, or a key
-  // was tried): a refusal from before may no longer be true.
-  createEffect(on(() => props.bound, () => setRefusals({}), { defer: true }));
+  // was tried): a refusal from before may no longer be true. By the answer
+  // itself, not whatever else the props were rebuilt for (a setting).
+  const held = createMemo(() => props.bound);
+  createEffect(on(held, () => setRefusals({}), { defer: true }));
   /** Each row's tries, numbered: only the latest one's answer is said. */
   const tries: ByAction<number> = {};
   const tryKey = async (action: HotkeyAction, accelerator: string): Promise<void> => {

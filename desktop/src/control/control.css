@@ -191,6 +191,13 @@ input {
   width: 280px;
 }
 
+/* Not usable yet, but kept where the focus can be (Ask, while he isn't
+   connected): a reconnect never drops the focus from it. */
+.field[aria-disabled="true"] {
+  color: var(--text-mid);
+  cursor: not-allowed;
+}
+
 /* The brain is on this PC. */
 .place {
   display: inline-flex;
@@ -210,4 +217,151 @@ input {
   background: var(--danger-bg);
   color: var(--danger);
   font-size: var(--t-sm);
+}
+
+/* ---------- The first run (Wizard.tsx) ---------- */
+/* In place of the sections: a rail of the steps, the step, and a footer of
+   Skip, Back and Continue, after DivoraVoice's first-run layout. Nothing
+   in it moves. */
+.wizard {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.wizard-rail {
+  flex: none;
+  width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s6);
+  padding: var(--s6) var(--s5);
+  background: var(--surface-1);
+  border-right: 1px solid var(--line);
+}
+
+.wizard-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: var(--t-h3);
+  color: var(--text-hi);
+}
+
+.wizard-brand svg {
+  color: var(--indigo);
+}
+
+.wizard-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+.wizard-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-mid);
+  font-size: var(--t-sm);
+}
+
+.wizard-step.is-current {
+  color: var(--text-hi);
+  font-weight: 600;
+}
+
+.wizard-num {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  font-weight: 700;
+  color: var(--text-mid);
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+}
+
+.wizard-step.is-current .wizard-num {
+  color: var(--text-hi);
+  background: var(--accent-bg);
+  border-color: var(--indigo);
+}
+
+/* Done: the tick in the text's colour (--success is far below 3:1 on the
+   light surfaces), its ring in --success. */
+.wizard-step.is-done .wizard-num {
+  color: var(--text-hi);
+  border-color: var(--success);
+}
+
+.wizard-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.wizard-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--s6) var(--s6) var(--s5);
+  scrollbar-width: thin;
+  scrollbar-color: var(--surface-4) transparent;
+}
+
+.wizard-content .section {
+  margin-bottom: 0;
+}
+
+/* Where the run stands: the eyebrow's look, in a colour and size that
+   read (the eyebrow's 9.5 px --text-lo doesn't). */
+.wizard-count {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-mid);
+}
+
+.wizard-title {
+  width: fit-content;
+  margin: var(--s1) 0 var(--s2);
+  font-family: var(--font-display);
+  font-size: var(--t-h1);
+  font-weight: 700;
+}
+
+.wizard-title:focus:not(:focus-visible) {
+  outline: none;
+}
+
+.wizard-intro {
+  margin: 0 0 var(--s5);
+  color: var(--text-mid);
+}
+
+.wizard-footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s3) var(--s6);
+  border-top: 1px solid var(--line);
+  background: var(--surface-0);
+}
+
+.wizard-spacer {
+  flex: 1;
 }

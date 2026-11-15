@@ -67,7 +67,13 @@ He connects to the brain's `/companion` WebSocket at `brain.url`
 `COMPANION_TOKEN`: start the brain with `COMPANION_ENABLED=true` and a
 `COMPANION_TOKEN` of 32 characters or more in its `.env`, then paste the
 token into Settings › Brain and press *Connect*. Until there is a token,
-Settings shows at every start, opened at Brain.
+Settings shows at every start with the first run in place of its sections:
+four steps (connect his brain, choose his look, learn his keys, summon him),
+with *Skip setup* at every step and *Summon Fritz* at the last, which brings
+him onto the desktop and puts Settings away. It waits to show while the lock
+screen, a fullscreen app or a presentation is in front, and never opens over
+them. Nothing about it is saved; About › *Replay the first run* shows it
+again.
 
 His own window holds the connection (the control window only hears of it):
 it says hello, is online once the brain welcomes it, and answers the brain's
@@ -170,8 +176,9 @@ cargo test --locked --features custom-protocol --lib --manifest-path src-tauri/C
 ```
 
 `FRITZ_SHOW_SETTINGS` set to anything shows the control window at start, for
-a run nobody clicks; set to a section (`brain`, `appearance`, `model`, …) it
-opens there. Without a token it opens at Brain anyway. In a debug build,
+a run nobody clicks; set to a section (`brain`, `hotkeys`, `appearance`,
+`model`, …) it opens there, and set to `wizard`, at the first run. Without a
+token it opens at the first run anyway. In a debug build,
 `FRITZ_PRETEND_SAY` asks the brain its text once he first connects, as Ask
 would (a release build never reads it).
 

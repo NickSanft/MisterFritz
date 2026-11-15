@@ -1,19 +1,20 @@
 /**
  * The control window (tray > Settings…): his brain, where Fritz is, his
- * keys, how the house looks, his model, and diagnostics. Plan 14 spreads it
- * across PRs 2-4 and 8: Voice comes with PR 8.
+ * keys, how the house looks, his model, and diagnostics; or, at the first
+ * run (no token yet) and from About, the first-run wizard in their place.
+ * Plan 14 spreads it across PRs 2-4 and 8: Voice comes with PR 8.
  *
  * What it shows comes from the shell (status events, settings:changed,
  * companion:status and a fresh read whenever the window is focused); what
  * it says comes from view.ts, which is tested.
  */
-import { createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { createSignal, For, Match, onCleanup, onMount, Show, Switch, type JSX } from "solid-js";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { STATUS_EVENT, parseStatus, type AvatarStatus } from "../avatar/status";
 import {
-  COMPANION_STATUS_EVENT, LOADED_EVENT, SETTINGS_EVENT, arrange, avatarModel, avatarStatus, companionConnect, companionSay,
+  COMPANION_STATUS_EVENT, LOADED_EVENT, SETTINGS_EVENT, WIZARD, arrange, avatarModel, avatarStatus, companionConnect, companionSay,
   companionStatus, controlOpening, getSettings, getTokenPresent, hotkeysBound, openFolder, parseCompanionStatus,
   parseSettings, reloadModel, setHotkey, setParked, setSetting, setToken, type ControlSettings, type HotkeyAction,
   type HotkeysBound, type ModelInfo,
@@ -26,8 +27,11 @@ import { reducedMotion } from "../divora/theme";
 import { Row, Section } from "./layout";
 import { Appearance } from "./sections/Appearance";
 import { Brain } from "./sections/Brain";
-import { Hotkeys } from "./sections/Hotkeys";
-import { modelLines, orPress, standing } from "./view";
+import { Hotkeys, type HotkeysProps } from "./sections/Hotkeys";
+import { ModelRows, type ModelRowsProps } from "./sections/Model";
+import type { BrainProps } from "./sections/Brain";
+import { orPress, standing } from "./view";
+import { Wizard } from "./Wizard";
 import { wearTheme } from "./wear";
 
 export function App(): JSX.Element {
@@ -40,6 +44,9 @@ export function App(): JSX.Element {
   const [tokenPresent, setTokenPresent] = createSignal<boolean | null>(null);
   /** The keys the shell holds now, which may not be the ones set. */
   const [bound, setBound] = createSignal<HotkeysBound | null>(null);
+  /** The first run, shown in place of the sections; null until the shell
+   * has said where to open, so neither view shows only to be replaced. */
+  const [wizard, setWizard] = createSignal<boolean | null>(null);
   /** Link reports heard, so a late answer to `companion_status` can't undo
    * a newer one. */
   let linkEvents = 0;
@@ -51,6 +58,8 @@ export function App(): JSX.Element {
     setSettings(s);
     wearTheme(document, s.theme, reduced.now());
   };
+  /** What the window's own look at the shell is called in the banner. */
+  const ASKING = "ask Fritz how he is";
   /** Run a command, showing what went wrong rather than nothing; whether
    * it went through. */
   const attempt = async (what: string, act: () => Promise<unknown>): Promise<boolean> => {
@@ -63,8 +72,12 @@ export function App(): JSX.Element {
       return false;
     }
   };
-  const refresh = () =>
-    attempt("ask Fritz how he is", async () => {
+  /** Ask the shell how everything stands. Its own failure goes in the
+   * banner, and only that is cleared when it next succeeds: another
+   * command's refusal (a token refused while the window was away) stays to
+   * be read when the window comes back. */
+  const refresh = async (): Promise<void> => {
+    try {
       const heard = linkEvents;
       const [st, se, mo, tp, li, bo] = await Promise.all([
         avatarStatus(), getSettings(), avatarModel(), getTokenPresent(), companionStatus(), hotkeysBound(),
@@ -75,7 +88,11 @@ export function App(): JSX.Element {
       setTokenPresent(tp);
       if (bo) setBound(bo);
       if (li) setLink(afterAsking<LinkStatus | null>(li, heard, linkEvents, link()));
-    });
+      if (problem()?.startsWith(`Couldn't ${ASKING}:`)) setProblem(null);
+    } catch (e) {
+      setProblem(`Couldn't ${ASKING}: ${typeof e === "string" ? e : String(e)}`);
+    }
+  };
 
   const unlisten: Promise<UnlistenFn>[] = [];
   const onFocus = () => void refresh();
@@ -109,11 +126,14 @@ export function App(): JSX.Element {
       if (s) wearTheme(document, s.theme, reduced.now());
     });
     void getVersion().then(setVersion, () => setVersion("?"));
-    // Open at the section the shell names (FRITZ_SHOW_SETTINGS=appearance),
-    // once what's above it has its content. Never smoothly: motion here
-    // follows the theme, and this is a jump, not a flourish.
-    void Promise.all([refresh(), controlOpening().catch(() => null)]).then(([, at]) => {
-      if (at) document.getElementById(at)?.scrollIntoView({ block: "start" });
+    // Open at the first run (no token yet), or at the section the shell
+    // names (FRITZ_SHOW_SETTINGS=appearance) once what's above it has its
+    // content. Never smoothly: motion here follows the theme, and this is a
+    // jump, not a flourish.
+    const opening = controlOpening().catch(() => null);
+    void opening.then((at) => setWizard(at === WIZARD));
+    void Promise.all([refresh(), opening]).then(([, at]) => {
+      if (at && at !== WIZARD) document.getElementById(at)?.scrollIntoView({ block: "start" });
     });
   });
   onCleanup(() => {
@@ -143,8 +163,38 @@ export function App(): JSX.Element {
     return ok;
   };
 
+  /** The sections' props, which the first run's steps share. */
+  const brainProps = (): BrainProps => ({
+    url: settings()?.brain.url ?? null,
+    link: link(),
+    avatar: status(),
+    tokenPresent: tokenPresent(),
+    promptKey: bound()?.prompt ?? null,
+    setUrl: (url) => set("brain.url", url, "change his brain's address"),
+    saveToken,
+    reconnect: () => void attempt("reconnect", companionConnect),
+    ask: (text) => attempt("ask him", () => companionSay(text)),
+  });
+  const hotkeysProps = (): HotkeysProps => ({ keys: settings()?.hotkeys ?? null, bound: bound(), set: rebind });
+  const modelProps = (): ModelRowsProps => ({
+    model: model(),
+    openFolder: () => void attempt("open the folder", () => openFolder("avatar")),
+    reload: () => void attempt("load his model", reloadModel),
+  });
+  /** The first run's last step: bring him onto the desktop (opening his
+   * window again if need be), then put the first run and this window
+   * away, as the × does. Refused, both stay, and the banner says why. */
+  const summon = async () => {
+    const shown = await attempt("summon him", async () => {
+      const s = await setParked(false);
+      if (s) setStatus(s);
+    });
+    if (!shown) return;
+    setWizard(false);
+    await getCurrentWindow().hide();
+  };
+
   const here = () => standing(status());
-  const lines = () => modelLines(model());
 
   return (
     <div class="shell">
@@ -164,117 +214,114 @@ export function App(): JSX.Element {
         </div>
       </header>
 
-      <main class="sections">
-        <Brain
-          url={settings()?.brain.url ?? null}
-          link={link()}
-          avatar={status()}
-          tokenPresent={tokenPresent()}
-          setUrl={(url) => set("brain.url", url, "change his brain's address")}
-          saveToken={saveToken}
-          reconnect={() => void attempt("reconnect", companionConnect)}
-          ask={(text) => attempt("ask him", () => companionSay(text))}
-        />
+      <Switch>
+        <Match when={wizard() === true}>
+          <Wizard
+            brain={brainProps()}
+            model={modelProps()}
+            hotkeys={hotkeysProps()}
+            link={link()}
+            modelInfo={model()}
+            bound={bound()}
+            tokenPresent={tokenPresent()}
+            skip={() => setWizard(false)}
+            summon={summon}
+          />
+        </Match>
+        <Match when={wizard() === false}>
+          <main class="sections">
+            <Brain {...brainProps()} />
 
-        <Section id="fritz" sigil="butler" eyebrow="Fritz" title="Where he is" desc={here().line}>
-          <Row
-            title={here().offerShow ? "Show him" : "Hide him"}
-            desc={orPress(bound()?.park) || undefined}
-          >
-            <button
-              type="button"
-              class="btn btn-secondary"
-              disabled={!status()}
-              onClick={() => attempt(here().offerShow ? "show him" : "hide him", async () => {
-                const s = await setParked(!here().offerShow);
-                if (s) setStatus(s);
-              })}
-            >
-              {here().offerShow ? "Show" : "Hide"}
-            </button>
-          </Row>
-          <Row
-            title="Arrange him"
-            desc={`Drag him where you like and resize him from the corner; Esc locks him there.${
-              orPress(bound()?.arrange) ? ` ${orPress(bound()?.arrange)}` : ""}`}
-          >
-            <button type="button" class="btn btn-secondary" disabled={!here().canArrange} onClick={() => attempt("arrange him", arrange)}>
-              Arrange…
-            </button>
-          </Row>
-          <Row title="His eyes follow the cursor" desc="His head turns a little toward it too.">
-            <Toggle
-              ariaLabel="His eyes follow the cursor"
-              on={settings()?.avatar.lookatCursor ?? false}
-              disabled={!settings()}
-              onChange={(on) => set("avatar.lookatCursor", on, "change that")}
+            <Section id="fritz" sigil="butler" eyebrow="Fritz" title="Where he is" desc={here().line}>
+              <Row
+                title={here().offerShow ? "Show him" : "Hide him"}
+                desc={orPress(bound()?.park) || undefined}
+              >
+                <button
+                  type="button"
+                  class="btn btn-secondary"
+                  disabled={!status()}
+                  onClick={() => attempt(here().offerShow ? "show him" : "hide him", async () => {
+                    const s = await setParked(!here().offerShow);
+                    if (s) setStatus(s);
+                  })}
+                >
+                  {here().offerShow ? "Show" : "Hide"}
+                </button>
+              </Row>
+              <Row
+                title="Arrange him"
+                desc={`Drag him where you like and resize him from the corner; Esc locks him there.${
+                  orPress(bound()?.arrange) ? ` ${orPress(bound()?.arrange)}` : ""}`}
+              >
+                <button type="button" class="btn btn-secondary" disabled={!here().canArrange} onClick={() => attempt("arrange him", arrange)}>
+                  Arrange…
+                </button>
+              </Row>
+              <Row title="His eyes follow the cursor" desc="His head turns a little toward it too.">
+                <Toggle
+                  ariaLabel="His eyes follow the cursor"
+                  on={settings()?.avatar.lookatCursor ?? false}
+                  disabled={!settings()}
+                  onChange={(on) => set("avatar.lookatCursor", on, "change that")}
+                />
+              </Row>
+            </Section>
+
+            <Hotkeys {...hotkeysProps()} />
+
+            <Appearance
+              theme={settings()?.theme ?? null}
+              lessMotion={lessMotion()}
+              set={(path, value) => void set(path, value, "change that")}
             />
-          </Row>
-        </Section>
 
-        <Hotkeys keys={settings()?.hotkeys ?? null} bound={bound()} set={rebind} />
-
-        <Appearance
-          theme={settings()?.theme ?? null}
-          lessMotion={lessMotion()}
-          set={(path, value) => void set(path, value, "change that")}
-        />
-
-        <Section
-          id="model"
-          sigil="image"
-          eyebrow="Model"
-          title="What he looks like"
-          desc="A VRoid Studio export, or the placeholder until there is one."
-        >
-          <Row title={lines().title} desc={lines().detail}>
-            <span classList={{ dot: true, [`tone-${lines().tone}`]: true }} />
-          </Row>
-          <Row title="His model's folder" desc="Where avatar\fritz.vrm goes, unless avatar.vrmPath points elsewhere.">
-            <button type="button" class="btn btn-secondary" onClick={() => attempt("open the folder", () => openFolder("avatar"))}>
-              Open
-            </button>
-          </Row>
-          <Row title="Load it again" desc="After you've put a new export in place.">
-            <button
-              type="button"
-              class="btn btn-secondary"
-              onClick={() => attempt("load his model", reloadModel)}
+            <Section
+              id="model"
+              sigil="image"
+              eyebrow="Model"
+              title="What he looks like"
+              desc="A VRoid Studio export, or the placeholder until there is one."
             >
-              Load
-            </button>
-          </Row>
-        </Section>
+              <ModelRows {...modelProps()} />
+            </Section>
 
-        <Section id="diagnostics" sigil="search" eyebrow="Diagnostics" title="If something goes wrong" desc="Everything stays on this PC.">
-          <Row title="Fritz's logs" desc="startup.log and crash.log, this run's log, and the settings.">
-            <button type="button" class="btn btn-secondary" onClick={() => attempt("open the logs", () => openFolder("logs"))}>
-              Open
-            </button>
-          </Row>
-          <Row
-            title="Record which app has the keyboard"
-            desc="Spike 0's check that Fritz never takes it. From the next start; it writes other apps' window titles to diagnostics\foreground.log."
-          >
-            <Toggle
-              ariaLabel="Record which app has the keyboard"
-              on={settings()?.diagnostics.foregroundLog ?? false}
-              disabled={!settings()}
-              onChange={(on) => set("diagnostics.foregroundLog", on, "change that")}
-            />
-          </Row>
-        </Section>
+            <Section id="diagnostics" sigil="search" eyebrow="Diagnostics" title="If something goes wrong" desc="Everything stays on this PC.">
+              <Row title="Fritz's logs" desc="startup.log and crash.log, this run's log, and the settings.">
+                <button type="button" class="btn btn-secondary" onClick={() => attempt("open the logs", () => openFolder("logs"))}>
+                  Open
+                </button>
+              </Row>
+              <Row
+                title="Record which app has the keyboard"
+                desc="Spike 0's check that Fritz never takes it. From the next start; it writes other apps' window titles to diagnostics\foreground.log."
+              >
+                <Toggle
+                  ariaLabel="Record which app has the keyboard"
+                  on={settings()?.diagnostics.foregroundLog ?? false}
+                  disabled={!settings()}
+                  onChange={(on) => set("diagnostics.foregroundLog", on, "change that")}
+                />
+              </Row>
+            </Section>
 
-        <Section id="about" sigil="info" eyebrow="About" title={`Mister Fritz ${version()}`} desc="Fritz's body on the Windows desktop.">
-          <For each={[
-            "Parts of the window shell, and this window's styling, controls and sigils, are lifted from DivoraVoiceMod (MIT, Copyright (c) 2026 Divora Contributors).",
-            "The typefaces are Bricolage Grotesque, Space Grotesk and Space Mono, under the SIL Open Font License.",
-            "Some plumbing follows the owner's LorraineAtelier.",
-          ]}>
-            {(line) => <Row title={line} />}
-          </For>
-        </Section>
-      </main>
+            <Section id="about" sigil="info" eyebrow="About" title={`Mister Fritz ${version()}`} desc="Fritz's body on the Windows desktop.">
+              <For each={[
+                "Parts of the window shell, and this window's styling, controls and sigils, are lifted from DivoraVoiceMod (MIT, Copyright (c) 2026 Divora Contributors).",
+                "The typefaces are Bricolage Grotesque, Space Grotesk and Space Mono, under the SIL Open Font License.",
+                "Some plumbing follows the owner's LorraineAtelier.",
+              ]}>
+                {(line) => <Row title={line} />}
+              </For>
+              <Row title="Replay the first run" desc="Its four steps again: his brain, his look, his keys, and summoning him.">
+                <button type="button" class="btn btn-secondary" onClick={() => setWizard(true)}>
+                  Replay
+                </button>
+              </Row>
+            </Section>
+          </main>
+        </Match>
+      </Switch>
 
       <Show when={problem()}>
         <div class="problem" role="alert">
