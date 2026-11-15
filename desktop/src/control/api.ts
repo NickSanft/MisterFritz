@@ -24,7 +24,24 @@ export const CMD = {
   companionStatus: "companion_status",
   companionConnect: "companion_connect",
   companionSay: "companion_say",
+  setHotkey: "set_hotkey",
+  hotkeysBound: "hotkeys_bound",
 } as const;
+
+/** The actions a key may be set for, in the order Settings shows them
+ * (the shell's hotkeys::ACTIONS; the fixture's hotkeyActions holds both). */
+export const HOTKEY_ACTIONS = ["prompt", "arrange", "park"] as const;
+export type HotkeyAction = (typeof HOTKEY_ACTIONS)[number];
+
+/** Each action's key by default (the shell's `Hotkeys::default()`). */
+export const HOTKEY_DEFAULTS: Record<HotkeyAction, string> = {
+  prompt: "Ctrl+Alt+F",
+  arrange: "Ctrl+Alt+A",
+  park: "Ctrl+Alt+H",
+};
+
+/** Each action's key as Windows holds it now, or null when it has none. */
+export type HotkeysBound = Record<HotkeyAction, string | null>;
 
 export { SETTINGS_EVENT };
 /** The avatar's page has loaded a model: ask `avatar_model` again. */
@@ -35,7 +52,7 @@ export type Folder = "logs" | "avatar";
 
 /** The window's sections, by their ids, in order: what `control_opening`
  * may answer (the shell's CONTROL_SECTIONS; the fixture holds both). */
-export const SECTIONS = ["brain", "fritz", "appearance", "model", "diagnostics", "about"] as const;
+export const SECTIONS = ["brain", "fritz", "hotkeys", "appearance", "model", "diagnostics", "about"] as const;
 export type SectionId = (typeof SECTIONS)[number];
 
 export function parseSection(v: unknown): SectionId | null {
@@ -46,7 +63,7 @@ export function parseSection(v: unknown): SectionId | null {
 export interface ControlSettings {
   brain: Brain;
   avatar: { lookatCursor: boolean; vrmPath: string | null };
-  hotkeys: { arrange: string; park: string };
+  hotkeys: Record<HotkeyAction, string>;
   diagnostics: { foregroundLog: boolean };
   theme: Theme;
 }
@@ -81,12 +98,14 @@ export function parseSettings(v: unknown): ControlSettings | null {
   if (!brain || !avatar || !hotkeys || !diagnostics || !theme) return null;
   if (typeof avatar.lookatCursor !== "boolean") return null;
   if (avatar.vrmPath !== null && typeof avatar.vrmPath !== "string") return null;
-  if (typeof hotkeys.arrange !== "string" || typeof hotkeys.park !== "string") return null;
+  if (typeof hotkeys.prompt !== "string" || typeof hotkeys.arrange !== "string" || typeof hotkeys.park !== "string") {
+    return null;
+  }
   if (typeof diagnostics.foregroundLog !== "boolean") return null;
   return {
     brain,
     avatar: { lookatCursor: avatar.lookatCursor, vrmPath: avatar.vrmPath as string | null },
-    hotkeys: { arrange: hotkeys.arrange, park: hotkeys.park },
+    hotkeys: { prompt: hotkeys.prompt, arrange: hotkeys.arrange, park: hotkeys.park },
     diagnostics: { foregroundLog: diagnostics.foregroundLog },
     theme,
   };
@@ -115,6 +134,17 @@ export function parseModelInfo(v: unknown): ModelInfo | null {
 
 export { parseCompanionStatus } from "../shared/link";
 
+/** `hotkeys_bound`'s answer, or null when it isn't one: exactly the three
+ * actions, each a key or null. */
+export function parseHotkeysBound(v: unknown): HotkeysBound | null {
+  const o = obj(v);
+  if (!o || Object.keys(o).sort().join() !== [...HOTKEY_ACTIONS].sort().join()) return null;
+  for (const a of HOTKEY_ACTIONS) {
+    if (o[a] !== null && typeof o[a] !== "string") return null;
+  }
+  return { prompt: o.prompt as string | null, arrange: o.arrange as string | null, park: o.park as string | null };
+}
+
 /** The argument objects, by the keys the shell's commands take. */
 export const args = {
   setSetting: (path: string, value: unknown) => ({ path, value }),
@@ -123,7 +153,19 @@ export const args = {
   mode: (mode: "arrange" | "locked") => ({ mode }),
   setToken: (token: string) => ({ token }),
   companionSay: (text: string) => ({ text }),
+  setHotkey: (action: HotkeyAction, accelerator: string) => ({ action, accelerator }),
 };
+
+/** Bind a key to an action and save it: the settings after it, or the
+ * shell's refusal (the old key still working). */
+export async function setHotkey(action: HotkeyAction, accelerator: string): Promise<ControlSettings | null> {
+  return parseSettings(await invoke<unknown>(CMD.setHotkey, args.setHotkey(action, accelerator)));
+}
+
+/** Each action's key as Windows holds it now. */
+export async function hotkeysBound(): Promise<HotkeysBound | null> {
+  return parseHotkeysBound(await invoke<unknown>(CMD.hotkeysBound));
+}
 
 export async function getSettings(): Promise<ControlSettings | null> {
   return parseSettings(await invoke<unknown>(CMD.getSettings));

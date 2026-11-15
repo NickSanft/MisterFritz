@@ -4,10 +4,16 @@ import {
   LOADED_CMD, RELOAD_EVENT, loadedArgs, parseStatus, vrmFetchError, type AvatarStatus,
 } from "../avatar/status";
 import {
-  CMD, COMPANION_STATUS_EVENT, LOADED_EVENT, SECTIONS, SETTINGS_EVENT, args, parseCompanionStatus, parseModelInfo,
-  parseSection, parseSettings, type ModelInfo,
+  CMD, COMPANION_STATUS_EVENT, HOTKEY_ACTIONS, HOTKEY_DEFAULTS, LOADED_EVENT, SECTIONS, SETTINGS_EVENT, args,
+  parseCompanionStatus, parseHotkeysBound, parseModelInfo, parseSection, parseSettings, type ModelInfo,
 } from "./api";
-import { connectionLines, identityLine, megabytes, modelLines, onThisPc, standing } from "./view";
+import {
+  HOTKEY_DOES, connectionLines, hotkeyLine, identityLine, megabytes, modelLines, onThisPc, orPress, standing,
+  winNamed,
+} from "./view";
+import { COMBOS, contrast, token } from "../shared/testContrast";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { LinkStatus } from "../shared/companion";
 
 /** A status sample from the fixture, read as the page reads one. */
@@ -113,6 +119,31 @@ describe("the control window's wire", () => {
     }
   });
 
+  /** Settings › Hotkeys: a key is bound through `set_hotkey` (never
+   * `set_setting`, which the shell refuses for hotkeys), and what is held
+   * is read from `hotkeys_bound`, strictly. */
+  it("binds keys through the shell's own command, for its actions", () => {
+    const c = fixture.commands;
+    expect(CMD.setHotkey).toBe(c.setHotkey.name);
+    expect(Object.keys(args.setHotkey("prompt", "Ctrl+Alt+K"))).toEqual(c.setHotkey.args);
+    expect(CMD.hotkeysBound).toBe(c.hotkeysBound.name);
+    expect(c.hotkeysBound.args).toEqual([]);
+    expect([...HOTKEY_ACTIONS].sort()).toEqual(fixture.hotkeyActions);
+    expect(HOTKEY_DEFAULTS).toEqual(fixture.hotkeyDefaults);
+    const bound = { prompt: "Ctrl+Alt+F", arrange: null, park: "Ctrl+Alt+H" };
+    expect(parseHotkeysBound(bound)).toEqual(bound);
+    for (const bad of [
+      null,
+      [bound],
+      { ...bound, prompt: 3 },
+      { ...bound, ptt: "Ctrl+Alt+Space" },
+      { arrange: null, park: null },
+      { ...bound, park: undefined },
+    ]) {
+      expect(parseHotkeysBound(bad), JSON.stringify(bad)).toBeNull();
+    }
+  });
+
   it("asks only for the folders the shell opens", () => {
     for (const which of ["logs", "avatar"] as const) expect(fixture.folders).toContain(args.openFolder(which).which);
   });
@@ -130,10 +161,13 @@ describe("the control window's wire", () => {
     expect(parseSettings(settings)).toEqual({
       brain: { url: "ws://127.0.0.1:8001/companion", clientId: "nick-pc", clientName: "NICK-PC" },
       avatar: { lookatCursor: true, vrmPath: null },
-      hotkeys: { arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" },
+      hotkeys: { prompt: "Ctrl+Alt+F", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" },
       diagnostics: { foregroundLog: false },
       theme: { theme: "dark", mood: "ink", accent: "brand", motion: 0.6, grain: true, motionUser: false },
     });
+    const { prompt: _p, ...noPrompt } = settings.hotkeys;
+    expect(parseSettings({ ...settings, hotkeys: noPrompt })).toBeNull();
+    expect(parseSettings({ ...settings, hotkeys: { ...settings.hotkeys, prompt: 7 } })).toBeNull();
     expect(parseSettings({ ...settings, avatar: { ...settings.avatar, vrmPath: "D:/m/fritz.vrm" } })?.avatar.vrmPath)
       .toBe("D:/m/fritz.vrm");
     expect(parseSettings(null)).toBeNull();
@@ -320,5 +354,86 @@ describe("what the control window says of his brain", () => {
       "ws://localhost.example/x", "ws://127.0.0.1.example/x", "not a url", ""]) {
       expect(onThisPc(url), url).toBe(false);
     }
+  });
+});
+
+describe("what Settings › Hotkeys says", () => {
+  it("each row's line: the refusal, a key not working, or what it does", () => {
+    const set = "Ctrl+Alt+K";
+    expect(hotkeyLine("prompt", set, set, null)).toEqual({ text: HOTKEY_DOES.prompt, alert: false });
+    expect(hotkeyLine("park", set, ` ${set} `, null)).toEqual({ text: HOTKEY_DOES.park, alert: false });
+    // Until the shell says what it holds, the key set is taken to work.
+    expect(hotkeyLine("arrange", set, undefined, null)).toEqual({ text: HOTKEY_DOES.arrange, alert: false });
+    expect(hotkeyLine("prompt", set, null, null)).toEqual({
+      text: "Not working: he couldn't have Ctrl+Alt+K when he started (another app may hold it). Pick another.",
+      alert: false,
+    });
+    expect(hotkeyLine("prompt", "Ctrl+Alt+Nope", "Ctrl+Alt+F", null)).toEqual({
+      text: "Working on Ctrl+Alt+F: Ctrl+Alt+Nope couldn't be used. Pick another, or press Default.",
+      alert: false,
+    });
+    // The shell's refusal of the key just tried comes first, as an alert,
+    // and the row still says if its key isn't working.
+    const why = "Ctrl+Alt+A is already Fritz's key to arrange him.";
+    for (const active of [set, undefined]) {
+      expect(hotkeyLine("prompt", set, active, why)).toEqual({ text: why, alert: true });
+    }
+    expect(hotkeyLine("prompt", set, null, why)).toEqual({
+      text: `${why} Not working: he couldn't have Ctrl+Alt+K when he started (another app may hold it). Pick another.`,
+      alert: true,
+    });
+    expect(hotkeyLine("prompt", set, "Ctrl+Alt+F", why)).toEqual({
+      text: `${why} Working on Ctrl+Alt+F: Ctrl+Alt+K couldn't be used. Pick another, or press Default.`,
+      alert: true,
+    });
+    expect(new Set(Object.values(HOTKEY_DOES)).size).toBe(3);
+  });
+
+  /** The settings and the shell say Super; the owner's keycap says Win. */
+  it("calls the Windows key Win", () => {
+    expect(winNamed("Ctrl+Super+P is already Fritz's key to arrange him.")).toBe("Ctrl+Win+P is already Fritz's key to arrange him.");
+    expect(winNamed("Super+F9, cmd+K and Command+J")).toBe("Win+F9, Win+K and Win+J");
+    expect(winNamed("A Superb key: Super")).toBe("A Superb key: Super");
+    expect(hotkeyLine("park", "Ctrl+Super+P", null, null).text).toContain("he couldn't have Ctrl+Win+P when");
+    expect(hotkeyLine("park", "Ctrl+Super+P", "Super+J", null).text).toBe(
+      "Working on Win+J: Ctrl+Win+P couldn't be used. Pick another, or press Default.",
+    );
+    expect(hotkeyLine("park", "F13", "F13", "Another app already uses Super+F13: pick another.").text)
+      .toBe("Another app already uses Win+F13: pick another.");
+    expect(orPress("Ctrl+Super+P")).toBe("Or press Ctrl+Win+P.");
+  });
+
+  it("offers a key only while it is held", () => {
+    expect(orPress("Ctrl+Alt+H")).toBe("Or press Ctrl+Alt+H.");
+    expect(orPress(null)).toBe("");
+    expect(orPress(undefined)).toBe("");
+  });
+
+  /** DivoraVoice's hint is --text-lo at 11 px, below AA on the capture's
+   * --surface-2 in every mood (worst in the dark ones); the lift says it
+   * in --text-mid, and its keycaps are --text-hi on --surface-3. */
+  it("the capture's words and keycaps are AA in every mood", () => {
+    const css = readFileSync(fileURLToPath(new URL("../divora/components.css", import.meta.url)), "utf8")
+      .replace(/\r\n/g, "\n");
+    const rule = (sel: string) => {
+      const at = css.indexOf(`\n${sel} {`);
+      expect(at, sel).toBeGreaterThan(0);
+      return css.slice(at, css.indexOf("}", at));
+    };
+    expect(rule(".hotkey-capture-hint")).toContain("color: var(--text-mid);");
+    expect(rule(".kbd")).toContain("color: var(--text-hi);");
+    expect(rule(".kbd")).toContain("background: var(--surface-3);");
+    expect(rule(".hotkey-capture")).toContain("background: var(--surface-2);");
+    // The ring follows the accent rather than DivoraVoice's violet.
+    expect(rule(".hotkey-capture.is-capturing")).toContain("var(--indigo) 20%");
+    let loFails = 0;
+    for (const [name, selectors] of Object.entries(COMBOS)) {
+      const s2 = token("--surface-2", selectors);
+      expect(contrast(token("--text-mid", selectors), s2), `hint on ${name}`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(token("--text-hi", selectors), token("--surface-3", selectors)), `keycap on ${name}`)
+        .toBeGreaterThanOrEqual(4.5);
+      if (contrast(token("--text-lo", selectors), s2) < 4.5) loFails += 1;
+    }
+    expect(loFails, "--text-lo fails in every mood, which is why it changed").toBe(Object.keys(COMBOS).length);
   });
 });

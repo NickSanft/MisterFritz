@@ -750,6 +750,12 @@ mod tests {
         let mut names: Vec<&str> = ACTIONS.iter().map(|(n, _, _)| *n).collect();
         names.sort_unstable();
         assert_eq!(fixture["hotkeyActions"], serde_json::json!(names));
+        // Settings' Default sends these: the settings' own defaults.
+        let d = Hotkeys::default();
+        assert_eq!(
+            fixture["hotkeyDefaults"],
+            serde_json::json!({ "prompt": d.prompt, "arrange": d.arrange, "park": d.park })
+        );
         assert_eq!(super::id_for("prompt"), Some(PROMPT));
         assert_eq!(super::id_for("arrange"), Some(HOTKEY_ARRANGE));
         assert_eq!(super::id_for("park"), Some(PARK));

@@ -145,6 +145,20 @@ input {
   flex: none;
 }
 
+/* What went wrong on a row: the words carry it, the sigil only marks it. */
+.row-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--text-hi);
+}
+
+.row-alert-sigil {
+  flex: none;
+  margin-top: 2px;
+  color: var(--warning);
+}
+
 .dot {
   display: inline-block;
   width: 9px;

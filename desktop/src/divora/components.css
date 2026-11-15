@@ -6,8 +6,12 @@
  * titlebar's LOCAL mark (1161-1169) and .mono (367-369, from its utilities
  * layer); and the text field, from the inline
  * style src/screens/SettingsScreen.tsx gives its fields (3298-3306), as a
- * class. See desktop/LICENSES/DivoraVoiceMod.txt. The control window only:
- * the avatar page draws nothing with CSS animation or transitions. */
+ * class; and the hotkey capture (980-1011) and its keycaps (.kbd, 776-791),
+ * from its components layer, with two changes marked there, and its
+ * shimmer's keyframes (447-457, in no layer). See
+ * desktop/LICENSES/DivoraVoiceMod.txt. The control window
+ * only: the avatar page and the prompt draw nothing with CSS animation or
+ * transitions. */
 
 .eyebrow {
   font-family: var(--font-mono);
@@ -296,4 +300,70 @@ body.grain::after {
   background: var(--surface-1);
   color: var(--text-hi);
   font-size: var(--t-sm);
+}
+
+/* ---------- Keycaps ---------- */
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  font-weight: 700;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 6px;
+  color: var(--text-hi);
+  background: var(--surface-3);
+  border: 1px solid var(--line-strong);
+  box-shadow: 0 1.5px 0 rgba(0, 0, 0, 0.4);
+}
+
+/* ---------- Hotkey capture ---------- */
+.hotkey-capture {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 120px;
+  height: 38px;
+  padding: 0 12px;
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  border: 1px dashed var(--line-strong);
+  cursor: pointer;
+  transition: all 0.14s;
+}
+
+.hotkey-capture:hover {
+  border-color: var(--line-glow);
+}
+
+.hotkey-capture.is-capturing {
+  border-style: solid;
+  border-color: var(--indigo);
+  background: var(--accent-bg);
+  /* Changed: DivoraVoice's ring is violet whatever the accent
+     (rgba(124, 92, 246, 0.2)); this one is the accent's. */
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--indigo) 20%, transparent);
+  animation: shimmer 1.1s infinite;
+}
+
+.hotkey-capture-hint {
+  font-size: var(--t-xs);
+  /* Changed: --text-lo at 11 px is below AA on --surface-2. */
+  color: var(--text-mid);
+}
+
+@keyframes shimmer {
+  0% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0.3;
+  }
 }

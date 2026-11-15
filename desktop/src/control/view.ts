@@ -4,7 +4,7 @@
  */
 import type { AvatarStatus } from "../avatar/status";
 import type { LinkStatus } from "../shared/companion";
-import type { ModelInfo } from "./api";
+import type { HotkeyAction, ModelInfo } from "./api";
 
 export interface Standing {
   /** One line on where he is. */
@@ -100,6 +100,54 @@ export function modelLines(m: ModelInfo | null): ModelLines {
 }
 
 export { connectionLines, type ConnectionLines } from "../shared/link";
+
+/** What each of his keys does. */
+export const HOTKEY_DOES: Record<HotkeyAction, string> = {
+  prompt: "Opens the prompt, to ask him something from any app.",
+  arrange: "Lets you move and resize him; Esc locks him there.",
+  park: "Hides him, or brings him back.",
+};
+
+export interface HotkeyLine {
+  text: string;
+  /** The shell's refusal of the key just tried, said as an alert. */
+  alert: boolean;
+}
+
+/** Text naming keys, with the Windows key called Win, as its keycap says
+ * (the settings and the shell's words call it Super). */
+export function winNamed(text: string): string {
+  return text.replace(/\b(?:Super|Cmd|Command)(?=\+)/gi, "Win");
+}
+
+/**
+ * A hotkey row's line: the shell's refusal of the key just tried, as an
+ * alert, followed by whether the key set is the one working; else that
+ * alone, if it isn't (the default it fell back to at start, or none at
+ * all); else what the key does. `active` is the key the shell holds for
+ * it, null for none, undefined until it has said.
+ */
+export function hotkeyLine(
+  action: HotkeyAction,
+  setting: string,
+  active: string | null | undefined,
+  refusal: string | null,
+): HotkeyLine {
+  const status =
+    active === null
+      ? `Not working: he couldn't have ${setting} when he started (another app may hold it). Pick another.`
+      : active !== undefined && active.trim() !== setting.trim()
+        ? `Working on ${active}: ${setting} couldn't be used. Pick another, or press Default.`
+        : null;
+  if (refusal) return { text: winNamed(status ? `${refusal} ${status}` : refusal), alert: true };
+  if (status) return { text: winNamed(status), alert: false };
+  return { text: HOTKEY_DOES[action], alert: false };
+}
+
+/** "Or press Ctrl+Alt+H.", for a row whose action has a key; "" if none. */
+export function orPress(active: string | null | undefined): string {
+  return active ? winNamed(`Or press ${active}.`) : "";
+}
 
 /** Who the brain takes this desk to be, while online; else null. */
 export function identityLine(s: LinkStatus | null): string | null {

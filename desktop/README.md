@@ -25,14 +25,17 @@ opens it):
 | `avatar\fritz.vrm` | The owner's model, if there is one (or `avatar.vrmPath`) |
 
 The hotkeys are `hotkeys.arrange` (Ctrl+Alt+A), `hotkeys.park`
-(Ctrl+Alt+H) and `hotkeys.prompt` (Ctrl+Alt+F), registered at start. A key
-set through the shell's `set_hotkey` (which Settings' Hotkeys section, still
-to come, calls) is bound the moment it is saved: checked (Ctrl and Alt
+(Ctrl+Alt+H) and `hotkeys.prompt` (Ctrl+Alt+F), registered at start and
+set in Settings › Hotkeys: click a key's field and press the new chord (Esc
+cancels). It is bound the moment it is saved: checked (Ctrl and Alt
 together, or Win, or F13 to F24 alone; no other action's key, nor
 push-to-talk's Ctrl+Alt+Space), taken from Windows, saved, and only then is
-the old key let go, so a key another app holds is refused with the old one
-still working. A key edited into `settings.json` by hand takes effect at the
-next start. His eyes follow the cursor while
+the old key let go, so a key another app holds is refused on its row with
+the old one still working. A chord Fritz or another app already holds does
+its job instead of reaching the field. Each row says when the key set isn't
+the one working (it fell back to its default at start, or Windows wouldn't
+give it), and *Default* puts the default back. A key edited into
+`settings.json` by hand takes effect at the next start. His eyes follow the cursor while
 `avatar.lookatCursor` is `true` (the default): on a VRoid export the eyes
 turn, and on any model his head turns part of the way, which is what shows
 on the placeholder.
@@ -50,11 +53,12 @@ window's alone.
 
 The tray's *Settings…* opens the control window: his brain (where it is,
 the token, and whether he is connected), show or hide him, arrange him, his
-eyes following the cursor, the theme, which model he wears (with its folder,
-and loading it again after you drop in a new export), his logs, and the
-foreground log, and a question to ask him. Closing it only hides it. The rest (the hotkeys,
-`avatar.vrmPath`, `brain.clientId` and `brain.clientName`) is still set by
-editing `settings.json` with Fritz quit, until the sections for them land.
+eyes following the cursor, his hotkeys, the theme, which model he wears
+(with its folder, and loading it again after you drop in a new export), his
+logs, and the foreground log, and a question to ask him. Closing it only
+hides it. The rest (`avatar.vrmPath`, `brain.clientId` and
+`brain.clientName`) is still set by editing `settings.json` with Fritz quit,
+until the sections for them land.
 
 ## His brain
 

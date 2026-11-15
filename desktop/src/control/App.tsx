@@ -1,7 +1,7 @@
 /**
- * The control window (tray > Settings…): his brain, where Fritz is, how the
- * house looks, his model, and diagnostics. Plan 14 spreads it across PRs
- * 2-4 and 8: Hotkeys come with PR 4, Voice with PR 8.
+ * The control window (tray > Settings…): his brain, where Fritz is, his
+ * keys, how the house looks, his model, and diagnostics. Plan 14 spreads it
+ * across PRs 2-4 and 8: Voice comes with PR 8.
  *
  * What it shows comes from the shell (status events, settings:changed,
  * companion:status and a fresh read whenever the window is focused); what
@@ -14,8 +14,9 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { STATUS_EVENT, parseStatus, type AvatarStatus } from "../avatar/status";
 import {
   COMPANION_STATUS_EVENT, LOADED_EVENT, SETTINGS_EVENT, arrange, avatarModel, avatarStatus, companionConnect, companionSay,
-  companionStatus, controlOpening, getSettings, getTokenPresent, openFolder, parseCompanionStatus, parseSettings,
-  reloadModel, setParked, setSetting, setToken, type ControlSettings, type ModelInfo,
+  companionStatus, controlOpening, getSettings, getTokenPresent, hotkeysBound, openFolder, parseCompanionStatus,
+  parseSettings, reloadModel, setHotkey, setParked, setSetting, setToken, type ControlSettings, type HotkeyAction,
+  type HotkeysBound, type ModelInfo,
 } from "./api";
 import type { LinkStatus } from "../shared/companion";
 import { afterAsking } from "../shared/asking";
@@ -25,7 +26,8 @@ import { reducedMotion } from "../divora/theme";
 import { Row, Section } from "./layout";
 import { Appearance } from "./sections/Appearance";
 import { Brain } from "./sections/Brain";
-import { modelLines, standing } from "./view";
+import { Hotkeys } from "./sections/Hotkeys";
+import { modelLines, orPress, standing } from "./view";
 import { wearTheme } from "./wear";
 
 export function App(): JSX.Element {
@@ -36,6 +38,8 @@ export function App(): JSX.Element {
   const [problem, setProblem] = createSignal<string | null>(null);
   const [link, setLink] = createSignal<LinkStatus | null>(null);
   const [tokenPresent, setTokenPresent] = createSignal<boolean | null>(null);
+  /** The keys the shell holds now, which may not be the ones set. */
+  const [bound, setBound] = createSignal<HotkeysBound | null>(null);
   /** Link reports heard, so a late answer to `companion_status` can't undo
    * a newer one. */
   let linkEvents = 0;
@@ -62,13 +66,14 @@ export function App(): JSX.Element {
   const refresh = () =>
     attempt("ask Fritz how he is", async () => {
       const heard = linkEvents;
-      const [st, se, mo, tp, li] = await Promise.all([
-        avatarStatus(), getSettings(), avatarModel(), getTokenPresent(), companionStatus(),
+      const [st, se, mo, tp, li, bo] = await Promise.all([
+        avatarStatus(), getSettings(), avatarModel(), getTokenPresent(), companionStatus(), hotkeysBound(),
       ]);
       if (st) setStatus(st);
       took(se);
       setModel(mo);
       setTokenPresent(tp);
+      if (bo) setBound(bo);
       if (li) setLink(afterAsking<LinkStatus | null>(li, heard, linkEvents, link()));
     });
 
@@ -119,6 +124,19 @@ export function App(): JSX.Element {
 
   const set = (path: string, value: unknown, what: string) =>
     attempt(what, async () => took(await setSetting(path, value)));
+  /** Bind a key: null once it is bound and saved, else the shell's words,
+   * said on its own row rather than the window's banner. What the shell
+   * holds is asked again either way. */
+  const rebind = async (action: HotkeyAction, accelerator: string): Promise<string | null> => {
+    try {
+      took(await setHotkey(action, accelerator));
+      return null;
+    } catch (e) {
+      return typeof e === "string" ? e : String(e);
+    } finally {
+      await hotkeysBound().then((b) => b && setBound(b), () => {});
+    }
+  };
   const saveToken = async (token: string) => {
     const ok = await attempt("save the token", () => setToken(token));
     if (ok) setTokenPresent(true);
@@ -161,7 +179,7 @@ export function App(): JSX.Element {
         <Section id="fritz" sigil="butler" eyebrow="Fritz" title="Where he is" desc={here().line}>
           <Row
             title={here().offerShow ? "Show him" : "Hide him"}
-            desc={settings() ? `Or press ${settings()!.hotkeys.park}.` : undefined}
+            desc={orPress(bound()?.park) || undefined}
           >
             <button
               type="button"
@@ -178,7 +196,7 @@ export function App(): JSX.Element {
           <Row
             title="Arrange him"
             desc={`Drag him where you like and resize him from the corner; Esc locks him there.${
-              settings() ? ` Or press ${settings()!.hotkeys.arrange}.` : ""}`}
+              orPress(bound()?.arrange) ? ` ${orPress(bound()?.arrange)}` : ""}`}
           >
             <button type="button" class="btn btn-secondary" disabled={!here().canArrange} onClick={() => attempt("arrange him", arrange)}>
               Arrange…
@@ -193,6 +211,8 @@ export function App(): JSX.Element {
             />
           </Row>
         </Section>
+
+        <Hotkeys keys={settings()?.hotkeys ?? null} bound={bound()} set={rebind} />
 
         <Appearance
           theme={settings()?.theme ?? null}

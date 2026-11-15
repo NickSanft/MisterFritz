@@ -17,6 +17,7 @@
     "arrange": "avatar:arrange"
   },
   "hotkeyActions": ["arrange", "park", "prompt"],
+  "hotkeyDefaults": { "prompt": "Ctrl+Alt+F", "arrange": "Ctrl+Alt+A", "park": "Ctrl+Alt+H" },
   "handshakeStages": [
     "ready",
     "painted"
@@ -313,6 +314,7 @@
   "controlSections": [
     "brain",
     "fritz",
+    "hotkeys",
     "appearance",
     "model",
     "diagnostics",

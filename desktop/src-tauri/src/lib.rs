@@ -365,7 +365,7 @@ pub const RELOAD_EVENT: &str = "avatar:reload";
 /// tray. Set to a section's name (`appearance`), it opens there.
 const SHOW_SETTINGS_ENV: &str = "FRITZ_SHOW_SETTINGS";
 /// The control window's sections, by the ids its page gives them, in order.
-pub const CONTROL_SECTIONS: [&str; 6] = ["brain", "fritz", "appearance", "model", "diagnostics", "about"];
+pub const CONTROL_SECTIONS: [&str; 7] = ["brain", "fritz", "hotkeys", "appearance", "model", "diagnostics", "about"];
 
 /// The section the control window opens at: the one `FRITZ_SHOW_SETTINGS`
 /// names, if it names one; else, with no token yet, Brain (the first run
