@@ -200,6 +200,9 @@ pub fn status_from(report: serde_json::Value) -> Result<CompanionStatus, String>
 /// protocol's `SAY_MAX_CHARS` (held to protocol.ts by a test).
 pub const SAY_MAX_CHARS: usize = 8000;
 
+/// Why a turn wasn't asked when the link isn't online.
+pub const NOT_CONNECTED: &str = "He isn't connected to his brain just now.";
+
 /// Why a turn can't be asked now, in words for whoever asked; `None` when
 /// it can. Trimmed as the page trims (Unicode's White_Space, which is
 /// `str::trim`'s). His window closed comes before the link: the page holds
@@ -216,7 +219,7 @@ pub fn say_refusal(text: &str, last: &CompanionStatus, avatar_open: bool) -> Opt
         return Some("His window is closed: show him first.");
     }
     if last.link != Link::Online {
-        return Some("He isn't connected to his brain just now.");
+        return Some(NOT_CONNECTED);
     }
     None
 }

@@ -3,6 +3,8 @@
  * asks for and when, how it configures the client, and what it reports,
  * by the names and keys the shell has (wire.fixture.json).
  */
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import fixture from "./wire.fixture.json";
 import type { CompanionClient, CompanionConfig, LinkStatus } from "../shared/companion";
@@ -10,11 +12,18 @@ import {
   CONFIG_CMD,
   CONFIG_EVENT,
   REPORT_CMD,
+  SAID_CMD,
   SAY_EVENT,
+  TAKE_CMD,
+  answerSay,
+  onSay,
   configArgs,
   configFrom,
   oneAtATime,
   parseSay,
+  saidArgs,
+  takeArgs,
+  takeSay,
   parseShellConfig,
   reportArgs,
   startCompanion,
@@ -238,15 +247,85 @@ describe("the companion link's wire", () => {
     expect(Object.keys(reportArgs(status).report).sort()).toEqual(fixture.companionStatusKeys);
     expect(CONFIG_EVENT).toBe(fixture.events.companionConfig);
     expect(SAY_EVENT).toBe(fixture.events.companionSay);
+    expect(SAID_CMD).toBe(c.companionSaid.name);
+    expect(Object.keys(saidArgs(3, true))).toEqual(c.companionSaid.args);
+    expect(TAKE_CMD).toBe(c.companionTake.name);
+    expect(Object.keys(takeArgs(3))).toEqual(c.companionTake.args);
   });
 
-  /** The shell's bridge for a turn: `{text}`, and nothing else is one. */
+  /** The shell's bridge for a turn: `{text, id}`, and nothing else is one. */
   it("reads a say strictly", () => {
-    expect(parseSay({ text: "good evening" })).toBe("good evening");
-    expect(parseSay({ text: "" })).toBe("");
-    for (const bad of [null, "good evening", ["good evening"], {}, { text: 1 }, { words: "hi" }]) {
+    const ok = { text: "good evening", id: 7 };
+    expect(Object.keys(ok).sort()).toEqual(fixture.sayKeys);
+    expect(parseSay(ok)).toEqual(ok);
+    expect(parseSay({ ...ok, text: "" })).toEqual({ ...ok, text: "" });
+    for (const bad of [
+      null, "good evening", ["good evening"], {}, { ...ok, text: 1 }, { words: "hi", id: 1 },
+      { text: "hi" }, { ...ok, id: 0 }, { ...ok, id: -1 }, { ...ok, id: 1.5 }, { ...ok, id: "1" },
+    ]) {
       expect(parseSay(bad), JSON.stringify(bad)).toBeNull();
     }
+  });
+
+  /** A say the shell still waits for is taken, asked, and answered with
+   * whether it went on; one the shell has given up is neither asked nor
+   * answered; a bad one is ignored. */
+  it("asks a say only once the shell lets it take it, and answers what asking did", async () => {
+    const say = { text: "good evening", id: 7 };
+    for (const went of [true, false]) {
+      const take = vi.fn(async () => true);
+      const ask = vi.fn(() => went);
+      const answer = vi.fn(async () => {});
+      expect(await onSay(say, take, ask, answer)).toBe("asked");
+      expect(take).toHaveBeenCalledWith(7);
+      expect(ask).toHaveBeenCalledWith("good evening");
+      expect(answer).toHaveBeenCalledWith(7, went);
+      expect(take.mock.invocationCallOrder[0]).toBeLessThan(ask.mock.invocationCallOrder[0]);
+    }
+    const ask = vi.fn(() => true);
+    const answer = vi.fn(async () => {});
+    expect(await onSay(say, async () => false, ask, answer)).toBe("late");
+    const take = vi.fn(async () => true);
+    expect(await onSay({ text: "hi" }, take, ask, answer)).toBe("bad");
+    expect(take).not.toHaveBeenCalled();
+    expect(ask).not.toHaveBeenCalled();
+    expect(answer).not.toHaveBeenCalled();
+  });
+
+  /** The avatar page hands every say to onSay with the shell's take and
+   * the answer, so the handshake above is the one it runs. */
+  it("is what the avatar page runs for every say", () => {
+    const main = readFileSync(fileURLToPath(new URL("./main.ts", import.meta.url)), "utf8");
+    expect(main).toMatch(/listen<unknown>\(SAY_EVENT, \(e\) => \{\s*void onSay\(e\.payload, takeSay, ask, answerSay\)/);
+  });
+
+  /** The shell's yes is `true` and nothing else; no answer is a no. */
+  it("takes a say only on the shell's yes", async () => {
+    expect(await takeSay(7, async () => true)).toBe(true);
+    for (const no of [false, null, "true", 1]) {
+      expect(await takeSay(7, async () => no), JSON.stringify(no)).toBe(false);
+    }
+    const call = vi.fn(async () => true);
+    await takeSay(9, call);
+    expect(call).toHaveBeenCalledWith("companion_take", { id: 9 });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(await takeSay(7, async () => { throw new Error("gone"); })).toBe(false);
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+
+  /** The page tells the shell whether each turn went on, and a failed
+   * answer is only a warning (the shell's wait ends by itself). */
+  it("answers each say", async () => {
+    const call = vi.fn(async () => undefined);
+    await answerSay(7, false, call);
+    expect(call).toHaveBeenCalledWith("companion_said", { id: 7, sent: false });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await answerSay(8, true, async () => {
+      throw new Error("gone");
+    });
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
   });
 
   it("reads the config strictly", () => {

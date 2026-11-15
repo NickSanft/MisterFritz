@@ -5,12 +5,18 @@
 // desktop/LICENSES/DivoraVoiceMod.txt. The rest is Fritz's own.
 
 //! Who has the keyboard, and who gets it back. Arrange takes the keyboard
-//! and hands it back on Lock; every window of Fritz's that ever takes it
-//! saves who had it first and follows these same rules when it is done.
+//! and hands it back on Lock, and the prompt takes it to be typed in; every
+//! window of Fritz's that ever takes it saves who had it first and follows
+//! these same rules when it is done. [`Desk`] is Windows' own answers, the
+//! one place they are asked.
 //!
 //! The keyboard is taken with plain `SetForegroundWindow`, never tauri's or
 //! tao's focus call, which taps Alt into the owner's app when Windows
 //! refuses (`the_shell_never_calls_set_focus`).
+
+use tauri::Manager;
+
+use crate::windows_ext;
 
 /// The desktop calls the hand-back rules make. A trait so the rules are
 /// tested without a window.
@@ -59,6 +65,47 @@ pub(crate) fn hand_back(saved: isize, ours: isize, n: &impl Keyboard) -> isize {
         saved
     } else {
         n.next_app_window(ours, n.settings_window())
+    }
+}
+
+/// Windows' own answers, with the control window's HWND (0 when there is
+/// none): the one real [`Keyboard`].
+pub(crate) struct Desk(pub(crate) isize);
+
+impl Desk {
+    /// The desktop now, with the control window the app declares.
+    pub(crate) fn of(app: &tauri::AppHandle) -> Self {
+        let settings = app
+            .get_webview_window(crate::CONTROL_LABEL)
+            .and_then(|w| w.hwnd().ok())
+            .map_or(0, |h| h.0 as isize);
+        Self(settings)
+    }
+}
+
+impl Keyboard for Desk {
+    fn foreground(&self) -> isize {
+        windows_ext::foreground_window()
+    }
+
+    fn try_foreground(&self, hwnd: isize) -> bool {
+        windows_ext::try_foreground(hwnd)
+    }
+
+    fn can_take_foreground(&self, hwnd: isize) -> bool {
+        windows_ext::can_take_foreground(hwnd)
+    }
+
+    fn owned_by_us(&self, hwnd: isize) -> bool {
+        windows_ext::owned_by_us(hwnd)
+    }
+
+    fn settings_window(&self) -> isize {
+        self.0
+    }
+
+    fn next_app_window(&self, skip: isize, also: isize) -> isize {
+        windows_ext::next_app_window(skip, also)
     }
 }
 
@@ -168,7 +215,7 @@ mod tests {
     }
 
     /// Every module of the shell, by name, with its source.
-    const SOURCES: [(&str, &str); 17] = [
+    const SOURCES: [(&str, &str); 18] = [
         ("avatar_state", include_str!("avatar_state.rs")),
         ("companion", include_str!("companion.rs")),
         ("cover", include_str!("cover.rs")),
@@ -183,6 +230,7 @@ mod tests {
         ("overlay_machine", include_str!("overlay_machine.rs")),
         ("overlay_windows", include_str!("overlay_windows.rs")),
         ("power", include_str!("power.rs")),
+        ("prompt", include_str!("prompt.rs")),
         ("settings", include_str!("settings.rs")),
         ("tray", include_str!("tray.rs")),
         ("windows_ext", include_str!("windows_ext.rs")),

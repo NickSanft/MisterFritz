@@ -10,9 +10,9 @@ import { describe, expect, it } from "vitest";
 // @ts-expect-error: plain ESM scripts, no types
 import { blankComments, codeSpecifiers, reached } from "../scripts/reach.mjs";
 // @ts-expect-error: plain ESM scripts, no types
-import { violations, targets } from "../scripts/check-paced.mjs";
+import { PAGES as PACED_PAGES, violations, targets } from "../scripts/check-paced.mjs";
 // @ts-expect-error: plain ESM scripts, no types
-import { checkBuilt, cssViolations, inlineCss } from "../scripts/check-no-css-animation.mjs";
+import { PAGES, checkBuilt, cssViolations, inlineCss, sourcePass } from "../scripts/check-no-css-animation.mjs";
 // @ts-expect-error: plain ESM scripts, no types
 import { PINNED, TOKENS, bodyOf, compare, pinnedOf, rewrite, tokenBlock } from "../scripts/sync-divora-tokens.mjs";
 
@@ -87,6 +87,48 @@ describe("what the avatar page loads", () => {
     expect(got.code.map(norm).sort()).toEqual(["/p/src/View.tsx", "/p/src/main.ts"]);
     expect(got.css.map(norm).sort()).toEqual(["/p/src/look.css", "/p/src/more.css"]);
     expect(got.missing).toEqual([`${path.join("src", "main.ts")}: ./gone`]);
+  });
+});
+
+describe("what the prompt page loads", () => {
+  const r = reached(path.join(root, "prompt.html"), { root });
+
+  it("is read by both gates", () => {
+    expect(PAGES).toEqual(["avatar.html", "prompt.html"]);
+    expect(PACED_PAGES).toBe(PAGES);
+    expect(sourcePass("prompt.html").found).toEqual([]);
+    const files = rel(targets(path.join(root, "prompt.html")));
+    expect(files).toContain("prompt.html");
+    expect(files).toContain("src/prompt/main.tsx");
+    expect(files).toContain("src/prompt/Prompt.tsx");
+    for (const f of targets(path.join(root, "prompt.html"))) {
+      expect(violations(readFileSync(f, "utf8"), f.endsWith(".html")), f).toEqual([]);
+    }
+  });
+
+  it("loads only the tokens, the fonts and its own stylesheet", () => {
+    expect(r.missing).toEqual([]);
+    expect(rel(r.css)).toEqual(["src/divora/fonts.css", "src/divora/tokens.css", "src/prompt/prompt.css"]);
+  });
+
+  it("never reaches the control window, its stylesheets, or tests", () => {
+    const code = rel(r.code);
+    expect(code.some((f: string) => f.startsWith("src/control/"))).toBe(false);
+    expect(rel(r.css)).not.toContain("src/divora/components.css");
+    expect(rel(r.css)).not.toContain("src/control/control.css");
+    expect(code.some((f: string) => f.includes(".test.") || /\/test[A-Z]/.test(f))).toBe(false);
+  });
+
+  it("is refused, and removed, when its built page would animate", () => {
+    const dist = mkdtempSync(path.join(os.tmpdir(), "fritz-dist-"));
+    mkdirSync(path.join(dist, "assets"));
+    writeFileSync(path.join(dist, "prompt.html"), '<link rel="stylesheet" href="/assets/p.css">');
+    writeFileSync(path.join(dist, "assets", "p.css"), ".prompt{background:#000;transition:opacity 1s}");
+    const refused = checkBuilt(dist, "prompt.html");
+    expect(refused.found).toHaveLength(1);
+    expect(refused.found[0]).toContain("transition");
+    expect(refused.removed).toBe(true);
+    expect(existsSync(dist)).toBe(false);
   });
 });
 

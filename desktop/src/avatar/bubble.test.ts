@@ -6,6 +6,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { COMBOS, contrast, token } from "../shared/testContrast";
 import {
   CROSSFADE_MS, FADE_MS, HOLD_MAX_MS, HOLD_MS, MATERIALISE_BLUR_FROM_PX, MATERIALISE_MS, MATERIALISE_SCALE_FROM,
   easeOutCubic, holdMs, opacityMs, smoothstep, transformMs,
@@ -330,51 +331,8 @@ describe("the reply as plain text", () => {
 
 // ── Its colours: AA on its own panel ────────────────────────────────────────
 
-const TOKENS = readFileSync(fileURLToPath(new URL("../divora/tokens.css", import.meta.url)), "utf8");
 const CSS = readFileSync(fileURLToPath(new URL("./bubble.css", import.meta.url)), "utf8");
 const VIEW_TS = readFileSync(fileURLToPath(new URL("./BubbleView.ts", import.meta.url)), "utf8");
-
-function block(selector: string): Record<string, string> {
-  const at = TOKENS.indexOf(`${selector} {`);
-  if (at < 0) throw new Error(`tokens.css has no ${selector} block`);
-  const body = TOKENS.slice(TOKENS.indexOf("{", at) + 1, TOKENS.indexOf("}", at));
-  return Object.fromEntries([...body.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)].map((m) => [m[1], m[2].trim()]));
-}
-
-function token(name: string, selectors: string[]): string {
-  for (const s of selectors) {
-    const v = block(s)[name];
-    if (v !== undefined) return v;
-  }
-  throw new Error(`${name} isn't set by ${selectors.join(", ")}`);
-}
-
-function luminance(hex: string): number {
-  const m = /^#([0-9a-f]{6})$/i.exec(hex);
-  if (!m) throw new Error(`not an opaque hex colour: ${hex}`);
-  const [r, g, b] = [0, 2, 4].map((i) => {
-    const c = parseInt(m[1].slice(i, i + 2), 16) / 255;
-    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
-  });
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-}
-
-function contrast(a: string, b: string): number {
-  const [x, y] = [luminance(a), luminance(b)].sort((p, q) => q - p);
-  return (x + 0.05) / (y + 0.05);
-}
-
-/** Each mood and theme's blocks, most specific first. */
-const COMBOS: Record<string, string[]> = {
-  "dusk dark": [":root"],
-  "ink dark": [':root[data-mood="ink"]', ":root"],
-  "midnight dark": [':root[data-mood="midnight"]', ":root"],
-  "dusk light": [':root[data-theme="light"]', ":root"],
-  "ink light": [':root[data-theme="light"][data-mood="ink"]', ':root[data-theme="light"]', ':root[data-mood="ink"]', ":root"],
-  "midnight light": [
-    ':root[data-theme="light"][data-mood="midnight"]', ':root[data-theme="light"]', ':root[data-mood="midnight"]', ":root",
-  ],
-};
 
 describe("the bubble's colours", () => {
   it("are AA (4.5:1) on its opaque panel in every mood and theme", () => {

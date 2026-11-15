@@ -432,7 +432,7 @@ pub fn on_window_event(app: &AppHandle, event: &WindowEvent) {
     };
     match event {
         WindowEvent::CloseRequested { .. } => {
-            going(&shared, &Desktop(None, 0));
+            going(&shared, &Desktop(None, keyboard::Desk(0)));
             let _ = step(app, Input::CloseRequested);
         }
         WindowEvent::Destroyed => {
@@ -470,7 +470,7 @@ pub fn standing(app: &AppHandle) -> Option<OverlayRect> {
 /// (the window isn't closed through `CloseRequested` then).
 pub fn before_exit(app: &AppHandle) {
     if let Some(shared) = shared(app) {
-        going(&shared, &Desktop(None, 0));
+        going(&shared, &Desktop(None, keyboard::Desk(0)));
     }
 }
 
@@ -792,17 +792,12 @@ trait Native: Keyboard {
     fn on_screen(&self, r: OverlayRect) -> OverlayRect;
 }
 
-/// The real avatar window, if it still exists, the control window's HWND
-/// (0 when there is none), and the desktop.
-struct Desktop(Option<WebviewWindow>, isize);
+/// The real avatar window, if it still exists, and the desktop.
+struct Desktop(Option<WebviewWindow>, keyboard::Desk);
 
 impl Desktop {
     fn of(app: &AppHandle) -> Self {
-        let settings = app
-            .get_webview_window(crate::CONTROL_LABEL)
-            .and_then(|w| w.hwnd().ok())
-            .map_or(0, |h| h.0 as isize);
-        Self(app.get_webview_window(OVERLAY_LABEL), settings)
+        Self(app.get_webview_window(OVERLAY_LABEL), keyboard::Desk::of(app))
     }
 }
 
@@ -870,27 +865,27 @@ impl Native for Desktop {
 
 impl Keyboard for Desktop {
     fn foreground(&self) -> isize {
-        windows_ext::foreground_window()
+        self.1.foreground()
     }
 
     fn try_foreground(&self, hwnd: isize) -> bool {
-        windows_ext::try_foreground(hwnd)
+        self.1.try_foreground(hwnd)
     }
 
     fn can_take_foreground(&self, hwnd: isize) -> bool {
-        windows_ext::can_take_foreground(hwnd)
+        self.1.can_take_foreground(hwnd)
     }
 
     fn owned_by_us(&self, hwnd: isize) -> bool {
-        windows_ext::owned_by_us(hwnd)
+        self.1.owned_by_us(hwnd)
     }
 
     fn settings_window(&self) -> isize {
-        self.1
+        self.1.settings_window()
     }
 
     fn next_app_window(&self, skip: isize, also: isize) -> isize {
-        windows_ext::next_app_window(skip, also)
+        self.1.next_app_window(skip, also)
     }
 }
 

@@ -23,14 +23,74 @@ export const CONFIG_CMD = "companion_config";
 export const REPORT_CMD = "companion_report";
 /** The token was saved, or Reconnect pressed: ask for the config again. */
 export const CONFIG_EVENT = "companion:config";
-/** The shell's bridge for a turn: `{text}` to say to the brain (Settings ›
- * Brain's Ask; PR 4's prompt window). */
+/** The shell's bridge for a turn: `{text, id}` to say to the brain (from
+ * Settings › Brain's Ask, or the prompt). The page takes it first
+ * (`companion_take`): the shell says yes only while it still waits for it,
+ * so a turn the shell has given up on (and said so) is never asked, and the
+ * owner's "try again" never asks it twice. Then the page asks it, and
+ * answers `companion_said` with whether it went on, so the window that
+ * asked hears when the link had dropped. */
 export const SAY_EVENT = "companion:say";
+export const TAKE_CMD = "companion_take";
+export const SAID_CMD = "companion_said";
 
-/** The text of a `companion:say`, or null when it isn't one. */
-export function parseSay(v: unknown): string | null {
+/** A turn the shell hands over: what to say, and its number. */
+export interface Say {
+  text: string;
+  id: number;
+}
+
+/** A `companion:say`, or null when it isn't one. */
+export function parseSay(v: unknown): Say | null {
   const o = obj(v);
-  return o && typeof o.text === "string" ? o.text : null;
+  if (!o || typeof o.text !== "string") return null;
+  if (!(typeof o.id === "number" && Number.isSafeInteger(o.id) && o.id > 0)) return null;
+  return { text: o.text, id: o.id };
+}
+
+/** What the page does with a `companion:say`: takes it, and only if the
+ * shell still waits for it, asks it and answers with whether it went on. */
+export async function onSay(
+  payload: unknown,
+  take: (id: number) => Promise<boolean>,
+  ask: (text: string) => boolean,
+  answer: (id: number, sent: boolean) => Promise<void>,
+): Promise<"asked" | "late" | "bad"> {
+  const say = parseSay(payload);
+  if (say === null) return "bad";
+  if (!(await take(say.id))) return "late";
+  void answer(say.id, ask(say.text));
+  return "asked";
+}
+
+export const takeArgs = (id: number) => ({ id });
+export const saidArgs = (id: number, sent: boolean) => ({ id, sent });
+
+/** Take turn `id` from the shell: whether it still waits for it. No answer
+ * is a no: the page never asks a turn the shell may have given up. */
+export async function takeSay(
+  id: number,
+  call: (cmd: string, args: Record<string, unknown>) => Promise<unknown> = invoke,
+): Promise<boolean> {
+  try {
+    return (await call(TAKE_CMD, takeArgs(id))) === true;
+  } catch (e) {
+    console.warn(`avatar: ${TAKE_CMD} failed`, e);
+    return false;
+  }
+}
+
+/** Tell the shell whether turn `id` was sent on. */
+export async function answerSay(
+  id: number,
+  sent: boolean,
+  call: (cmd: string, args: Record<string, unknown>) => Promise<unknown> = invoke,
+): Promise<void> {
+  try {
+    await call(SAID_CMD, saidArgs(id, sent));
+  } catch (e) {
+    console.warn(`avatar: ${SAID_CMD} failed`, e);
+  }
 }
 
 /** What `companion_config` answers: the token is null when there is none. */

@@ -3,7 +3,7 @@ import { defineConfig } from "vite";
 import solid from "vite-plugin-solid";
 
 // Multi-page, like Lorraine's: one HTML entry per window: the avatar, the
-// control window (Solid); PR 4 adds prompt.html here.
+// control window (Solid) and the prompt (Solid).
 export default defineConfig({
   plugins: [solid()],
   clearScreen: false,
@@ -22,6 +22,7 @@ export default defineConfig({
       input: {
         avatar: fileURLToPath(new URL("./avatar.html", import.meta.url)),
         control: fileURLToPath(new URL("./control.html", import.meta.url)),
+        prompt: fileURLToPath(new URL("./prompt.html", import.meta.url)),
       },
     },
   },

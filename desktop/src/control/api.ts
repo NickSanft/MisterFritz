@@ -5,7 +5,8 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { parseStatus, type AvatarStatus } from "../avatar/status";
-import type { Link, LinkStatus, Reason } from "../shared/companion";
+import type { LinkStatus } from "../shared/companion";
+import { parseCompanionStatus } from "../shared/link";
 import { SETTINGS_EVENT, parseBrain, parseTheme, type Brain, type Theme } from "../shared/settings";
 
 export const CMD = {
@@ -28,8 +29,7 @@ export const CMD = {
 export { SETTINGS_EVENT };
 /** The avatar's page has loaded a model: ask `avatar_model` again. */
 export const LOADED_EVENT = "avatar:loaded";
-/** The avatar's page reported the brain's link (a `LinkStatus`). */
-export const COMPANION_STATUS_EVENT = "companion:status";
+export { COMPANION_STATUS_EVENT } from "../shared/link";
 
 export type Folder = "logs" | "avatar";
 
@@ -113,27 +113,7 @@ export function parseModelInfo(v: unknown): ModelInfo | null {
   };
 }
 
-const LINKS: readonly Link[] = ["unconfigured", "connecting", "online", "offline", "refused"];
-const REASONS: readonly Reason[] = ["token", "version", "hello", "full", "quiet", "unreachable", null];
-
-/** The link as the avatar's page reported it, or null when it isn't one. */
-export function parseCompanionStatus(v: unknown): LinkStatus | null {
-  const o = obj(v);
-  if (!o) return null;
-  if (!LINKS.includes(o.link as Link) || !REASONS.includes(o.reason as Reason)) return null;
-  if (o.retryIn !== null && !(typeof o.retryIn === "number" && Number.isInteger(o.retryIn) && o.retryIn >= 0)) return null;
-  for (const k of ["identity", "displayName", "threadId"]) {
-    if (o[k] !== null && typeof o[k] !== "string") return null;
-  }
-  return {
-    link: o.link as Link,
-    reason: o.reason as Reason,
-    retryIn: o.retryIn as number | null,
-    identity: o.identity as string | null,
-    displayName: o.displayName as string | null,
-    threadId: o.threadId as string | null,
-  };
-}
+export { parseCompanionStatus } from "../shared/link";
 
 /** The argument objects, by the keys the shell's commands take. */
 export const args = {

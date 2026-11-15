@@ -1,20 +1,24 @@
-// Build-time gate for the avatar page: it animates only through the paced
-// setTimeout loop (src/avatar/PacedLoop.ts). requestAnimationFrame, three.js's
+// Build-time gate for the pages drawn over the owner's desktop: the avatar
+// animates only through the paced setTimeout loop (src/avatar/PacedLoop.ts),
+// and the prompt not at all. requestAnimationFrame, three.js's
 // setAnimationLoop (rAF underneath), the Web Animations API and CSS
 // animations or transitions, set in a stylesheet or from code, all keep
 // Chromium's compositor presenting every vsync, which is the idle GPU cost
-// Spike 0 measures (Lorraine's lesson). It checks our own modules the page
-// loads (scripts/reach.mjs follows avatar.html's imports, into src/divora and
-// src/shared too) and avatar.html itself. Packages are listed, not read:
-// three.js has rAF paths of its own (setAnimationLoop, which this forbids us
-// to call). Stylesheets are check-no-css-animation.mjs's. Node ESM only, so
-// it runs the same in PowerShell, cmd and CI.
+// Spike 0 measures (Lorraine's lesson). For each page in PAGES, it checks our
+// own modules the page loads (scripts/reach.mjs follows its imports, into
+// src/divora and src/shared too) and the page itself. Packages are listed,
+// not read: three.js has rAF paths of its own (setAnimationLoop, which this
+// forbids us to call). Stylesheets are check-no-css-animation.mjs's. Node ESM
+// only, so it runs the same in PowerShell, cmd and CI.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { blankComments, reached } from "./reach.mjs";
+import { PAGES } from "./check-no-css-animation.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+export { PAGES };
 
 export const FORBIDDEN = [
   [/\brequestAnimationFrame\b/, "requestAnimationFrame"],
@@ -54,23 +58,25 @@ export function violations(text, html = false) {
 /** The files the gate reads: the page and every module it loads, but tests. */
 export function targets(entry = path.join(root, "avatar.html")) {
   const r = reached(entry, { root });
-  if (r.missing.length) throw new Error(`avatar.html imports what isn't there:\n  ${r.missing.join("\n  ")}`);
+  if (r.missing.length) throw new Error(`${path.basename(entry)} imports what isn't there:\n  ${r.missing.join("\n  ")}`);
   return [entry, ...r.code.filter((f) => /\.(ts|tsx|js|mjs)$/.test(f) && !/\.test\.tsx?$/.test(f))];
 }
 
 function main() {
-  const files = targets();
-  const found = [];
-  for (const file of files) {
-    const text = fs.readFileSync(file, "utf8");
-    for (const v of violations(text, file.endsWith(".html"))) found.push(`${path.relative(root, file)}:${v}`);
+  for (const name of PAGES) {
+    const files = targets(path.join(root, name));
+    const found = [];
+    for (const file of files) {
+      const text = fs.readFileSync(file, "utf8");
+      for (const v of violations(text, file.endsWith(".html"))) found.push(`${path.relative(root, file)}:${v}`);
+    }
+    if (found.length) {
+      console.error(`\n${name} may animate only through PacedLoop:\n`);
+      for (const v of found) console.error(v);
+      process.exit(1);
+    }
+    console.log(`[ok] ${files.length} files ${name} loads animate only through the paced loop.`);
   }
-  if (found.length) {
-    console.error("\nThe avatar page must animate only through PacedLoop:\n");
-    for (const v of found) console.error(v);
-    process.exit(1);
-  }
-  console.log(`[ok] ${files.length} files the avatar page loads animate only through the paced loop.`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

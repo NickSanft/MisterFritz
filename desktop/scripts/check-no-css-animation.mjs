@@ -1,12 +1,13 @@
-// Build-time gate (plan 14 build § 4.3): nothing the avatar page loads may
-// animate in CSS. A @keyframes, an animation, a transition or a smooth
-// scroll keeps the compositor presenting every vsync (see check-paced.mjs);
-// the avatar animates only through the paced loop, writing its styles from
-// the tick. Two passes:
-// - the source: every stylesheet avatar.html reaches through its imports
-//   (scripts/reach.mjs), and avatar.html's own <style> and style= attributes;
-// - with --dist, after `vite build`: dist/avatar.html's linked stylesheets
-//   and inline styles, which is everything the page ships, packages too.
+// Build-time gate (plan 14 build § 4.3): nothing the avatar page or the
+// prompt loads may animate in CSS. A @keyframes, an animation, a transition
+// or a smooth scroll keeps the compositor presenting every vsync (see
+// check-paced.mjs); the avatar animates only through the paced loop, writing
+// its styles from the tick, and the prompt not at all. Two passes, for each
+// page in PAGES:
+// - the source: every stylesheet the page reaches through its imports
+//   (scripts/reach.mjs), and the page's own <style> and style= attributes;
+// - with --dist, after `vite build`: the built page's linked stylesheets
+//   and inline styles, which is everything it ships, packages too.
 // The control window (control.html) isn't checked: it animates as
 // DivoraVoice does, at the owner's motion level. Node ESM only.
 import fs from "node:fs";
@@ -15,6 +16,9 @@ import { fileURLToPath } from "node:url";
 import { reached } from "./reach.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+/** The pages drawn over the owner's desktop, whose webviews never sleep. */
+export const PAGES = ["avatar.html", "prompt.html"];
 
 export const FORBIDDEN = [
   [/@keyframes\b/, "a CSS @keyframes animation"],
@@ -46,20 +50,20 @@ export function inlineCss(html) {
   return [...blocks, ...attrs].join("\n");
 }
 
-function sourcePass() {
-  const entry = path.join(root, "avatar.html");
+export function sourcePass(name) {
+  const entry = path.join(root, name);
   const r = reached(entry, { root });
-  if (r.missing.length) throw new Error(`avatar.html imports what isn't there:\n  ${r.missing.join("\n  ")}`);
+  if (r.missing.length) throw new Error(`${name} imports what isn't there:\n  ${r.missing.join("\n  ")}`);
   const sheets = [[entry, inlineCss(fs.readFileSync(entry, "utf8"))], ...r.css.map((f) => [f, fs.readFileSync(f, "utf8")])];
   return check(sheets);
 }
 
-/** The built page (`dist/`): its own styles and its linked stylesheets,
+/** A built page (`dist/<name>`): its own styles and its linked stylesheets,
  * packages' included. A refused build is removed, `dist` and all: vite build
  * has already replaced the last good one, and what is left must not be
  * embedded by the cargo build that follows. */
-export function checkBuilt(dist = path.join(root, "dist")) {
-  const page = path.join(dist, "avatar.html");
+export function checkBuilt(dist = path.join(root, "dist"), name = "avatar.html") {
+  const page = path.join(dist, name);
   if (!fs.existsSync(page)) throw new Error(`${page} isn't there: run vite build first`);
   const html = fs.readFileSync(page, "utf8");
   const linked = [...html.matchAll(/<link\b[^>]*\brel=["']stylesheet["'][^>]*\bhref=["']([^"']+)["']/g)].map((m) => m[1]);
@@ -82,14 +86,16 @@ function check(sheets) {
 
 function main() {
   const dist = process.argv.includes("--dist");
-  const result = dist ? checkBuilt() : sourcePass();
-  if (result.found.length) {
-    console.error(`\nNothing the avatar page loads may animate in CSS${dist ? " (the built page)" : ""}:\n`);
-    for (const v of result.found) console.error(v);
-    if (result.removed) console.error("\ndist/ removed, so no exe can embed this page: build again once it's fixed.");
-    process.exit(1);
+  for (const name of PAGES) {
+    const result = dist ? checkBuilt(undefined, name) : sourcePass(name);
+    if (result.found.length) {
+      console.error(`\nNothing ${name} loads may animate in CSS${dist ? " (the built page)" : ""}:\n`);
+      for (const v of result.found) console.error(v);
+      if (result.removed) console.error("\ndist/ removed, so no exe can embed this page: build again once it's fixed.");
+      process.exit(1);
+    }
+    console.log(`[ok] ${result.count} ${dist ? "built" : "source"} stylesheets ${name} loads don't animate.`);
   }
-  console.log(`[ok] ${result.count} ${dist ? "built" : "source"} stylesheets the avatar page loads don't animate.`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

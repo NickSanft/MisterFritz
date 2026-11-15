@@ -34,9 +34,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, GetClassNameW, GetCursorPos, GetForegroundWindow, GetShellWindow, GetTopWindow, GetWindow,
     GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow,
     IsWindowVisible, IsZoomed, SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW,
-    SetWindowPos, WindowFromPoint, GA_ROOT, GWL_EXSTYLE, GW_HWNDNEXT, GW_OWNER, LWA_ALPHA,
-    STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
-    SWP_NOZORDER, WM_NCDESTROY, WM_STYLECHANGING, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
+    SetWindowPos, WindowFromPoint, GA_ROOT, GA_ROOTOWNER, GWL_EXSTYLE, GW_HWNDNEXT, GW_OWNER,
+    LWA_ALPHA, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
+    SWP_NOSIZE, SWP_NOZORDER, WA_INACTIVE, WM_ACTIVATE, WM_NCDESTROY, WM_STYLECHANGING,
+    WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
 };
 
@@ -199,6 +200,58 @@ pub fn pin_toolwindow(window: isize) -> bool {
     // removes itself at WM_NCDESTROY.
     let pinned = unsafe { SetWindowSubclass(hwnd(window), Some(pin_proc), PIN_ID, 0) }.as_bool();
     pinned && apply_toolwindow(window)
+}
+
+/// The deactivation watch's subclass id: "FRDA".
+const DEACTIVATE_ID: usize = 0x4652_4441;
+
+/// Calls the watcher stored with the subclass when the window stops being
+/// the active one, and takes itself off as the window goes.
+unsafe extern "system" fn deactivate_proc(
+    h: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    _id: usize,
+    data: usize,
+) -> LRESULT {
+    #[allow(clippy::cast_possible_truncation)]
+    let state = (wp.0 & 0xFFFF) as u32;
+    if msg == WM_ACTIVATE && state == WA_INACTIVE && data != 0 {
+        // SAFETY: `data` is the `fn()` that `watch_deactivation` stored, as
+        // an integer the size of a pointer; nothing else sets this id.
+        let on_inactive = unsafe { std::mem::transmute::<usize, fn()>(data) };
+        on_inactive();
+    } else if msg == WM_NCDESTROY {
+        // SAFETY: our own subclass on the window it was set on.
+        let _ = unsafe { RemoveWindowSubclass(h, Some(deactivate_proc), DEACTIVATE_ID) };
+    }
+    // SAFETY: passes the message on down the subclass chain unchanged.
+    unsafe { DefSubclassProc(h, msg, wp, lp) }
+}
+
+/// Call `on_inactive` each time `window` stops being the active window
+/// (`WM_ACTIVATE` with `WA_INACTIVE`), from inside its window procedure, so
+/// it must only post, never act there. Windows says so whatever the webview
+/// inside was told, which is why a window can't rely on the webview's own
+/// blur alone. Must run on the window's own thread (the main thread).
+pub fn watch_deactivation(window: isize, on_inactive: fn()) -> bool {
+    if window == 0 {
+        return false;
+    }
+    // SAFETY: a window of this thread and a static procedure, which removes
+    // itself at WM_NCDESTROY; the data is a plain function pointer.
+    unsafe { SetWindowSubclass(hwnd(window), Some(deactivate_proc), DEACTIVATE_ID, on_inactive as usize) }.as_bool()
+}
+
+/// The window at the top of `window`'s owner chain (itself, with no owner);
+/// 0 for 0 or a window that is gone.
+pub fn root_owner(window: isize) -> isize {
+    if window == 0 {
+        return 0;
+    }
+    // SAFETY: a plain query; a stale handle answers null.
+    unsafe { GetAncestor(hwnd(window), GA_ROOTOWNER) }.0 as isize
 }
 
 /// Whether `window` is visible (WS_VISIBLE): false for 0 or a hidden one.

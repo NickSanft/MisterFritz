@@ -98,6 +98,7 @@
     "noReadyGlobal": "__FRITZ_AVATAR_NO_READY__",
     "pretendSayEnv": "FRITZ_PRETEND_SAY"
   },
+  "sayKeys": ["id", "text"],
   "commands": {
     "handshake": {
       "name": "avatar_handshake",
@@ -208,6 +209,22 @@
     "companionSay": {
       "name": "companion_say",
       "args": ["text"]
+    },
+    "companionTake": {
+      "name": "companion_take",
+      "args": ["id"]
+    },
+    "companionSaid": {
+      "name": "companion_said",
+      "args": ["id", "sent"]
+    },
+    "promptSay": {
+      "name": "prompt_say",
+      "args": ["text"]
+    },
+    "promptClose": {
+      "name": "prompt_close",
+      "args": []
     }
   },
   "cursorKeys": [

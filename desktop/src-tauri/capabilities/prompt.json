@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "prompt",
+  "description": "The prompt window (Ask Fritz, declared hidden in tauri.conf.json): the events it listens to, nothing else. Its app commands (prompt_say, prompt_close, get_settings, companion_status, avatar_status) are not ACL-checked without an app manifest, and must be granted here if one is ever added; prompt_say and prompt_close check the calling window themselves. It is never given companion_config, a global shortcut, or a window's focus call: the shell takes and hands back the keyboard.",
+  "windows": ["prompt"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}

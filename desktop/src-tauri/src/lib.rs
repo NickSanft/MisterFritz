@@ -1,6 +1,7 @@
 //! Mister Fritz's body on the Windows desktop (plan 14): one persistent,
 //! transparent, click-through, never-focused avatar window with a WebGL VRM
-//! in it, a tray, and global hotkeys. Windows only.
+//! in it, a tray, global hotkeys, the control window (Settings) and the
+//! prompt (`prompt.rs`), both declared and hidden at rest. Windows only.
 //!
 //! What it keeps lives in `%APPDATA%\com.divora.fritz\`: `settings.json`,
 //! `companion.token` (the brain's token, `companion.rs`), `startup.log` and
@@ -21,15 +22,18 @@ mod non_rude;
 mod overlay_machine;
 mod overlay_windows;
 mod power;
+mod prompt;
 mod settings;
 mod tray;
 mod windows_ext;
 
 use std::fs::File;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Mutex, MutexGuard};
+use std::time::Duration;
 
+use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 use tauri_plugin_global_shortcut::{Shortcut, ShortcutEvent, ShortcutState};
 
@@ -55,8 +59,10 @@ pub const COMPANION_STATUS_EVENT: &str = "companion:status";
 /// Sent to the avatar's page to ask for its config again and connect anew:
 /// the token was saved, or the owner pressed Reconnect.
 pub const COMPANION_CONFIG_EVENT: &str = "companion:config";
-/// Sent to the avatar's page with `{text}`: a turn to ask the brain, from
-/// Settings › Brain's Ask (and PR 4's prompt window).
+/// Sent to the avatar's page with `{text, id}`: a turn to ask the brain,
+/// from Settings › Brain's Ask or the prompt. The page takes it
+/// (`companion_take`), asks it only if the shell still waits for it, and
+/// answers `companion_said` with whether it went on.
 pub const COMPANION_SAY_EVENT: &str = "companion:say";
 /// A debug build only: once the link is first online, ask the brain this,
 /// through the same path as Ask (a live check's turn with no click).
@@ -348,7 +354,9 @@ pub(crate) fn show_control(app: &AppHandle) {
 }
 
 /// Whether closing the window `label` only hides it: the control window
-/// does, so the tray can bring it back; the avatar's has its own shell.
+/// does, so the tray can bring it back; the avatar's and the prompt's have
+/// their own shells (a bare hide would leave the keyboard with a hidden
+/// prompt).
 pub fn hides_on_close(label: &str) -> bool {
     label == CONTROL_LABEL
 }
@@ -617,9 +625,14 @@ async fn companion_report(app: AppHandle, webview: tauri::Webview, report: serde
         let env = std::env::var(PRETEND_SAY_ENV).ok();
         if let Some(text) = companion::pretend_say_text(cfg!(debug_assertions), env) {
             PRETENDED.store(true, Ordering::SeqCst);
-            if let Err(e) = ask_the_brain(&app, &text, PRETEND_SAY_ENV) {
-                tracing::warn!("{PRETEND_SAY_ENV}: {e}");
-            }
+            // Not awaited here: the page answers the turn with a command of
+            // its own, while this report's is still open.
+            let h = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = ask_the_brain(&h, &text, PRETEND_SAY_ENV).await {
+                    tracing::warn!("{PRETEND_SAY_ENV}: {e}");
+                }
+            });
         }
     }
     Ok(())
@@ -633,18 +646,170 @@ fn companion_page_gone(app: &AppHandle) {
     let _ = app.emit(COMPANION_STATUS_EVENT, companion::current(token_present()));
 }
 
-/// Ask the brain `text`, through the avatar's page (it holds the session):
-/// refused, with why, when there is nothing to ask, his window is closed or
-/// the link isn't online. Logs the length, never the text.
-fn ask_the_brain(app: &AppHandle, text: &str, from: &str) -> Result<(), String> {
+/// How long the avatar's page has to take a turn it was handed.
+const SAY_WAIT: Duration = Duration::from_secs(5);
+/// How much longer a turn the page has taken is waited for: it is asking
+/// the brain, which is at once, unless the page dies meanwhile.
+const SAY_GRACE: Duration = Duration::from_secs(5);
+/// Why a turn wasn't taken when his page never took it (so it wasn't asked).
+const SAY_UNANSWERED: &str = "His window didn't answer just now: try again.";
+/// Why a turn wasn't taken when his page took it but never said whether it
+/// went on: it may have been asked, so this never says to try again.
+const SAY_UNSURE: &str = "His window took it but never said whether it went on: see his bubble before asking again.";
+
+/// What the shell heard of a turn it handed to the avatar's page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Heard {
+    /// The page's answer: whether the link took it.
+    Answered(bool),
+    /// The page never took it, and now never will: it wasn't asked.
+    NotTaken,
+    /// The page took it and never said: it may have been asked.
+    Silent,
+}
+
+/// Where a turn handed to the avatar's page stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// Handed over, not yet taken: the shell may still give it up.
+    Handed,
+    /// Taken by the page, which is asking it: never given up now.
+    Taken,
+}
+
+/// The turns handed to the avatar's page that it hasn't yet answered, by
+/// their number, each with its stage and where its answer goes.
+static SAYS: Mutex<Vec<(u64, Stage, mpsc::Sender<bool>)>> = Mutex::new(Vec::new());
+static SAY_NUMBER: AtomicU64 = AtomicU64::new(0);
+
+fn says() -> MutexGuard<'static, Vec<(u64, Stage, mpsc::Sender<bool>)>> {
+    SAYS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A number for the next turn, and where the page's answer to it arrives.
+fn await_say() -> (u64, mpsc::Receiver<bool>) {
+    let id = SAY_NUMBER.fetch_add(1, Ordering::SeqCst) + 1;
+    let (tx, rx) = mpsc::channel();
+    says().push((id, Stage::Handed, tx));
+    (id, rx)
+}
+
+/// The page takes turn `id` before asking it: true while the shell still
+/// waits for it (it then waits for its answer), false once it has given it
+/// up, or taken it already, and the page must not ask it. The shell alone
+/// decides, so no clock of the page's is trusted.
+fn take_say(id: u64) -> bool {
+    let mut all = says();
+    match all.iter_mut().find(|(n, _, _)| *n == id) {
+        Some(entry) if entry.1 == Stage::Handed => {
+            entry.1 = Stage::Taken;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Turn `id` off the list, at whatever stage; where its answer went, if it
+/// was there.
+fn stop_awaiting(id: u64) -> Option<mpsc::Sender<bool>> {
+    let mut all = says();
+    let at = all.iter().position(|(n, _, _)| *n == id)?;
+    Some(all.swap_remove(at).2)
+}
+
+/// The wait is over: a turn the page hasn't taken is taken off the list, so
+/// it is never asked (true). One it has taken, or already answered, isn't
+/// given up: its answer is coming (false).
+fn give_up(id: u64) -> bool {
+    let mut all = says();
+    match all.iter().position(|(n, stage, _)| *n == id && *stage == Stage::Handed) {
+        Some(at) => {
+            all.swap_remove(at);
+            true
+        }
+        None => false,
+    }
+}
+
+/// What the shell heard means for the turn.
+fn say_outcome(heard: Heard) -> Result<(), &'static str> {
+    match heard {
+        Heard::Answered(true) => Ok(()),
+        Heard::Answered(false) => Err(companion::NOT_CONNECTED),
+        Heard::NotTaken => Err(SAY_UNANSWERED),
+        Heard::Silent => Err(SAY_UNSURE),
+    }
+}
+
+/// What `companion:say` carries: the turn's text and number.
+fn say_payload(text: &str, id: u64) -> serde_json::Value {
+    serde_json::json!({ "text": text, "id": id })
+}
+
+/// Wait for the page's answer to turn `id`. Once `wait` is over, a turn the
+/// page never took is given up, so it is never asked; one it took is being
+/// asked, and its answer is waited for `grace` longer.
+fn wait_for_answer(id: u64, answer: &mpsc::Receiver<bool>, wait: Duration, grace: Duration) -> Heard {
+    if let Ok(sent) = answer.recv_timeout(wait) {
+        return Heard::Answered(sent);
+    }
+    if give_up(id) {
+        return Heard::NotTaken;
+    }
+    answer.recv_timeout(grace).map_or(Heard::Silent, Heard::Answered)
+}
+
+/// Ask the brain `text`, through the avatar's page (it holds the session).
+/// Refused, with why, when there is nothing to ask, his window is closed or
+/// the link isn't online; and taken only once the page says it sent it on,
+/// since the link can drop between its last report and the turn. Logs the
+/// length, never the text.
+async fn ask_the_brain(app: &AppHandle, text: &str, from: &str) -> Result<(), String> {
     let avatar = overlay_windows::status(app);
     let open = avatar.open && avatar.phase != overlay_machine::PhaseName::Closing;
     if let Some(why) = companion::say_refusal(text, &companion::current(token_present()), open) {
         return Err(why.to_owned());
     }
-    app.emit_to(OVERLAY_LABEL, COMPANION_SAY_EVENT, serde_json::json!({ "text": text }))
-        .map_err(|e| format!("Couldn't reach his window: {e}"))?;
-    tracing::info!("a turn asked from {from} ({} characters)", text.trim().chars().count());
+    let (id, answer) = await_say();
+    if let Err(e) = app.emit_to(OVERLAY_LABEL, COMPANION_SAY_EVENT, say_payload(text, id)) {
+        stop_awaiting(id);
+        return Err(format!("Couldn't reach his window: {e}"));
+    }
+    // A wait that failed (it can't, short of a panic) may have let the page
+    // take the turn: unsure, never "try again".
+    let heard = tauri::async_runtime::spawn_blocking(move || wait_for_answer(id, &answer, SAY_WAIT, SAY_GRACE))
+        .await
+        .unwrap_or(Heard::Silent);
+    stop_awaiting(id);
+    let chars = text.trim().chars().count();
+    match heard {
+        Heard::Answered(true) => tracing::info!("a turn asked from {from} ({chars} characters)"),
+        Heard::Silent => tracing::warn!("a turn from {from} ({chars} characters) was taken by his page, which never said whether it went on"),
+        Heard::Answered(false) | Heard::NotTaken => {
+            tracing::warn!("a turn from {from} ({chars} characters) wasn't asked: {}", say_outcome(heard).unwrap_err());
+        }
+    }
+    say_outcome(heard).map_err(str::to_owned)
+}
+
+/// The avatar's page takes turn `id` before asking it: whether the shell
+/// still waits for it (if not, the page doesn't ask).
+#[tauri::command]
+async fn companion_take(webview: tauri::Webview, id: u64) -> Result<bool, String> {
+    from_the_avatar(webview.label())?;
+    Ok(take_say(id))
+}
+
+/// The avatar's page says whether it sent turn `id` on to the brain.
+#[tauri::command]
+async fn companion_said(webview: tauri::Webview, id: u64, sent: bool) -> Result<(), String> {
+    from_the_avatar(webview.label())?;
+    match stop_awaiting(id) {
+        Some(waiting) => {
+            let _ = waiting.send(sent);
+        }
+        None => tracing::warn!(id, sent, "his page answered a turn after its wait"),
+    }
     Ok(())
 }
 
@@ -652,7 +817,35 @@ fn ask_the_brain(app: &AppHandle, text: &str, from: &str) -> Result<(), String> 
 /// asks it, and his bubble shows the reply.
 #[tauri::command]
 async fn companion_say(app: AppHandle, text: String) -> Result<(), String> {
-    ask_the_brain(&app, &text, "Settings")
+    ask_the_brain(&app, &text, "Settings").await
+}
+
+/// The prompt's commands are its own.
+fn from_the_prompt(label: &str) -> Result<(), String> {
+    if label == prompt::LABEL {
+        Ok(())
+    } else {
+        Err(format!("only Fritz's prompt may do that, not {label:?}"))
+    }
+}
+
+/// The prompt's Enter: ask the brain, and close the prompt once the turn is
+/// taken. A refusal leaves it open, with the draft and the shell's words.
+#[tauri::command]
+async fn prompt_say(app: AppHandle, webview: tauri::Webview, text: String) -> Result<(), String> {
+    from_the_prompt(webview.label())?;
+    let open = prompt::opens();
+    ask_the_brain(&app, &text, "the prompt").await?;
+    prompt::close_later(&app, prompt::Why::Sent, open);
+    Ok(())
+}
+
+/// The prompt's Esc.
+#[tauri::command]
+async fn prompt_close(app: AppHandle, webview: tauri::Webview) -> Result<(), String> {
+    from_the_prompt(webview.label())?;
+    prompt::close_later(&app, prompt::Why::Esc, prompt::opens());
+    Ok(())
 }
 
 /// The link now, for a window that opens after the last report.
@@ -707,7 +900,11 @@ pub fn run() {
             companion_report,
             companion_status,
             companion_connect,
-            companion_say
+            companion_say,
+            companion_take,
+            companion_said,
+            prompt_say,
+            prompt_close
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -719,6 +916,7 @@ pub fn run() {
             }
             let s = settings::get();
             overlay_windows::init(app);
+            prompt::adopt(app);
             if s.avatar.parked {
                 overlay_windows::set_parked(&handle, true);
             }
@@ -745,12 +943,19 @@ pub fn run() {
             logs::startup("started");
             Ok(())
         })
+        .on_page_load(|webview, payload| {
+            if webview.label() == prompt::LABEL && payload.event() == PageLoadEvent::Started {
+                prompt::on_page_started(webview.app_handle());
+            }
+        })
         .on_window_event(|window, event| {
             if window.label() == OVERLAY_LABEL {
                 overlay_windows::on_window_event(window.app_handle(), event);
                 if matches!(event, WindowEvent::Destroyed) {
                     companion_page_gone(window.app_handle());
                 }
+            } else if window.label() == prompt::LABEL {
+                prompt::on_window_event(window.app_handle(), event);
             } else if hides_on_close(window.label()) {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
@@ -822,6 +1027,11 @@ mod tests {
         assert_eq!(events["companionSay"], super::COMPANION_SAY_EVENT);
         assert_eq!(events.len(), 9, "an event with no Rust half: {events:?}");
         assert_eq!(fixture["debug"]["pretendSayEnv"], super::PRETEND_SAY_ENV);
+        let say = super::say_payload("good evening", 7);
+        let mut keys: Vec<&str> = say.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(serde_json::json!(keys), fixture["sayKeys"]);
+        assert_eq!((say["text"].as_str(), say["id"].as_u64()), (Some("good evening"), Some(7)));
     }
 
     /// `FRITZ_SHOW_SETTINGS=<section>` opens the control window there; any
@@ -862,6 +1072,41 @@ mod tests {
         assert!(super::hides_on_close("control"));
         assert!(!super::hides_on_close("avatar"));
         assert!(!super::hides_on_close("prompt"));
+    }
+
+    /// The prompt's close comes before the bare hide, which would leave the
+    /// keyboard with a hidden window.
+    #[test]
+    fn the_prompt_branch_comes_before_the_hide_rule() {
+        let src = include_str!("lib.rs").replace("\r\n", "\n");
+        let code = &src[..src.find("#[cfg(test)]").unwrap()];
+        let events = &code[code.find(".on_window_event(").unwrap()..];
+        let prompt = events.find("prompt::on_window_event(").expect("a prompt branch");
+        let hide = events.find("hides_on_close(window.label())").expect("the hide rule");
+        assert!(prompt < hide);
+    }
+
+    /// The prompt is declared hidden, and never takes the keyboard by
+    /// itself: hidden is not enough (a webview made with focus takes it at
+    /// every start). It can be typed in, so it is focusable; it is out of
+    /// the taskbar, on top, and drawn by its page alone.
+    #[test]
+    fn the_prompt_window_is_declared() {
+        let conf: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let windows = conf["app"]["windows"].as_array().unwrap();
+        let prompt = windows.iter().find(|w| w["label"] == crate::prompt::LABEL).expect("a prompt window");
+        assert_eq!(prompt["url"], "prompt.html");
+        assert_eq!(prompt["visible"], false);
+        assert_eq!(prompt["focus"], false, "a hidden window must not take the keyboard");
+        assert_ne!(prompt["focusable"], false, "it is typed in");
+        assert_eq!(prompt["transparent"], true);
+        assert_eq!(prompt["alwaysOnTop"], true);
+        assert_eq!(prompt["skipTaskbar"], true);
+        assert_eq!(prompt["decorations"], false);
+        assert_eq!(prompt["shadow"], false);
+        assert_eq!(prompt["resizable"], false);
+        assert_eq!(prompt["generalAutofillEnabled"], false, "nothing it is asked is kept for autofill");
+        assert_eq!((prompt["width"].as_f64(), prompt["height"].as_f64()), (Some(640.0), Some(120.0)));
     }
 
     /// The control window is the one tauri.conf.json declares, so the tray
@@ -1106,6 +1351,134 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_the_prompt_may_use_its_commands() {
+        assert!(super::from_the_prompt(crate::prompt::LABEL).is_ok());
+        for other in [crate::overlay_machine::OVERLAY_LABEL, super::CONTROL_LABEL, ""] {
+            assert!(super::from_the_prompt(other).is_err(), "{other:?}");
+        }
+    }
+
+    /// A turn is taken once the page says it sent it on: not when it says
+    /// it couldn't, nor when it never says.
+    #[test]
+    fn a_turn_is_taken_once_the_page_sent_it() {
+        use super::Heard;
+        assert_eq!(super::say_outcome(Heard::Answered(true)), Ok(()));
+        assert_eq!(super::say_outcome(Heard::Answered(false)), Err(crate::companion::NOT_CONNECTED));
+        assert_eq!(super::say_outcome(Heard::NotTaken), Err(super::SAY_UNANSWERED));
+        // Taken and never answered: it may have been asked, so never "try again".
+        assert_eq!(super::say_outcome(Heard::Silent), Err(super::SAY_UNSURE));
+        assert!(super::SAY_UNANSWERED.contains("try again") && !super::SAY_UNSURE.contains("try again"));
+    }
+
+    /// Each turn is waited for by its own number; an answer reaches only
+    /// that turn's waiter, and an answer to a turn no longer waited for
+    /// (or never sent) reaches nobody.
+    #[test]
+    fn a_pages_answer_reaches_its_own_turn() {
+        let (a, ra) = super::await_say();
+        let (b, rb) = super::await_say();
+        assert_ne!(a, b);
+        super::stop_awaiting(b).unwrap().send(true).unwrap();
+        assert_eq!(rb.try_recv(), Ok(true));
+        assert!(ra.try_recv().is_err(), "the other turn heard nothing");
+        assert!(super::stop_awaiting(b).is_none(), "answered once");
+        assert!(super::stop_awaiting(a).is_some());
+        assert!(super::stop_awaiting(a).is_none());
+        assert!(super::stop_awaiting(u64::MAX).is_none());
+    }
+
+    /// The page may take a turn once, and only while the shell still waits
+    /// for it; a turn given up can't be taken, so it is never asked.
+    #[test]
+    fn a_turn_is_taken_once_and_only_while_waited_for() {
+        let (id, _rx) = super::await_say();
+        assert!(super::take_say(id));
+        assert!(!super::take_say(id), "taken once");
+        assert!(!super::give_up(id), "a taken turn isn't given up");
+        assert!(super::stop_awaiting(id).is_some());
+        let (id, _rx) = super::await_say();
+        assert!(super::give_up(id));
+        assert!(!super::take_say(id), "given up, so never asked");
+        assert!(!super::take_say(u64::MAX));
+    }
+
+    /// An answer in time is the answer. With none, a turn the page never
+    /// took is given up; one it took is waited for a while longer, so an
+    /// answer from a page that took it late is still heard.
+    #[test]
+    fn the_wait_hears_every_answer_the_page_sent() {
+        use super::Heard;
+        let short = std::time::Duration::from_millis(20);
+        let long = std::time::Duration::from_secs(5);
+        let (id, rx) = super::await_say();
+        super::stop_awaiting(id).unwrap().send(false).unwrap();
+        assert_eq!(super::wait_for_answer(id, &rx, short, short), Heard::Answered(false));
+        // The real order: the wait starts, then the page takes the turn and
+        // answers, and is heard at once, never sitting out the grace.
+        let (id, rx) = super::await_say();
+        let page = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            assert!(super::take_say(id), "taken during the wait");
+            super::stop_awaiting(id).unwrap().send(true).unwrap();
+        });
+        let started = std::time::Instant::now();
+        assert_eq!(super::wait_for_answer(id, &rx, std::time::Duration::from_secs(2), long), Heard::Answered(true));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "{:?}", started.elapsed());
+        page.join().unwrap();
+        // Never taken: given up after the wait, and too late to take.
+        let (id, rx) = super::await_say();
+        assert_eq!(super::wait_for_answer(id, &rx, short, long), Heard::NotTaken);
+        assert!(!super::take_say(id));
+        assert!(super::stop_awaiting(id).is_none(), "taken off the list");
+        // Taken in time, answered after the wait: heard in the grace.
+        let (id, rx) = super::await_say();
+        assert!(super::take_say(id));
+        let page = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            super::stop_awaiting(id).unwrap().send(true).unwrap();
+        });
+        assert_eq!(super::wait_for_answer(id, &rx, short, long), Heard::Answered(true));
+        page.join().unwrap();
+        // Taken, and never answered: silent, after the grace.
+        let (id, rx) = super::await_say();
+        assert!(super::take_say(id));
+        assert_eq!(super::wait_for_answer(id, &rx, short, short), Heard::Silent);
+        assert!(super::stop_awaiting(id).is_some(), "left for the caller to take off");
+    }
+
+    /// The handshake's links, held in place: the shell waits for the
+    /// page's answer and goes by it, and `companion_said` passes the page's
+    /// word on as it came.
+    #[test]
+    fn a_turn_goes_by_the_pages_answer() {
+        let src = include_str!("lib.rs").replace("\r\n", "\n");
+        let body = |name: &str| {
+            let at = src.find(&format!("fn {name}(")).unwrap_or_else(|| panic!("no fn {name}"));
+            src[at..at + src[at..].find("\n}\n").unwrap()].to_owned()
+        };
+        let ask = body("ask_the_brain");
+        let waits = ask.find("wait_for_answer(id, &answer, SAY_WAIT, SAY_GRACE)").expect("it waits for the answer");
+        assert!(ask[waits..].contains("stop_awaiting(id);"), "then takes the turn off the list, whatever was heard");
+        assert!(ask.trim_end().ends_with("say_outcome(heard).map_err(str::to_owned)"), "and goes by it");
+        assert!(body("companion_said").contains("waiting.send(sent)"), "the page's word, as it came");
+        assert!(body("companion_take").trim_end().ends_with("Ok(take_say(id))"), "the shell decides whether it may ask");
+    }
+
+    /// The prompt closes only once its turn is taken, and with the open it
+    /// was asked in (read before the wait, which a new open can outlast).
+    #[test]
+    fn a_turn_from_the_prompt_closes_it_only_once_taken() {
+        let src = include_str!("lib.rs").replace("\r\n", "\n");
+        let at = src.find("async fn prompt_say(").unwrap();
+        let body = &src[at..at + src[at..].find("\n}\n").unwrap()];
+        let open = body.find("let open = prompt::opens();").expect("the open read first");
+        let asked = body.find("ask_the_brain(&app, &text, \"the prompt\").await?;").expect("the turn asked");
+        let closed = body.find("prompt::close_later(&app, prompt::Why::Sent, open);").expect("then closed");
+        assert!(open < asked && asked < closed);
+    }
+
     /// The page reads these keys from `companion_config`, and the control
     /// window these from a report; every sample the fixture holds is a
     /// report the shell keeps, as it was sent.
@@ -1142,13 +1515,20 @@ mod tests {
     /// manifest, so nothing else stops another window calling them (and
     /// `companion_config` hands over the token).
     #[test]
-    fn the_avatar_only_commands_check_who_is_calling_first() {
+    fn who_is_calling_is_checked_first() {
         let src = include_str!("lib.rs").replace("\r\n", "\n");
-        for name in ["companion_config", "companion_report"] {
+        for (name, guard) in [
+            ("companion_config", "from_the_avatar"),
+            ("companion_report", "from_the_avatar"),
+            ("companion_take", "from_the_avatar"),
+            ("companion_said", "from_the_avatar"),
+            ("prompt_say", "from_the_prompt"),
+            ("prompt_close", "from_the_prompt"),
+        ] {
             let at = src.find(&format!("async fn {name}(")).unwrap_or_else(|| panic!("no command {name}"));
             let body = &src[at + src[at..].find('{').unwrap() + 1..];
             let first = body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap();
-            assert_eq!(first, "from_the_avatar(webview.label())?;", "{name}");
+            assert_eq!(first, format!("{guard}(webview.label())?;"), "{name}");
         }
     }
 

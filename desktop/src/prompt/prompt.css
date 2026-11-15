@@ -1,0 +1,112 @@
+/* The prompt (Ask Fritz): a panel on a transparent window, over whatever
+   the owner is doing. Nothing in it moves (scripts/check-no-css-animation.mjs
+   and check-paced.mjs read this page too), and its text uses only the tokens
+   that are AA on --surface-1 in every mood (prompt.test.ts): never
+   --text-lo or --text-dim. */
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+
+#root {
+  height: 100%;
+}
+
+.prompt {
+  box-sizing: border-box;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--surface-1);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg);
+}
+
+.prompt-field {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 14px 16px 6px;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  font-family: var(--font-ui);
+  font-size: var(--t-h3);
+  line-height: 1.35;
+  color: var(--text-hi);
+  caret-color: var(--indigo);
+}
+
+.prompt-field::placeholder {
+  color: var(--text-mid);
+  opacity: 1;
+}
+
+.prompt-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px 10px;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  line-height: 1.3;
+  color: var(--text-mid);
+}
+
+.prompt-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.prompt-dot.ok {
+  background: var(--success);
+}
+
+.prompt-dot.wait {
+  background: var(--warning);
+}
+
+.prompt-dot.bad {
+  background: var(--danger);
+}
+
+.prompt-line {
+  flex: 1;
+  min-width: 0;
+}
+
+.prompt-refusal {
+  color: var(--text-hi);
+}
+
+.prompt-local {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  letter-spacing: 0.08em;
+}
+
+.prompt-rule {
+  flex: none;
+  height: 2px;
+  background: var(--grad);
+}
+
+@media (forced-colors: active) {
+  .prompt {
+    border-color: CanvasText;
+  }
+
+  .prompt-rule {
+    background: Highlight;
+  }
+}

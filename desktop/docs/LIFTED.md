@@ -56,3 +56,7 @@ copies with their past).
 | `src-tauri/src/windows_ext.rs` (part) | `src-tauri/src/workerw.rs` | `set_dpi_awareness`; the fullscreen test, generalised to every monitor Fritz overlaps and made blind to maximised windows |
 | `src-tauri/src/overlay_windows.rs` (`BROWSER_ARGS`) | the WebView2 arguments its windows share | Byte-identical, in every window |
 | `src/avatar/PacedLoop.ts` | `src/wallpaper.ts`'s paced loop | Rewritten as a class with an injectable clock |
+
+Not lifted, but following Lorraine: a modal window hidden at rest, the window
+in use saved before it shows and handed back as it closes
+(`src-tauri/src/prompt.rs` and `keyboard.rs`, Fritz's own code).

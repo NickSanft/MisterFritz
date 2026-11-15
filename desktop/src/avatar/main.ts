@@ -11,8 +11,8 @@
  *
  * The speech bubble over his head (BubbleView.ts) is drawn from the same
  * tick: the turn it shows is state.ts's, moved on by the brain's frames and
- * by `companion:say` (the shell's bridge: Settings › Brain's Ask now, the
- * prompt window in PR 4).
+ * by `companion:say` (the shell's bridge, from Settings › Brain's Ask and
+ * the prompt), each answered with whether it went on to the brain.
  */
 import "../divora/tokens.css";
 import "../divora/fonts.css";
@@ -31,7 +31,7 @@ import { keyAction } from "./keys";
 import { POWER_EVENT, afterAsking, fetchDisplayOn, parseDisplay, shouldDraw } from "./run";
 import { AHEAD, CURSOR_EVENT, fetchCursor, gaze, parseCursor, type CursorFrame, type Gaze } from "./look";
 import { CompanionClient } from "../shared/companion";
-import { SAY_EVENT, parseSay, startCompanion } from "./companionLink";
+import { SAY_EVENT, answerSay, onSay, startCompanion, takeSay } from "./companionLink";
 import { BubbleClock, anchorAbove, charCount, plainText } from "./bubble";
 import { createBubble } from "./BubbleView";
 import { INITIAL, cancelFirst, reduce, type TurnEvent, type TurnView } from "./state";
@@ -122,16 +122,17 @@ function apply(e: TurnEvent): void {
 }
 
 /** Ask the brain: a turn still running is cancelled first (barge-in; the
- * brain starts the new one once the old has stopped). */
-function ask(text: string): void {
+ * brain starts the new one once the old has stopped). Whether it went on. */
+function ask(text: string): boolean {
   const old = cancelFirst(turn);
   if (old !== null) companion.cancel(old);
   const id = companion.say(text);
   if (id === null) {
     console.warn("avatar: couldn't ask the brain (not online, or nothing to ask)");
-    return;
+    return false;
   }
   apply({ kind: "asked", turnId: id });
+  return true;
 }
 
 for (const type of ["state", "token", "progress", "done", "error"] as const) {
@@ -354,8 +355,9 @@ async function main(): Promise<void> {
   // between the page and its handshake. Asked through the shell's bridge,
   // listened for first, so no ask is lost to a connection made before it.
   await listen<unknown>(SAY_EVENT, (e) => {
-    const text = parseSay(e.payload);
-    if (text !== null) ask(text);
+    void onSay(e.payload, takeSay, ask, answerSay).then((done) => {
+      if (done === "late") console.warn("avatar: the shell had stopped waiting for a turn, so it wasn't asked");
+    });
   });
   void startCompanion(companion);
   await listen(RELOAD_EVENT, () => void load());
