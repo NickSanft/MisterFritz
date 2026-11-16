@@ -8,7 +8,7 @@ import type { HookStatus, HotkeyAction, ModelInfo } from "./api";
 
 /** What Settings › Fritz › Clicks on him says the switch does. */
 export const CLICKS_DESC =
-  "Right-click him for his menu. While he's on screen, Fritz watches the mouse buttons across the desktop to tell a click on him from one beside him. He keeps no record of where you click.";
+  "Double-click him to ask him something; right-click him for his menu. A click on his body is his and never reaches the window behind; around him, clicks go through. While he's on screen, Fritz watches the mouse buttons across the desktop to tell a click on him from one beside him. He keeps no record of where you click.";
 
 /** Settings › Diagnostics › The mouse hook: in or out and why, how quick
  * it is, how often it went quiet and was put back (Windows dropped it, or

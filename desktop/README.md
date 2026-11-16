@@ -47,11 +47,20 @@ never anything about the pointer.
 
 While he is on screen, a mouse hook (`src-tauri/src/hook.rs`) watches the
 mouse buttons across the desktop to tell a press on his body from one
-beside him. Right-click him for his menu, the tray's: it works by mouse,
-so the app you were in keeps the keyboard, and a click elsewhere (or 20 s)
-closes it. A double-click on him is only logged for now, as what it will
-do (the prompt); left clicks still land where they did. It is in only
-while he can be clicked: never while he
+beside him. His body is his to the left and right buttons: a click there
+never reaches the window behind him, while one beside him or in the room
+over his head goes through as before.
+
+Double-click him to ask him something: the prompt opens over him. Windows
+usually keeps the keyboard where it was after a click on him, so the box
+asks you to click in it ("Click here to type…"); Ctrl+Alt+F gives it the
+keyboard at once. A click anywhere but in the box or on him, the
+double-click again or 20 s with no click closes it, and the keyboard stays
+where you left it.
+
+Right-click him for his menu, the tray's: it works by mouse, so the app
+you were in keeps the keyboard, and a click elsewhere (or 20 s) closes it.
+The hook is in only while he can be clicked: never while he
 is hidden or arranged, under a fullscreen app or presentation mode, on the
 lock screen or with the display asleep. It keeps no record of where you
 click (the log names gestures, never a point), ignores clicks a script or a
@@ -132,9 +141,12 @@ in it until you arrange him taller.
 ## The prompt
 
 *Ask Fritz* is a small window, hidden until Ctrl+Alt+F (`hotkeys.prompt`)
-opens it, just above Fritz on his monitor (below him if there's no room
-above; where he would stand while he is hidden), with the keyboard in it.
-The key again closes it. It doesn't open over the lock screen, another
+or a double-click on him opens it, just above Fritz on his monitor (below
+him if there's no room above; where he would stand while he is hidden).
+The key opens it with the keyboard in it; after a double-click Windows
+usually keeps the keyboard where it was, and the box waits for you to click
+in it (see *Clicks on him* above). The key again closes it, or, while it
+waits, gives it the keyboard; the double-click again closes it. It doesn't open over the lock screen, another
 app's fullscreen window (a game, a video, a presentation), or while you are
 arranging him: the key then does nothing, and takes nothing. Enter asks him. The prompt closes
 once his window has sent the question on to the brain; a refusal (he isn't

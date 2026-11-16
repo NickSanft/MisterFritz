@@ -1,8 +1,11 @@
 //! The mouse hook: a press on Fritz's body is his. A `WH_MOUSE_LL` hook sees
 //! every mouse button pressed on the desktop and decides, as it is pressed,
 //! whether it is on him. A right-click on him opens his menu (popup.rs); a
-//! double-click is still only watched, logged as what it would do, until a
-//! later commit acts on it (`ACTS`).
+//! double-click opens the prompt (prompt.rs), which takes the keyboard or,
+//! refused, waits for a click. While it waits, a press into it is counted as
+//! the owner's open there and then, before Windows activates it (the
+//! foreground log's PROMPT), and a press anywhere but in it or his (a left
+//! or right press on his body) closes it.
 //!
 //! **What it sees, and what it keeps.** Button presses and releases. Moves
 //! and the wheel are only counted, never looked at. It keeps the last left
@@ -181,9 +184,10 @@ enum Msg {
     /// Look now: an overlay step, a display change, a setting.
     Poke,
     /// The procedure decided a gesture: acted on, or (`would`) only watched;
-    /// `menu` is his menu's number when it was made (0: none up), and
-    /// `pretend` marks debug builds' pretend click.
-    Gesture { g: Gesture, would: bool, menu: u32, pretend: bool },
+    /// `menu` is his menu's number when it was made (0: none up), `waiting`
+    /// the open of the prompt waiting for a click (0: none), and `pretend`
+    /// marks debug builds' pretend click.
+    Gesture { g: Gesture, would: bool, menu: u32, waiting: u64, pretend: bool },
     /// Take the hook out and end; acked.
     Stop(mpsc::SyncSender<()>),
 }
@@ -231,8 +235,11 @@ pub(crate) enum Gesture {
     /// Two left presses on him within Windows' time and rectangle.
     DoubleClick,
     /// A press while his menu is up or the prompt waits: on him (`his`) or
-    /// elsewhere. It ends the menu or the waiting prompt.
+    /// elsewhere. It ends the menu, and (elsewhere) the waiting prompt.
     Pressed { at: (i32, i32), his: bool },
+    /// A press into the prompt while it waits, counted as the owner's open
+    /// already; `fg` had the keyboard then. It ends his menu.
+    IntoPrompt { at: (i32, i32), fg: isize },
 }
 
 /// What a button's release goes with.
@@ -248,11 +255,11 @@ enum Held {
 }
 
 /// What else is up that a press may end: his menu (its number; 0 when
-/// none is up) and the waiting prompt.
+/// none is up) and the prompt waiting for a click (its open; 0 when none).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Ctx {
     pub menu: u32,
-    pub waiting: bool,
+    pub waiting: u64,
 }
 
 /// The presses and releases so far: which buttons' presses were his, and
@@ -265,15 +272,15 @@ pub(crate) struct Tracker {
 }
 
 /// Which buttons are acted on (swallowed, and their gestures done) rather
-/// than only watched: the right, for his menu. The double-click comes two
-/// commits later.
+/// than only watched: the right, for his menu, and the left, for the
+/// double-click.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Acts {
     pub left: bool,
     pub right: bool,
 }
 
-pub(crate) const ACTS: Acts = Acts { left: false, right: true };
+pub(crate) const ACTS: Acts = Acts { left: true, right: true };
 
 /// What becomes of one event.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -311,6 +318,13 @@ pub(crate) trait Scene {
     fn foreground_busy(&self) -> bool;
     fn covered(&self, w: isize, at: (i32, i32)) -> bool;
     fn limits(&self) -> Limits;
+    /// The point is on the prompt: inside its window, and no window above
+    /// it takes the press there.
+    fn prompt_at(&self, at: (i32, i32)) -> bool;
+    /// Count a press into the waiting prompt as the owner's open.
+    fn count_into_prompt(&self);
+    /// Who has the keyboard.
+    fn foreground(&self) -> isize;
 }
 
 /// The gate's inputs.
@@ -380,11 +394,11 @@ fn note_slowest(counts: &Counts, started: Instant) {
     counts.slowest_ns.fetch_max(ns, Ordering::Relaxed);
 }
 
-/// His menu, if it is up; the waiting prompt comes with a later commit.
+/// His menu, if it is up, and the prompt's open, if it waits.
 fn ctx_now() -> Ctx {
     Ctx {
         menu: crate::popup::his_menu(),
-        waiting: false,
+        waiting: crate::prompt::waiting_open(),
     }
 }
 
@@ -442,12 +456,22 @@ fn decide(
     if matches!(a.act, Some(Gesture::Menu { .. })) {
         counts.asked.store(true, Ordering::SeqCst);
     }
+    // A press into the waiting prompt: the owner's open, counted now, before
+    // it reaches the prompt and Windows activates it. It passes.
+    let a = match a.act {
+        Some(Gesture::Pressed { at, his: false }) if cx.waits() && s.prompt_at(at) => {
+            s.count_into_prompt();
+            Applied { act: Some(Gesture::IntoPrompt { at, fg: s.foreground() }), ..a }
+        }
+        _ => a,
+    };
     if let Some(g) = a.act.or(a.would) {
         counts.gestures.fetch_add(1, Ordering::Relaxed);
         send(Msg::Gesture {
             g,
             would: a.act.is_none(),
             menu: cx.menu,
+            waiting: cx.waiting,
             pretend: false,
         });
     }
@@ -479,6 +503,10 @@ pub(crate) fn event_of(msg: u32, x: i32, y: i32, time: u32, flags: u32) -> Optio
 impl Ctx {
     fn menu_up(self) -> bool {
         self.menu != 0
+    }
+
+    fn waits(self) -> bool {
+        self.waiting != 0
     }
 }
 
@@ -527,7 +555,7 @@ impl Tracker {
                 *h = Held::No;
             }
             self.first = None;
-            let g = (cx.menu_up() || cx.waiting).then_some(Gesture::Pressed { at: e.at, his: false });
+            let g = (cx.menu_up() || cx.waits()).then_some(Gesture::Pressed { at: e.at, his: false });
             return (false, g);
         }
         if cx.menu_up() {
@@ -566,7 +594,7 @@ fn within(first: (u32, (i32, i32)), e: &Event, l: Limits) -> bool {
 /// Swallow only a press or release that is his on a button in `acts`. A
 /// menu acts with `acts.right`, a double-click with `acts.left`, and each is
 /// otherwise only what it would do; a press that ends a menu or a waiting
-/// prompt always acts.
+/// prompt, or goes into it, always acts.
 pub(crate) fn applied(his: bool, g: Option<Gesture>, e: &Event, acts: Acts) -> Applied {
     let on = match e.button {
         Button::Left => acts.left,
@@ -576,7 +604,7 @@ pub(crate) fn applied(his: bool, g: Option<Gesture>, e: &Event, acts: Acts) -> A
     let (act, would) = match g {
         Some(Gesture::Menu { .. }) if acts.right => (g, None),
         Some(Gesture::DoubleClick) if acts.left => (g, None),
-        Some(Gesture::Pressed { .. }) => (g, None),
+        Some(Gesture::Pressed { .. } | Gesture::IntoPrompt { .. }) => (g, None),
         Some(_) => (None, g),
         None => (None, None),
     };
@@ -701,6 +729,18 @@ impl Scene for Live {
     fn limits(&self) -> Limits {
         let (ms, half_w, half_h) = windows_ext::double_click_limits(self.avatar());
         Limits { ms, half_w, half_h }
+    }
+    fn prompt_at(&self, at: (i32, i32)) -> bool {
+        let w = crate::prompt::hwnd();
+        w != 0
+            && windows_ext::window_bounds(w).is_some_and(|b| crate::hit_shape::holds(b, at))
+            && !windows_ext::covered_at(w, at, ABOVE_CAP)
+    }
+    fn count_into_prompt(&self) {
+        crate::prompt::pressed_into();
+    }
+    fn foreground(&self) -> isize {
+        windows_ext::foreground_window()
     }
 }
 
@@ -947,6 +987,13 @@ impl Scene for OnHim {
     fn limits(&self) -> Limits {
         self.limits
     }
+    fn prompt_at(&self, _: (i32, i32)) -> bool {
+        false
+    }
+    fn count_into_prompt(&self) {}
+    fn foreground(&self) -> isize {
+        0
+    }
 }
 
 /// The events of a pretend click: a right press and release, or two left
@@ -984,7 +1031,7 @@ fn run_pretend_with(p: Pretend, avatar: isize, limits: Limits, send: impl Fn(Msg
         };
         decide(&scene, &mut t, ctx_now, &counts, msg, &info, |m| {
             send(match m {
-                Msg::Gesture { g, would, menu, .. } => Msg::Gesture { g, would, menu, pretend: true },
+                Msg::Gesture { g, would, menu, waiting, .. } => Msg::Gesture { g, would, menu, waiting, pretend: true },
                 other => other,
             });
         });
@@ -1000,6 +1047,7 @@ fn gesture_line(g: Gesture, would: bool) -> &'static str {
         (Gesture::DoubleClick, false) => "a double-click on him: the prompt",
         (Gesture::Pressed { his: true, .. }, _) => "a press on him while his menu or the prompt was up",
         (Gesture::Pressed { his: false, .. }, _) => "a press elsewhere while his menu or the prompt was up",
+        (Gesture::IntoPrompt { .. }, _) => "a press into the waiting prompt",
     }
 }
 
@@ -1049,7 +1097,7 @@ fn owner(app: &AppHandle, rx: &mpsc::Receiver<Msg>, while_hidden: bool, mut pret
                 let _ = ack.send(());
                 return;
             }
-            Ok(Msg::Gesture { g, would, menu, pretend }) => act(g, would, menu, pretend),
+            Ok(Msg::Gesture { g, would, menu, waiting, pretend }) => act(app, g, would, menu, waiting, pretend),
             Ok(Msg::Poke) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
@@ -1073,11 +1121,23 @@ fn owner(app: &AppHandle, rx: &mpsc::Receiver<Msg>, while_hidden: bool, mut pret
                 if let Some(up) = end_on_out(crate::popup::his_menu()) {
                     crate::popup::end(up, crate::popup::Ended::HookOut);
                 }
+                // Nor a click elsewhere: a prompt waiting for a click goes too.
+                if let Some(open) = wait_on_out(crate::prompt::waiting_open()) {
+                    crate::prompt::close_later(app, crate::prompt::Why::HookOut, open);
+                }
                 state_line(why)
             }
             Change::Same => state_line(why),
         };
         INSTALLED.store(running.is_some(), Ordering::SeqCst);
+        // A double-click's open posted before the hook went out can land
+        // after the Removed arm looked: while the hook is out, a real open
+        // still waiting goes too (a pretend one waits out its time).
+        if running.is_none() {
+            if let Some(open) = wait_on_out(crate::prompt::waiting_click_open()) {
+                crate::prompt::close_later(app, crate::prompt::Why::HookOut, open);
+            }
+        }
         *WHY.lock().unwrap_or_else(PoisonError::into_inner) = if running.is_some() { None } else { why.or(Some(OFF_REFUSED)) };
         if said.as_deref() != Some(line.as_str()) {
             tracing::info!("{line}");
@@ -1155,10 +1215,12 @@ fn owner(app: &AppHandle, rx: &mpsc::Receiver<Msg>, while_hidden: bool, mut pret
 }
 
 /// What the owner thread does with a gesture: his menu opened (or, for a
-/// pretend, said), his menu ended by a press on him or off it, and the
-/// rest logged. Gestures only, never a point.
-fn act(g: Gesture, would: bool, menu: u32, pretend: bool) {
-    if matches!(g, Gesture::Pressed { .. }) {
+/// pretend, said), his menu ended by a press on him or off it; the prompt
+/// opened (posted to the main thread), a waiting prompt closed by a press
+/// elsewhere, or told who had the keyboard at a press into it; and the rest
+/// logged. Gestures only, never a point.
+fn act(app: &AppHandle, g: Gesture, would: bool, menu: u32, waiting: u64, pretend: bool) {
+    if matches!(g, Gesture::Pressed { .. } | Gesture::IntoPrompt { .. }) {
         tracing::debug!("{}", gesture_line(g, would));
     } else {
         tracing::info!("{}", gesture_line(g, would));
@@ -1175,6 +1237,55 @@ fn act(g: Gesture, would: bool, menu: u32, pretend: bool) {
         }
         Do::Nothing => {}
     }
+    let in_prompt = |at| windows_ext::window_bounds(crate::prompt::hwnd()).is_some_and(|b| crate::hit_shape::holds(b, at));
+    match prompt_of(g, would, waiting, pretend, in_prompt) {
+        ToPrompt::Open => crate::prompt::toggle_later(app, crate::prompt::Opener::Click),
+        ToPrompt::Pretend => crate::prompt::toggle_later(app, crate::prompt::Opener::PretendWait),
+        ToPrompt::Close(open) => crate::prompt::close_later(app, crate::prompt::Why::Elsewhere, open),
+        ToPrompt::Saw(open, fg) => crate::prompt::saw_press_later(app, open, fg),
+        ToPrompt::Nothing => {}
+    }
+}
+
+/// What the owner thread does to the prompt with a gesture.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ToPrompt {
+    /// Open it (or, open, what its gesture does to it).
+    Open,
+    /// Debug builds' pretend: a pretend open that waits, off screen.
+    Pretend,
+    /// Close the open waiting for a click: a press elsewhere.
+    Close(u64),
+    /// The open waiting was pressed into while this window had the
+    /// keyboard.
+    Saw(u64, isize),
+    Nothing,
+}
+
+/// A gesture's act on the prompt: an acted double-click opens it (a
+/// pretend, its pretend); while it waits (`waiting`, its open), a press
+/// outside its window closes it (`in_prompt`, asked only then: a press
+/// inside that the procedure couldn't place neither counts nor closes) and
+/// one into it says who had the keyboard; a press on him, or a gesture only
+/// watched, does nothing to it.
+pub(crate) fn prompt_of(g: Gesture, would: bool, waiting: u64, pretend: bool, in_prompt: impl FnOnce((i32, i32)) -> bool) -> ToPrompt {
+    match g {
+        Gesture::DoubleClick if !would => {
+            if pretend {
+                ToPrompt::Pretend
+            } else {
+                ToPrompt::Open
+            }
+        }
+        Gesture::Pressed { at, his: false } if waiting != 0 && !in_prompt(at) => ToPrompt::Close(waiting),
+        Gesture::IntoPrompt { fg, .. } if waiting != 0 => ToPrompt::Saw(waiting, fg),
+        _ => ToPrompt::Nothing,
+    }
+}
+
+/// The waiting prompt to end as the hook goes out: its open, if one waits.
+pub(crate) fn wait_on_out(open: u64) -> Option<u64> {
+    (open != 0).then_some(open)
 }
 
 /// What the owner thread does with a gesture.
@@ -1189,10 +1300,11 @@ pub(crate) enum Do {
     Nothing,
 }
 
-/// A gesture's act: an acted right-click asks for his menu (or, a pretend,
-/// only says it); a press while his menu (`menu`) is up ends it unless it
-/// is on the menu itself (`on_menu`, asked only for a press beside him);
-/// anything else, or a gesture only watched, does nothing.
+/// A gesture's act on his menu: an acted right-click asks for it (or, a
+/// pretend, only says it); a press while it (`menu`) is up ends it unless it
+/// is on the menu itself (`on_menu`, asked only for a press beside him), and
+/// a press into the waiting prompt ends it; anything else, or a gesture only
+/// watched, does nothing.
 pub(crate) fn act_of(g: Gesture, would: bool, menu: u32, pretend: bool, on_menu: impl FnOnce((i32, i32)) -> bool) -> Do {
     match g {
         Gesture::Menu { at } if !would => {
@@ -1203,6 +1315,8 @@ pub(crate) fn act_of(g: Gesture, would: bool, menu: u32, pretend: bool, on_menu:
             }
         }
         Gesture::Pressed { at, his } if menu != 0 && ends_menu(his, || on_menu(at)) => Do::End(menu),
+        // On the prompt, so not on his menu: elsewhere.
+        Gesture::IntoPrompt { .. } if menu != 0 => Do::End(menu),
         _ => Do::Nothing,
     }
 }
@@ -1304,7 +1418,7 @@ mod tests {
     use super::*;
 
     const L: Limits = Limits { ms: 500, half_w: 2, half_h: 3 };
-    const FREE: Ctx = Ctx { menu: 0, waiting: false };
+    const FREE: Ctx = Ctx { menu: 0, waiting: 0 };
 
     fn ev(button: Button, edge: Edge, at: (i32, i32), time: u32) -> Event {
         Event { button, edge, at, time, injected: false }
@@ -1460,8 +1574,8 @@ mod tests {
 
     #[test]
     fn tracker_with_a_menu_or_a_waiting_prompt() {
-        let menu = Ctx { menu: 3, waiting: false };
-        let waiting = Ctx { menu: 0, waiting: true };
+        let menu = Ctx { menu: 3, waiting: 0 };
+        let waiting = Ctx { menu: 0, waiting: 1 };
         // A press on him with a menu up: his, it ends the menu, and its
         // release opens no other.
         let mut t = Tracker::NEW;
@@ -1523,7 +1637,7 @@ mod tests {
         // Nothing acted on: nothing swallowed, the gestures only watched.
         assert_eq!(applied(true, Some(menu), &r, none), a(false, None, Some(menu)));
         assert_eq!(applied(true, Some(Gesture::DoubleClick), &l, none), a(false, None, Some(Gesture::DoubleClick)));
-        assert_eq!(ACTS, right, "the right button acts: his menu");
+        assert_eq!(ACTS, Acts { left: true, right: true }, "both buttons act: his menu and the double-click");
         // The right button acted on.
         assert_eq!(applied(true, Some(menu), &r, right), a(true, Some(menu), None));
         assert_eq!(applied(true, Some(Gesture::DoubleClick), &l, right), a(false, None, Some(Gesture::DoubleClick)));
@@ -1538,6 +1652,10 @@ mod tests {
         // A press ending a menu always acts.
         assert_eq!(applied(true, Some(pressed), &l, none), a(false, Some(pressed), None));
         assert_eq!(applied(true, Some(pressed), &l, left), a(true, Some(pressed), None));
+        // So does one into the waiting prompt, never his.
+        let into = Gesture::IntoPrompt { at: ON, fg: 9 };
+        assert_eq!(applied(false, Some(into), &l, none), a(false, Some(into), None));
+        assert_eq!(applied(false, Some(into), &l, left), a(false, Some(into), None));
     }
 
     /// A desktop whose answers are set, which logs what it is asked.
@@ -1550,6 +1668,11 @@ mod tests {
         shape: bool,
         busy: bool,
         covered: bool,
+        /// The point is on the prompt.
+        prompt: bool,
+        /// Presses counted into the waiting prompt.
+        into: Cell<u32>,
+        fg: isize,
         asked: RefCell<Vec<&'static str>>,
     }
 
@@ -1563,6 +1686,9 @@ mod tests {
             shape: true,
             busy: false,
             covered: false,
+            prompt: false,
+            into: Cell::new(0),
+            fg: 42,
             asked: RefCell::default(),
         }
     }
@@ -1604,6 +1730,16 @@ mod tests {
         }
         fn limits(&self) -> Limits {
             L
+        }
+        fn prompt_at(&self, _: (i32, i32)) -> bool {
+            self.asked.borrow_mut().push("prompt");
+            self.prompt
+        }
+        fn count_into_prompt(&self) {
+            self.into.set(self.into.get() + 1);
+        }
+        fn foreground(&self) -> isize {
+            self.fg
         }
     }
 
@@ -1845,9 +1981,9 @@ mod tests {
         assert_eq!(*sent.borrow(), [(Gesture::Menu { at: (60, 50) }, false, 0)]);
         assert_eq!(c.taken.load(Ordering::Relaxed), 2);
         assert!(c.asked.load(Ordering::SeqCst), "his menu asked for");
-        // A left press on him isn't swallowed yet; as any real press, it
-        // keeps a menu not yet open from opening.
-        assert!(!decide(&s, &mut t, || FREE, &c, WM_LBUTTONDOWN, &info(50, 100), send));
+        // A left press on him is his too; as any real press, it keeps a menu
+        // not yet open from opening.
+        assert!(decide(&s, &mut t, || FREE, &c, WM_LBUTTONDOWN, &info(50, 100), send));
         assert!(!c.asked.load(Ordering::SeqCst));
         // An injected press doesn't.
         c.asked.store(true, Ordering::SeqCst);
@@ -1856,7 +1992,7 @@ mod tests {
         assert!(c.asked.load(Ordering::SeqCst));
         // His menu (number 4) up: a press beside him says so, and passes.
         sent.borrow_mut().clear();
-        let up = Ctx { menu: 4, waiting: false };
+        let up = Ctx { menu: 4, waiting: 0 };
         let beside = FakeScene { shape: false, ..scene() };
         assert!(!decide(&beside, &mut t, || up, &c, WM_LBUTTONDOWN, &info(50, 900), send));
         assert_eq!(*sent.borrow(), [(Gesture::Pressed { at: (50, 50), his: false }, false, 4)]);
@@ -1894,6 +2030,10 @@ mod tests {
         assert_eq!(act_of(beside, false, 4, false, |_| true), Do::Nothing, "on the menu itself");
         assert_eq!(act_of(on, false, 0, false, never), Do::Nothing, "no menu up");
         assert_eq!(act_of(Gesture::DoubleClick, true, 4, false, never), Do::Nothing);
+        assert_eq!(act_of(Gesture::DoubleClick, false, 4, false, never), Do::Nothing, "a double-click leaves his menu be");
+        let into = Gesture::IntoPrompt { at: AT, fg: 9 };
+        assert_eq!(act_of(into, false, 4, false, never), Do::End(4), "a press into the prompt is off his menu");
+        assert_eq!(act_of(into, false, 0, false, never), Do::Nothing);
         assert_eq!(end_on_out(0), None);
         assert_eq!(end_on_out(9), Some(9));
         // act carries each out, and the procedure asks which menu is up.
@@ -1928,7 +2068,10 @@ mod tests {
         }
         // His menu ends as the hook goes out, and one not yet open never opens.
         let owner = body(&src, "fn owner(");
-        assert!(owner.contains("Ok(Msg::Gesture { g, would, menu, pretend }) => act(g, would, menu, pretend),"), "acted under the menu the press was made under");
+        assert!(
+            owner.contains("Ok(Msg::Gesture { g, would, menu, waiting, pretend }) => act(app, g, would, menu, waiting, pretend),"),
+            "acted under the menu and the wait the press was made under"
+        );
         // The procedure reads which menu is up after clearing the answer.
         let decide_ = body(&src, "fn decide(");
         assert!(decide_.find("counts.asked.store(false, Ordering::SeqCst);").unwrap() < decide_.find("let cx = cx();").unwrap());
@@ -1946,8 +2089,8 @@ mod tests {
         let mut t = Tracker::NEW;
         let sent = RefCell::new(Vec::new());
         let send = |m: Msg| {
-            if let Msg::Gesture { g, would, menu, pretend } = m {
-                assert!(!pretend && menu == 0);
+            if let Msg::Gesture { g, would, menu, waiting, pretend } = m {
+                assert!(!pretend && menu == 0 && waiting == 0);
                 sent.borrow_mut().push((g, would));
             }
         };
@@ -1955,13 +2098,13 @@ mod tests {
         assert!(!decide(&s, &mut t, || FREE, &c, 0x200, &info(50, 0, 0), send));
         assert!(s.asked.borrow().is_empty());
         // A double-click on him: two presses, two on his shape, one gesture,
-        // only watched, nothing swallowed.
+        // acted on, every press and release his.
         for (msg, time) in [(WM_LBUTTONDOWN, 0), (WM_LBUTTONUP, 5), (WM_LBUTTONDOWN, 100), (WM_LBUTTONUP, 105)] {
-            assert!(!decide(&s, &mut t, || FREE, &c, msg, &info(50, time, 0), send));
+            assert!(decide(&s, &mut t, || FREE, &c, msg, &info(50, time, 0), send));
         }
-        assert_eq!(*sent.borrow(), [(Gesture::DoubleClick, true)]);
+        assert_eq!(*sent.borrow(), [(Gesture::DoubleClick, false)]);
         let n = |a: &AtomicU64| a.load(Ordering::Relaxed);
-        assert_eq!((n(&c.presses), n(&c.on_shape), n(&c.covered), n(&c.taken), n(&c.gestures)), (2, 2, 0, 0, 1));
+        assert_eq!((n(&c.presses), n(&c.on_shape), n(&c.covered), n(&c.taken), n(&c.gestures)), (2, 2, 0, 4, 1));
         // A press covered by a window above: on his shape, covered, not his.
         let s = FakeScene { covered: true, ..scene() };
         decide(&s, &mut t, || FREE, &c, WM_RBUTTONDOWN, &info(50, 300, 0), send);
@@ -1992,9 +2135,9 @@ mod tests {
             sent.into_inner()
         };
         assert_eq!(pretend(Pretend::Right, 500), [(Gesture::Menu { at: (0, 0) }, false)], "his menu acts");
-        assert_eq!(pretend(Pretend::Double, 500), [(Gesture::DoubleClick, true)]);
+        assert_eq!(pretend(Pretend::Double, 500), [(Gesture::DoubleClick, false)], "the double-click acts");
         // Its two presses are 160 ms apart, down to down.
-        assert_eq!(pretend(Pretend::Double, 160), [(Gesture::DoubleClick, true)]);
+        assert_eq!(pretend(Pretend::Double, 160), [(Gesture::DoubleClick, false)]);
         assert_eq!(pretend(Pretend::Double, 159), []);
     }
 
@@ -2052,7 +2195,13 @@ mod tests {
 
     #[test]
     fn the_log_names_gestures_never_points() {
-        for g in [Gesture::Menu { at: (1234, 567) }, Gesture::DoubleClick, Gesture::Pressed { at: (1234, 567), his: true }, Gesture::Pressed { at: (1234, 567), his: false }] {
+        for g in [
+            Gesture::Menu { at: (1234, 567) },
+            Gesture::DoubleClick,
+            Gesture::Pressed { at: (1234, 567), his: true },
+            Gesture::Pressed { at: (1234, 567), his: false },
+            Gesture::IntoPrompt { at: (1234, 567), fg: 0x1234 },
+        ] {
             for would in [true, false] {
                 let line = gesture_line(g, would);
                 assert!(!line.contains("1234") && !line.contains("567"), "{line}");
@@ -2060,8 +2209,143 @@ mod tests {
         }
         assert_eq!(gesture_line(Gesture::Menu { at: (0, 0) }, true), "a right-click on him: his menu would open (clicks on him are only watched)");
         assert_eq!(gesture_line(Gesture::DoubleClick, true), "a double-click on him: the prompt would open (clicks on him are only watched)");
+        assert_eq!(gesture_line(Gesture::DoubleClick, false), "a double-click on him: the prompt");
+        assert_eq!(gesture_line(Gesture::IntoPrompt { at: (0, 0), fg: 0 }, false), "a press into the waiting prompt");
         assert_eq!(state_line(None), "the mouse hook is in");
         assert_eq!(state_line(Some(OFF_HIDDEN)), "the mouse hook is out (he's hidden)");
+    }
+
+    /// While the prompt waits, a real press into it is counted there, before
+    /// it reaches the prompt, and passes, reported with who had the keyboard;
+    /// one elsewhere passes and says so; one on him is his and touches
+    /// neither. With nothing waiting, the prompt isn't asked about.
+    #[test]
+    fn a_press_into_the_waiting_prompt_is_counted_there_and_passes() {
+        let info = |x: i32, time: u32, flags: u32| MSLLHOOKSTRUCT { pt: POINT { x, y: 50 }, time, flags, ..Default::default() };
+        let waits = Ctx { menu: 0, waiting: 5 };
+        let sent = RefCell::new(Vec::new());
+        let send = |m: Msg| {
+            if let Msg::Gesture { g, would, waiting, .. } = m {
+                sent.borrow_mut().push((g, would, waiting));
+            }
+        };
+        let c = Counts::new();
+        let mut t = Tracker::NEW;
+        // On the prompt (and not on him).
+        let s = FakeScene { shape: false, prompt: true, ..scene() };
+        assert!(!decide(&s, &mut t, || waits, &c, WM_LBUTTONDOWN, &info(50, 0, 0), send), "it passes");
+        assert_eq!(s.into.get(), 1, "counted in the procedure");
+        assert_eq!(*sent.borrow(), [(Gesture::IntoPrompt { at: (50, 50), fg: 42 }, false, 5)]);
+        assert!(!decide(&s, &mut t, || waits, &c, WM_LBUTTONUP, &info(50, 5, 0), send), "its release too");
+        // The middle button too: any press activates it.
+        decide(&s, &mut t, || waits, &c, WM_MBUTTONDOWN, &info(50, 10, 0), send);
+        assert_eq!(s.into.get(), 2);
+        // An injected press counts for nothing.
+        decide(&s, &mut t, || waits, &c, WM_LBUTTONDOWN, &info(50, 20, LLMHF_INJECTED), send);
+        assert_eq!(s.into.get(), 2);
+        // Elsewhere: not counted, and it says so.
+        sent.borrow_mut().clear();
+        let s = FakeScene { shape: false, ..scene() };
+        assert!(!decide(&s, &mut t, || waits, &c, WM_LBUTTONDOWN, &info(50, 100, 0), send));
+        assert_eq!(s.into.get(), 0);
+        assert_eq!(*sent.borrow(), [(Gesture::Pressed { at: (50, 50), his: false }, false, 5)]);
+        // On him: his, and nothing for the prompt (a first press of a
+        // double-click, say), and the prompt never asked about.
+        sent.borrow_mut().clear();
+        let s = FakeScene { prompt: true, ..scene() };
+        assert!(decide(&s, &mut t, || waits, &c, WM_LBUTTONDOWN, &info(50, 200, 0), send));
+        assert_eq!(s.into.get(), 0);
+        assert!(sent.borrow().is_empty());
+        assert!(!s.asked.borrow().contains(&"prompt"));
+        // Nothing waiting: never asked, never counted.
+        let s = FakeScene { shape: false, prompt: true, ..scene() };
+        decide(&s, &mut t, || FREE, &c, WM_LBUTTONDOWN, &info(50, 300, 0), send);
+        assert_eq!(s.into.get(), 0);
+        assert!(!s.asked.borrow().contains(&"prompt"));
+        // Only his menu up: a press where the prompt stands is no press into a
+        // waiting prompt; never counted, never asked.
+        sent.borrow_mut().clear();
+        let menu_only = Ctx { menu: 4, waiting: 0 };
+        let s = FakeScene { shape: false, prompt: true, ..scene() };
+        decide(&s, &mut t, || menu_only, &c, WM_LBUTTONDOWN, &info(50, 350, 0), send);
+        assert_eq!(s.into.get(), 0);
+        assert!(!s.asked.borrow().contains(&"prompt"));
+        assert_eq!(*sent.borrow(), [(Gesture::Pressed { at: (50, 50), his: false }, false, 0)]);
+        // His menu up too: a press into the prompt is counted, and ends it.
+        sent.borrow_mut().clear();
+        let both = Ctx { menu: 4, waiting: 5 };
+        let s = FakeScene { shape: false, prompt: true, ..scene() };
+        decide(&s, &mut t, || both, &c, WM_LBUTTONDOWN, &info(50, 400, 0), send);
+        assert_eq!(s.into.get(), 1);
+        assert_eq!(*sent.borrow(), [(Gesture::IntoPrompt { at: (50, 50), fg: 42 }, false, 5)]);
+    }
+
+    /// What the owner thread does to the prompt with each gesture.
+    #[test]
+    fn prompt_of_table() {
+        const AT: (i32, i32) = (12, 34);
+        let into = Gesture::IntoPrompt { at: AT, fg: 9 };
+        let elsewhere = Gesture::Pressed { at: AT, his: false };
+        let on = Gesture::Pressed { at: AT, his: true };
+        let never = |_: (i32, i32)| -> bool { panic!("the prompt's window isn't asked about") };
+        let outside = |at: (i32, i32)| {
+            assert_eq!(at, AT);
+            false
+        };
+        assert_eq!(prompt_of(Gesture::DoubleClick, false, 0, false, never), ToPrompt::Open);
+        assert_eq!(prompt_of(Gesture::DoubleClick, false, 3, false, never), ToPrompt::Open, "open, its gesture closes it");
+        assert_eq!(prompt_of(Gesture::DoubleClick, false, 0, true, never), ToPrompt::Pretend, "a pretend opens a pretend");
+        assert_eq!(prompt_of(Gesture::DoubleClick, true, 0, false, never), ToPrompt::Nothing, "only watched");
+        assert_eq!(prompt_of(elsewhere, false, 3, false, outside), ToPrompt::Close(3));
+        assert_eq!(prompt_of(elsewhere, false, 3, false, |_| true), ToPrompt::Nothing, "inside its window, though the hook couldn't place it");
+        assert_eq!(prompt_of(elsewhere, false, 0, false, never), ToPrompt::Nothing, "nothing waiting (his menu's press)");
+        assert_eq!(prompt_of(on, false, 3, false, never), ToPrompt::Nothing, "a press on him never closes it");
+        assert_eq!(prompt_of(into, false, 3, false, never), ToPrompt::Saw(3, 9));
+        assert_eq!(prompt_of(into, false, 0, false, never), ToPrompt::Nothing);
+        assert_eq!(prompt_of(Gesture::Menu { at: AT }, false, 3, false, never), ToPrompt::Nothing);
+        assert_eq!(wait_on_out(0), None);
+        assert_eq!(wait_on_out(7), Some(7));
+    }
+
+    /// The prompt is opened, closed and told from the main thread, posted;
+    /// the hook going out ends a waiting prompt; the procedure reads which
+    /// open waits, and counts a press into it through the prompt's own word.
+    #[test]
+    fn the_prompt_is_reached_from_the_main_thread() {
+        let src = source("hook");
+        let code = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(!code.contains(concat!("prompt::", "toggle(")), "never toggled on the owner thread");
+        let act = body(&src, "fn act(");
+        for arm in [
+            "let in_prompt = |at| windows_ext::window_bounds(crate::prompt::hwnd()).is_some_and(|b| crate::hit_shape::holds(b, at));",
+            "match prompt_of(g, would, waiting, pretend, in_prompt) {",
+            "ToPrompt::Open => crate::prompt::toggle_later(app, crate::prompt::Opener::Click),",
+            "ToPrompt::Pretend => crate::prompt::toggle_later(app, crate::prompt::Opener::PretendWait),",
+            "ToPrompt::Close(open) => crate::prompt::close_later(app, crate::prompt::Why::Elsewhere, open),",
+            "ToPrompt::Saw(open, fg) => crate::prompt::saw_press_later(app, open, fg),",
+        ] {
+            assert!(act.contains(arm), "{arm}");
+        }
+        let owner = body(&src, "fn owner(");
+        let removed = &owner[owner.find("Change::Removed => {").unwrap()..];
+        let removed = &removed[..removed.find("Change::Same").unwrap()];
+        assert!(removed.contains("if let Some(open) = wait_on_out(crate::prompt::waiting_open()) {\n                    crate::prompt::close_later(app, crate::prompt::Why::HookOut, open);"));
+        // And while it is out, a real open still waiting goes (one posted
+        // before it went out can land after the Removed arm looked).
+        assert!(owner.contains("if running.is_none() {\n            if let Some(open) = wait_on_out(crate::prompt::waiting_click_open()) {\n                crate::prompt::close_later(app, crate::prompt::Why::HookOut, open);"));
+        assert!(body(&src, "fn ctx_now(").contains("waiting: crate::prompt::waiting_open(),"));
+        let live = body(&src, "impl Scene for Live");
+        let at = body(live, "fn prompt_at(");
+        for part in ["crate::prompt::hwnd()", "w != 0", "windows_ext::window_bounds(w).is_some_and(|b| crate::hit_shape::holds(b, at))", "!windows_ext::covered_at(w, at, ABOVE_CAP)"] {
+            assert!(at.contains(part), "{part}");
+        }
+        assert!(body(live, "fn count_into_prompt(").contains("crate::prompt::pressed_into();"));
+        assert!(body(live, "fn foreground(").contains("windows_ext::foreground_window()"));
+        // The procedure counts the press before it reports it.
+        let decide_ = body(&src, "fn decide(");
+        let counted = decide_.find("s.count_into_prompt();").unwrap();
+        assert!(counted < decide_.find("send(Msg::Gesture {").unwrap());
+        assert!(decide_.contains("Some(Gesture::Pressed { at, his: false }) if cx.waits() && s.prompt_at(at) => {"));
     }
 
     // The source scans.
@@ -2143,7 +2427,7 @@ mod tests {
             .join("\n");
         assert_clean("the procedure's region", &code);
         assert_eq!(code.matches(".send(").count(), 1, "one send");
-        for f in ["fn mouse_proc(", "fn guarded(", "fn decide(", "fn event_of(", "fn step(", "fn applied(", "fn look(", "fn why_off(", "fn inputs_now(", "impl Scene for Live", "fn within(", "fn deliver(", "fn note_slowest(", "fn ctx_now(", "fn menu_up("] {
+        for f in ["fn mouse_proc(", "fn guarded(", "fn decide(", "fn event_of(", "fn step(", "fn applied(", "fn look(", "fn why_off(", "fn inputs_now(", "impl Scene for Live", "fn within(", "fn deliver(", "fn note_slowest(", "fn ctx_now(", "fn menu_up(", "fn waits("] {
             assert!(code.contains(f), "{f} lies between the markers");
         }
     }
@@ -2183,6 +2467,13 @@ mod tests {
             ("hit_shape", "pub(crate) fn unpack("),
             ("hit_shape", "pub(crate) fn holds("),
             ("hit_shape", "pub fn now_ms("),
+            ("prompt", "pub fn waiting_open("),
+            ("prompt", "pub(crate) fn waiting_open_of("),
+            ("prompt", "pub fn pressed_into("),
+            ("prompt", "pub(crate) fn pressed_into_on("),
+            ("prompt", "fn uncount_open("),
+            ("prompt", "pub fn hwnd("),
+            ("windows_ext", "pub fn foreground_window("),
         ] {
             let src = source(module);
             assert_clean(&format!("{module}::{sig}"), body(&src, sig));

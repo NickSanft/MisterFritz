@@ -7,10 +7,11 @@
 //! it can be seen what Fritz took the keyboard from. The control window
 //! (tray > Settings) is an ordinary window and takes the keyboard when it is
 //! opened: its lines say SETTINGS, never HIT. The prompt takes it when the
-//! owner opens it with its key: a PROMPT line, but only for an open that
-//! took the keyboard, or a waiting prompt the owner clicked into or its key
-//! took the keyboard into (`prompt::takes`); the prompt in front with no
-//! such open, or the keyboard still with it after it closed, is a HIT.
+//! owner opens it (its key, or a double-click on him): a PROMPT line, but
+//! only for an open that took the keyboard, or a waiting prompt the hook
+//! saw the owner press into or its key took the keyboard into
+//! (`prompt::takes`); the prompt in front with no such open, or the
+//! keyboard still with it after it closed, is a HIT.
 //!
 //! Off unless `settings.diagnostics.foregroundLog` is on (read at start): it
 //! writes other apps' window titles to `diagnostics\foreground.log`, so it is
@@ -284,7 +285,7 @@ pub fn start(app: AppHandle, path: PathBuf) {
                 "start pid={me} poll=100ms; a HIT line is a failure of Spike 0's first row \
                  (ARRANGE lines are Arrange taking the keyboard on purpose, TRAY lines the \
                  tray menu, SETTINGS lines the control window the owner opened, PROMPT \
-                 lines the prompt the owner opened with its key)"
+                 lines the prompt the owner opened, by its key or a double-click on him)"
             ));
             let (mut polls, mut changes, mut hits, mut arranges, mut trays, mut settings, mut prompts) =
                 (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
@@ -329,6 +330,11 @@ pub fn start(app: AppHandle, path: PathBuf) {
                     }
                     continue;
                 };
+                // A count given back since the last PROMPT line (an open
+                // that never had the keyboard after all) never leaves the
+                // mark above the count, or the owner's next open would read
+                // as none.
+                seen_takes = seen_takes.min(takes);
                 let fg = HWND(fg_now as *mut core::ffi::c_void);
                 let changed = fg_now != last;
                 // Judged on every change, and again each poll while Fritz may
@@ -394,6 +400,19 @@ pub fn start(app: AppHandle, path: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::{ancestry, classify, judge, kept_after, line_kind, settled, Seen, Verdict};
+
+    /// A count given back after a PROMPT line (an open that never had the
+    /// keyboard after all) never leaves the mark above the count: the
+    /// owner's next open still reads as fresh. Brought down each poll,
+    /// before the judging.
+    #[test]
+    fn the_prompts_mark_never_stays_above_its_count() {
+        let src = include_str!("foreground_log.rs").replace("\r\n", "\n");
+        let code = &src[..src.find("#[cfg(test)]").unwrap()];
+        let min = code.find("seen_takes = seen_takes.min(takes);").expect("the mark brought down");
+        assert!(min > code.find("let Some((fg_now, (control, prompt, takes))) = readings else {").unwrap());
+        assert!(min < code.find("let kind = judge(changed, verdict, arranging, last_kind, takes > seen_takes);").unwrap());
+    }
     use std::collections::HashMap;
 
     const ME: u32 = 100;

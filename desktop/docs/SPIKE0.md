@@ -70,8 +70,11 @@ session — at least 30 minutes, ideally a working day. Along the way:
    quiet stretch.
 2. **Typing** — type a few paragraphs in an editor while he animates, some of
    it with the caret right behind him.
-3. **Clicks** — click, double-click and drag on things beneath his window,
-   both on him and on the empty corners of his rectangle.
+3. **Clicks** — click, double-click and drag on things beneath his window:
+   on the empty corners of his rectangle and in the room over his head,
+   clicks on his window around him pass through. A click on his body is
+   his while Settings › Fritz › *Clicks on him* is on (a double-click asks
+   him, a right-click opens his menu); with it off, it passes through too.
 4. **Edges** — screenshot him at 200 % zoom over a white page and over a dark
    one; look for a black or white fringe.
 5. **Presents** — with Intel PresentMon, capture 60 s animating and 60 s
@@ -98,7 +101,7 @@ shows him, and whether Arrange hands the keyboard back.
 |---|---|---|
 | `GetForegroundWindow()` at 10 Hz never returns Fritz's window or a WebView2 child of it | zero `HIT` lines in 30 min, incl. app start, Explorer restart, sleep/resume | **0 `HIT`** in 16 min over two runs, through both starts, the lock screen, a sleep, an Explorer restart and a quit and restart. 4 `ARRANGE` lines over 3 Arranges, all yours (the 20:35:11 one is a click on him mid-Arrange), and none kept the keyboard afterwards (no `kept after Arrange`); 1 `TRAY`. After the second and third Arranges the session's checks found Claude, the app you'd been in, back in the foreground. Short of 30 min |
 | Typing in another app while he animates | no dropped keystrokes, no caret loss | Not checked on its own. Notepad had the keyboard for half a minute while he animated; nothing was reported |
-| Clicks anywhere on his window's rectangle | pass through to the app beneath | Pass by the automated check: at every look (both starts, after the sleep, after the Explorer restart) the window under his middle was the app beneath. Not clicked by hand |
+| Clicks on his window around him (and on his body with Settings › Fritz › *Clicks on him* off) | pass through to the app beneath; on his body, with it on, they are his (a double-click asks him, a right-click opens his menu) | Pass by the automated check: at every look (both starts, after the sleep, after the Explorer restart) the window under his middle was the app beneath. Not clicked by hand |
 | Transparent areas | no black/white halo; VRM edges premultiplied correctly | No fringe at 1:1 over a white window (the build) or the dark Claude window (the session). Not looked at 200 % |
 | PresentMon on the WebView2 GPU process | ≤ 30 presents/s animating; ≤ 1/s parked | Not run: PresentMon isn't installed |
 | Borderless-fullscreen game on the same monitor | he parks himself, game unaffected | Not run. The same watch parks him for the lock screen, and did so unreliably; fixed (below) |
