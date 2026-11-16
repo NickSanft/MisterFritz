@@ -77,6 +77,11 @@ pub fn install_panic_hook() {
     panic::set_hook(Box::new(move |info| {
         let current = std::thread::current();
         let thread = current.name().unwrap_or("unnamed");
+        // The mouse hook's procedure may not wait on a file: its panic is
+        // caught there, and its owner thread writes the line instead.
+        if thread == crate::hook::HOOK_THREAD {
+            return;
+        }
         crash(&format!("PANIC [{thread}]: {info}"));
         before(info);
     }));

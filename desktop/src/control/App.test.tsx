@@ -14,11 +14,17 @@ type Args = Record<string, unknown>;
 const SETTINGS = {
   version: 1,
   brain: { url: "ws://127.0.0.1:8001/companion", clientId: "nick-pc", clientName: "NICK-PC" },
-  avatar: { rect: null, scale: 1, parked: false, vrmPath: null, lookatCursor: true },
+  avatar: { rect: null, scale: 1, parked: false, vrmPath: null, lookatCursor: true, clicks: true },
   hotkeys: { prompt: "Ctrl+Alt+F", ptt: "Ctrl+Alt+Space", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" },
   diagnostics: { foregroundLog: false },
   theme: fixture.themeDefaults,
 };
+/** The mouse hook out while he is hidden, and in. */
+const HOOK_OUT = {
+  on: true, installed: false, why: fixture.hookOff.hidden, events: 0, presses: 0, onShape: 0, covered: 0, taken: 0,
+  gestures: 0, slowestMicros: 0, putBack: 0, panicked: false,
+};
+const HOOK_IN = { ...HOOK_OUT, installed: true, why: null, events: 812, presses: 9, slowestMicros: 41 };
 const MODEL = {
   from: "folder", path: "C:\\data\\avatar\\fritz.vrm", found: false, bytes: null, tooBig: false,
   wearing: "placeholder", loadError: null, changed: false,
@@ -45,6 +51,7 @@ beforeEach(() => {
     companion_status: () => fixture.companionStatusSamples.online,
     hotkeys_bound: () => ({ prompt: "Ctrl+Alt+F", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" }),
     control_opening: () => null,
+    mouse_hook_status: () => HOOK_OUT,
     "plugin:event|listen": (a) => {
       const event = a.event as string;
       listeners.set(event, [...(listeners.get(event) ?? []), a.handler as number]);
@@ -88,6 +95,58 @@ const press = (key: string, more: KeyboardEventInit = {}) =>
   window.dispatchEvent(new KeyboardEvent("keydown", { key, cancelable: true, bubbles: true, ...more }));
 
 describe("the control window", () => {
+  it("turns clicks on him off and on, and never his eyes", async () => {
+    answers.set_setting = (a) => ({ ...SETTINGS, avatar: { ...SETTINGS.avatar, clicks: a.value } });
+    const view = render(() => <App />);
+    const toggle = await waitFor(() => view.getByRole("switch", { name: "Clicks on him" }));
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(toggle);
+    await waitFor(() => expect(view.getByRole("switch", { name: "Clicks on him" })).toHaveAttribute("aria-checked", "false"));
+    fireEvent.click(view.getByRole("switch", { name: "Clicks on him" }));
+    await waitFor(() => expect(asked("set_setting")).toHaveLength(2));
+    expect(asked("set_setting").map((c) => c.args)).toEqual([
+      { path: "avatar.clicks", value: false },
+      { path: "avatar.clicks", value: true },
+    ]);
+    expect(view.getByRole("switch", { name: "His eyes follow the cursor" })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("says where the mouse hook stands, as the shell says it, and asks again after the switch and on focus", async () => {
+    answers.set_setting = (a) => ({ ...SETTINGS, avatar: { ...SETTINGS.avatar, clicks: a.value } });
+    const view = render(() => <App />);
+    await waitFor(() => expect(view.getByText("Out: he's hidden.")).toBeInTheDocument());
+    // The shell's word that it went in.
+    emit("hook:status", HOOK_IN);
+    await waitFor(() => expect(view.getByText("In while he's on screen; the slowest answer took 0.04 ms.")).toBeInTheDocument());
+    // Something that isn't a status is no word at all.
+    emit("hook:status", { installed: "yes" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(view.getByText("In while he's on screen; the slowest answer took 0.04 ms.")).toBeInTheDocument();
+    // Asked again after the switch.
+    const before = asked("mouse_hook_status").length;
+    answers.mouse_hook_status = () => ({ ...HOOK_OUT, on: false, why: fixture.hookOff.switch });
+    fireEvent.click(view.getByRole("switch", { name: "Clicks on him" }));
+    await waitFor(() => expect(view.getByText("Out: clicks on him are off in Settings.")).toBeInTheDocument());
+    expect(asked("mouse_hook_status").length).toBe(before + 1);
+    // And when the window comes forward.
+    answers.mouse_hook_status = () => HOOK_IN;
+    window.dispatchEvent(new Event("focus"));
+    await waitFor(() => expect(view.getByText("In while he's on screen; the slowest answer took 0.04 ms.")).toBeInTheDocument());
+    expect(asked("mouse_hook_status").length).toBe(before + 2);
+  });
+
+  it("an answer read before the shell's word can't undo it", async () => {
+    let answer: (v: unknown) => void = () => {};
+    answers.mouse_hook_status = () => new Promise((r) => (answer = r));
+    const view = render(() => <App />);
+    await waitFor(() => expect(asked("mouse_hook_status")).toHaveLength(1));
+    emit("hook:status", HOOK_IN);
+    await waitFor(() => expect(view.getByText("In while he's on screen; the slowest answer took 0.04 ms.")).toBeInTheDocument());
+    answer(HOOK_OUT);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(view.queryByText("Out: he's hidden.")).toBeNull();
+  });
+
   it("names the key Windows holds, not the one set, and none when it holds none", async () => {
     answers.get_settings = () => ({ ...SETTINGS, hotkeys: { ...SETTINGS.hotkeys, arrange: "Ctrl+Alt+Nope" } });
     answers.hotkeys_bound = () => ({ prompt: "Ctrl+Alt+F", arrange: "Ctrl+Alt+A", park: null });

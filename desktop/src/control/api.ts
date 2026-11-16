@@ -26,6 +26,7 @@ export const CMD = {
   companionSay: "companion_say",
   setHotkey: "set_hotkey",
   hotkeysBound: "hotkeys_bound",
+  mouseHookStatus: "mouse_hook_status",
 } as const;
 
 /** The actions a key may be set for, in the order Settings shows them
@@ -47,6 +48,8 @@ export { SETTINGS_EVENT };
 /** The avatar's page has loaded a model: ask `avatar_model` again. */
 export const LOADED_EVENT = "avatar:loaded";
 export { COMPANION_STATUS_EVENT } from "../shared/link";
+/** The mouse hook went in or out, was put back or failed: its status. */
+export const HOOK_STATUS_EVENT = "hook:status";
 
 export type Folder = "logs" | "avatar";
 
@@ -72,7 +75,7 @@ export function parseOpening(v: unknown): Opening | null {
 /** The settings the control window reads (the shell has more). */
 export interface ControlSettings {
   brain: Brain;
-  avatar: { lookatCursor: boolean; vrmPath: string | null };
+  avatar: { lookatCursor: boolean; clicks: boolean; vrmPath: string | null };
   hotkeys: Record<HotkeyAction, string>;
   diagnostics: { foregroundLog: boolean };
   theme: Theme;
@@ -106,7 +109,7 @@ export function parseSettings(v: unknown): ControlSettings | null {
   const theme = parseTheme(o?.theme);
   const brain = parseBrain(o?.brain);
   if (!brain || !avatar || !hotkeys || !diagnostics || !theme) return null;
-  if (typeof avatar.lookatCursor !== "boolean") return null;
+  if (typeof avatar.lookatCursor !== "boolean" || typeof avatar.clicks !== "boolean") return null;
   if (avatar.vrmPath !== null && typeof avatar.vrmPath !== "string") return null;
   if (typeof hotkeys.prompt !== "string" || typeof hotkeys.arrange !== "string" || typeof hotkeys.park !== "string") {
     return null;
@@ -114,7 +117,7 @@ export function parseSettings(v: unknown): ControlSettings | null {
   if (typeof diagnostics.foregroundLog !== "boolean") return null;
   return {
     brain,
-    avatar: { lookatCursor: avatar.lookatCursor, vrmPath: avatar.vrmPath as string | null },
+    avatar: { lookatCursor: avatar.lookatCursor, clicks: avatar.clicks, vrmPath: avatar.vrmPath as string | null },
     hotkeys: { prompt: hotkeys.prompt, arrange: hotkeys.arrange, park: hotkeys.park },
     diagnostics: { foregroundLog: diagnostics.foregroundLog },
     theme,
@@ -143,6 +146,43 @@ export function parseModelInfo(v: unknown): ModelInfo | null {
 }
 
 export { parseCompanionStatus } from "../shared/link";
+
+/** The mouse hook, as `mouse_hook_status` reports it: in or out and why,
+ * and its counts. Never a point. */
+export interface HookStatus {
+  /** The switch (Settings › Fritz › Clicks on him). */
+  on: boolean;
+  installed: boolean;
+  /** Why it is out; null while it is in. */
+  why: string | null;
+  events: number;
+  presses: number;
+  onShape: number;
+  covered: number;
+  taken: number;
+  gestures: number;
+  slowestMicros: number;
+  putBack: number;
+  panicked: boolean;
+}
+
+const HOOK_COUNTS = ["events", "presses", "onShape", "covered", "taken", "gestures", "slowestMicros", "putBack"] as const;
+/** The status's keys, sorted (the shell's; the fixture's hookStatusKeys). */
+export const HOOK_KEYS = [...HOOK_COUNTS, "on", "installed", "why", "panicked"].sort();
+
+/** The hook's status, or null when it isn't one: exactly its keys, each of
+ * its kind, every count a whole number of at least 0. */
+export function parseHookStatus(v: unknown): HookStatus | null {
+  const o = obj(v);
+  if (!o || Object.keys(o).sort().join() !== HOOK_KEYS.join()) return null;
+  if (typeof o.on !== "boolean" || typeof o.installed !== "boolean" || typeof o.panicked !== "boolean") return null;
+  if (o.why !== null && typeof o.why !== "string") return null;
+  for (const k of HOOK_COUNTS) {
+    const n = o[k];
+    if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0) return null;
+  }
+  return o as unknown as HookStatus;
+}
 
 /** `hotkeys_bound`'s answer, or null when it isn't one: exactly the three
  * actions, each a key or null. */
@@ -175,6 +215,11 @@ export async function setHotkey(action: HotkeyAction, accelerator: string): Prom
 /** Each action's key as Windows holds it now. */
 export async function hotkeysBound(): Promise<HotkeysBound | null> {
   return parseHotkeysBound(await invoke<unknown>(CMD.hotkeysBound));
+}
+
+/** The mouse hook now. */
+export async function mouseHookStatus(): Promise<HookStatus | null> {
+  return parseHookStatus(await invoke<unknown>(CMD.mouseHookStatus));
 }
 
 export async function getSettings(): Promise<ControlSettings | null> {

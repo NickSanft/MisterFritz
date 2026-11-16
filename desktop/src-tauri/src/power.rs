@@ -88,6 +88,8 @@ pub fn start(app: AppHandle) {
         if let Some(on) = news(seen) {
             tracing::info!(on, "the display turned {}", if on { "on" } else { "off" });
             let _ = app.emit(DISPLAY_EVENT, on);
+            // No mouse hook while the display sleeps.
+            crate::hook::poke();
         }
     }));
     if let Err(e) = started {

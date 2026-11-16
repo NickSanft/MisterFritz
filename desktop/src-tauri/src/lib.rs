@@ -16,6 +16,7 @@ mod cover;
 mod cursor;
 mod foreground_log;
 mod hit_shape;
+mod hook;
 mod hotkeys;
 mod keyboard;
 mod logs;
@@ -149,8 +150,10 @@ pub(crate) fn show_avatar(app: &AppHandle) {
     }
 }
 
-/// The tray's Quit: save, take the shell's mark off, and go.
+/// The tray's Quit: the mouse hook out first, save, take the shell's mark
+/// off, and go.
 pub(crate) fn quit(app: &AppHandle) {
+    hook::stop();
     avatar_state::save_now(app);
     logs::startup("quit from the tray");
     overlay_windows::before_exit(app);
@@ -279,6 +282,8 @@ pub(crate) fn change_setting(
         let handle = app.clone();
         let _ = app.run_on_main_thread(move || tray::retick(&handle));
     }
+    // Clicks on him turned off (or on) take the mouse hook out (or put it in).
+    hook::poke();
     Ok(after)
 }
 
@@ -337,6 +342,13 @@ async fn set_hotkey(
 #[tauri::command]
 async fn hotkeys_bound() -> std::collections::BTreeMap<&'static str, Option<String>> {
     hotkeys::bound_now()
+}
+
+/// The mouse hook: in or out and why, and what it has counted, for
+/// Settings › Diagnostics. Counts only; never a point.
+#[tauri::command]
+async fn mouse_hook_status() -> hook::HookStatus {
+    hook::status()
 }
 
 /// Whether the display is on: for a page that starts after the last
@@ -1069,6 +1081,7 @@ pub fn run() {
             set_setting,
             set_hotkey,
             hotkeys_bound,
+            mouse_hook_status,
             power_display,
             cursor_now,
             set_parked,
@@ -1119,6 +1132,11 @@ pub fn run() {
             avatar_state::start_saver(handle.clone());
             open_avatar(&handle);
             cursor::start(handle.clone());
+            hook::start(
+                handle.clone(),
+                hook::while_hidden_wanted(cfg!(debug_assertions), std::env::var_os(hook::WHILE_HIDDEN_ENV)),
+                hook::pretend_click(cfg!(debug_assertions), std::env::var_os(hook::PRETEND_CLICK_ENV)),
+            );
             let has_token = token_present();
             if companion::shows_control_at_start(has_token, std::env::var_os(SHOW_SETTINGS_ENV).is_some()) {
                 if !has_token {
@@ -1219,7 +1237,8 @@ mod tests {
         assert_eq!(events["companionStatus"], super::COMPANION_STATUS_EVENT);
         assert_eq!(events["companionConfig"], super::COMPANION_CONFIG_EVENT);
         assert_eq!(events["companionSay"], super::COMPANION_SAY_EVENT);
-        assert_eq!(events.len(), 9, "an event with no Rust half: {events:?}");
+        assert_eq!(events["hookStatus"], crate::hook::STATUS_EVENT);
+        assert_eq!(events.len(), 10, "an event with no Rust half: {events:?}");
         assert_eq!(fixture["debug"]["pretendSayEnv"], super::PRETEND_SAY_ENV);
         assert_eq!(fixture["debug"]["pretendPromptEnv"], crate::prompt::PRETEND_ENV);
         let say = super::say_payload("good evening", 7);

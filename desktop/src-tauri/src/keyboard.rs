@@ -110,7 +110,7 @@ impl Keyboard for Desk {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeSet;
 
     use super::{hand_back, return_target, Keyboard};
@@ -214,14 +214,16 @@ mod tests {
         }
     }
 
-    /// Every module of the shell, by name, with its source.
-    const SOURCES: [(&str, &str); 19] = [
+    /// Every module of the shell, by name, with its source (the mouse
+    /// hook's scans read it too).
+    pub(crate) const SOURCES: [(&str, &str); 20] = [
         ("avatar_state", include_str!("avatar_state.rs")),
         ("companion", include_str!("companion.rs")),
         ("cover", include_str!("cover.rs")),
         ("cursor", include_str!("cursor.rs")),
         ("foreground_log", include_str!("foreground_log.rs")),
         ("hit_shape", include_str!("hit_shape.rs")),
+        ("hook", include_str!("hook.rs")),
         ("hotkeys", include_str!("hotkeys.rs")),
         ("keyboard", include_str!("keyboard.rs")),
         ("lib", include_str!("lib.rs")),

@@ -1,6 +1,7 @@
 //! Win32 for the avatar window: the foreground without injected input, Alt-Tab,
-//! the monitor Fritz stands on, and whether a fullscreen app or the lock
-//! screen covers it.
+//! the monitor Fritz stands on, whether a fullscreen app or the lock screen
+//! covers it, and what is under the mouse (for the mouse hook's procedure:
+//! plain reads, no message sent, no log).
 //!
 //! Windows are passed as integers (`HWND.0 as isize`), so callers need
 //! neither `unsafe` nor the `windows` crate. 0 is no window, and every call
@@ -26,21 +27,24 @@ use windows::Win32::System::RemoteDesktop::{
     WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTS_SESSIONSTATE_LOCK, WTS_SESSIONSTATE_UNLOCK,
 };
 use windows::Win32::UI::HiDpi::{
-    GetDpiForMonitor, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-    MDT_EFFECTIVE_DPI,
+    GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
 use windows::Win32::UI::Shell::{
     DefSubclassProc, RemoveWindowSubclass, SHQueryUserNotificationState, SetWindowSubclass,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetClassNameW, GetCursorPos, GetForegroundWindow, GetShellWindow, GetTopWindow, GetWindow,
-    GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow,
-    IsWindowVisible, IsZoomed, SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW,
-    SetWindowPos, WindowFromPoint, GA_ROOT, GA_ROOTOWNER, GWL_EXSTYLE, GW_HWNDNEXT, GW_OWNER,
-    LWA_ALPHA, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
-    SWP_NOSIZE, SWP_NOZORDER, WA_INACTIVE, WM_ACTIVATE, WM_NCDESTROY, WM_STYLECHANGING,
-    GWL_STYLE, WS_DLGFRAME, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_THICKFRAME,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    GetAncestor, GetClassNameW, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetShellWindow,
+    GetTopWindow, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+    IsWindow, IsWindowVisible, IsZoomed, SetForegroundWindow, SetLayeredWindowAttributes,
+    SetWindowLongPtrW, SetWindowPos, WindowFromPoint, GA_ROOT, GA_ROOTOWNER, GUITHREADINFO,
+    GUI_INMENUMODE, GUI_INMOVESIZE, GUI_POPUPMENUMODE, GWL_EXSTYLE, GW_HWNDNEXT, GW_HWNDPREV,
+    GW_OWNER, LWA_ALPHA, SM_CXDOUBLECLK, SM_CYDOUBLECLK, STYLESTRUCT, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, WA_INACTIVE,
+    WM_ACTIVATE, WM_NCDESTROY, WM_STYLECHANGING, GWL_STYLE, WS_DLGFRAME, WS_EX_APPWINDOW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_THICKFRAME, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT,
 };
 
 /// A screen rectangle in physical pixels: left, top, right, bottom.
@@ -694,6 +698,189 @@ pub fn next_app_window(skip: isize, also: isize) -> isize {
     }
 }
 
+// What is under the mouse, for the mouse hook's procedure: plain reads, no
+// message sent, no log, no allocation.
+
+/// Whether an extended style passes clicks through (`WS_EX_TRANSPARENT`
+/// with `WS_EX_LAYERED`): his window when Locked, another app's overlay.
+pub(crate) fn passes_clicks(ex: u32) -> bool {
+    ex & WS_EX_TRANSPARENT.0 != 0 && ex & WS_EX_LAYERED.0 != 0
+}
+
+/// Whether `window` is shown and passes clicks through it: his, Locked,
+/// but never his in Arrange, even between the Lock and its style.
+pub fn click_through(window: isize) -> bool {
+    if window == 0 {
+        return false;
+    }
+    let h = hwnd(window);
+    // SAFETY: plain queries on a window handle; a stale one answers false.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    unsafe {
+        IsWindowVisible(h).as_bool() && passes_clicks(GetWindowLongPtrW(h, GWL_EXSTYLE) as u32)
+    }
+}
+
+/// A window above his, as the walk reads it: each read made only when the
+/// one before it didn't settle the question.
+pub(crate) trait Above {
+    fn visible(&self) -> bool;
+    fn rect(&self) -> Option<Bounds>;
+    fn ex(&self) -> u32;
+    fn cloaked(&self) -> bool;
+}
+
+/// Whether one of `above` (from just above his window up to the top) takes
+/// a click at `at`: the first that is visible, holds the point, doesn't pass
+/// clicks through and isn't cloaked. `None` is the walk losing its place (a
+/// window gone mid-walk), and past `cap` windows: either counts as taken
+/// (he can't tell, so it isn't his). At the top, not.
+pub(crate) fn first_over<A: Above>(above: impl Iterator<Item = Option<A>>, at: (i32, i32), cap: usize) -> bool {
+    for (seen, w) in above.enumerate() {
+        let Some(w) = w else {
+            return true;
+        };
+        if seen >= cap {
+            return true;
+        }
+        if w.visible() && w.rect().is_some_and(|r| crate::hit_shape::holds(r, at)) && !passes_clicks(w.ex()) && !w.cloaked() {
+            return true;
+        }
+    }
+    false
+}
+
+/// A top-level window, read lazily.
+struct Win(HWND);
+
+impl Above for Win {
+    fn visible(&self) -> bool {
+        // SAFETY: a plain query; a stale handle is just not visible.
+        unsafe { IsWindowVisible(self.0) }.as_bool()
+    }
+    fn rect(&self) -> Option<Bounds> {
+        let mut r = RECT::default();
+        // SAFETY: a window handle and a valid out-pointer.
+        unsafe { GetWindowRect(self.0, &raw mut r) }.ok().map(|()| Bounds::of(r))
+    }
+    fn ex(&self) -> u32 {
+        // SAFETY: a plain query; a stale handle answers 0.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        unsafe {
+            GetWindowLongPtrW(self.0, GWL_EXSTYLE) as u32
+        }
+    }
+    fn cloaked(&self) -> bool {
+        let mut cloaked = 0u32;
+        // SAFETY: a window handle and a sized out-value; a failure leaves 0.
+        let _ = unsafe {
+            DwmGetWindowAttribute(self.0, DWMWA_CLOAKED, (&raw mut cloaked).cast(), size_of::<u32>() as u32)
+        };
+        cloaked != 0
+    }
+}
+
+/// The top-level windows above `window`, nearest first; then, if the walk
+/// ended because the window it stood on had gone (rather than at the top),
+/// one `None`.
+fn windows_above(window: isize) -> impl Iterator<Item = Option<Win>> {
+    let mut h = hwnd(window);
+    let mut done = false;
+    std::iter::from_fn(move || {
+        if done {
+            return None;
+        }
+        // SAFETY: walking the z-order with plain queries.
+        match unsafe { GetWindow(h, GW_HWNDPREV) } {
+            Ok(p) if !p.0.is_null() => {
+                h = p;
+                Some(Some(Win(h)))
+            }
+            _ => {
+                done = true;
+                // SAFETY: a plain query; a stale handle answers false.
+                let gone = !unsafe { IsWindow(Some(h)) }.as_bool();
+                gone.then_some(None)
+            }
+        }
+    })
+}
+
+/// Whether a window above `window` takes a click at `at` ([`first_over`]).
+/// His window gone, or one above it gone mid-walk, counts as covered.
+pub fn covered_at(window: isize, at: (i32, i32), cap: usize) -> bool {
+    // SAFETY: a plain query; a stale handle answers false.
+    if window == 0 || !unsafe { IsWindow(Some(hwnd(window))) }.as_bool() {
+        return true;
+    }
+    first_over(windows_above(window), at, cap)
+}
+
+/// Whether a thread's GUI state says it is busy with the mouse: in a menu,
+/// moving or sizing a window, or holding the capture. Pure.
+pub(crate) fn busy_gui(flags: u32, capture: bool) -> bool {
+    flags & (GUI_INMENUMODE.0 | GUI_POPUPMENUMODE.0 | GUI_INMOVESIZE.0) != 0 || capture
+}
+
+/// The shell's flyouts in front (Start, Search, the notification centre)
+/// are this class; they close as they lose the foreground.
+const FLYOUT_CLASS: &str = "Windows.UI.Core.CoreWindow";
+
+/// Whether `h`'s class is `name`, without allocating.
+fn class_is(h: HWND, name: &str) -> bool {
+    let mut buf = [0u16; 64];
+    // SAFETY: a sized buffer; a stale handle only makes the call fail.
+    let n = usize::try_from(unsafe { GetClassNameW(h, &mut buf) }).unwrap_or(0);
+    n == name.len() && name.encode_utf16().zip(&buf[..n]).all(|(a, &b)| a == b)
+}
+
+/// Whether the app in front is busy with the mouse, so a press goes to it
+/// whatever is beneath: in a menu, moving or sizing a window, holding the
+/// capture, or a shell flyout open. Never for no foreground or one of ours.
+pub fn foreground_busy() -> bool {
+    // SAFETY: plain queries; every handle may be stale, which only makes the
+    // calls fail.
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.0.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        let thread = GetWindowThreadProcessId(fg, Some(&raw mut pid));
+        if pid == 0 || pid == std::process::id() {
+            return false;
+        }
+        if class_is(fg, FLYOUT_CLASS) {
+            return true;
+        }
+        let mut info = GUITHREADINFO {
+            cbSize: size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        GetGUIThreadInfo(thread, &raw mut info).is_ok() && busy_gui(info.flags.0, !info.hwndCapture.0.is_null())
+    }
+}
+
+/// Half a double-click rectangle's side, at least 1 px.
+pub(crate) fn half(cx: i32) -> i32 {
+    (cx / 2).max(1)
+}
+
+/// Windows' double-click: its time (ms), and half its rectangle's width and
+/// height in physical pixels at `window`'s DPI (96 for none).
+pub fn double_click_limits(window: isize) -> (u32, i32, i32) {
+    // SAFETY: plain queries; a stale handle answers DPI 0.
+    unsafe {
+        let dpi = if window == 0 { 0 } else { GetDpiForWindow(hwnd(window)) };
+        let dpi = if dpi == 0 { 96 } else { dpi };
+        (
+            GetDoubleClickTime(),
+            half(GetSystemMetricsForDpi(SM_CXDOUBLECLK, dpi)),
+            half(GetSystemMetricsForDpi(SM_CYDOUBLECLK, dpi)),
+        )
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     #![allow(clippy::unwrap_used)]
@@ -1178,5 +1365,211 @@ pub(crate) mod tests {
         for class in ["UnityWndClass", "Chrome_WidgetWin_1", ""] {
             assert!(!is_shell_class(class), "{class}");
         }
+    }
+}
+
+/// The mouse hook's reads.
+#[cfg(test)]
+mod under_the_mouse {
+    #![allow(clippy::unwrap_used)]
+
+    use std::cell::RefCell;
+    use std::time::{Duration, Instant};
+
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetTopWindow, GetWindow, GW_HWNDNEXT, WINDOW_EX_STYLE, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    };
+
+    use super::tests::Hidden;
+    use super::{busy_gui, click_through, covered_at, double_click_limits, first_over, half, passes_clicks, Above, Bounds};
+
+    /// A window above his, whose reads are logged by its name.
+    struct Fake<'a> {
+        name: &'static str,
+        visible: bool,
+        rect: Bounds,
+        ex: u32,
+        cloaked: bool,
+        log: &'a RefCell<Vec<String>>,
+    }
+
+    impl Above for Fake<'_> {
+        fn visible(&self) -> bool {
+            self.log.borrow_mut().push(format!("{} visible", self.name));
+            self.visible
+        }
+        fn rect(&self) -> Option<Bounds> {
+            self.log.borrow_mut().push(format!("{} rect", self.name));
+            Some(self.rect)
+        }
+        fn ex(&self) -> u32 {
+            self.log.borrow_mut().push(format!("{} ex", self.name));
+            self.ex
+        }
+        fn cloaked(&self) -> bool {
+            self.log.borrow_mut().push(format!("{} cloaked", self.name));
+            self.cloaked
+        }
+    }
+
+    const HERE: Bounds = Bounds { left: 0, top: 0, right: 100, bottom: 100 };
+    const ELSEWHERE: Bounds = Bounds { left: 200, top: 0, right: 300, bottom: 100 };
+    const THROUGH: u32 = WS_EX_TRANSPARENT.0 | WS_EX_LAYERED.0;
+
+    #[test]
+    fn first_over_table() {
+        let log = RefCell::new(Vec::new());
+        let w = |name, visible, rect, ex, cloaked| Fake { name, visible, rect, ex, cloaked, log: &log };
+        for (name, above, want) in [
+            ("nothing above", vec![], false),
+            ("hidden", vec![w("a", false, HERE, 0, false)], false),
+            ("cloaked", vec![w("a", true, HERE, 0, true)], false),
+            ("click-through", vec![w("a", true, HERE, THROUGH, false)], false),
+            ("beside the point", vec![w("a", true, ELSEWHERE, 0, false)], false),
+            ("transparent but not layered", vec![w("a", true, HERE, WS_EX_TRANSPARENT.0, false)], true),
+            ("layered but not transparent", vec![w("a", true, HERE, WS_EX_LAYERED.0, false)], true),
+            ("visible and holding the point", vec![w("a", true, HERE, WS_EX_TOPMOST.0, false)], true),
+            ("past the passers-by", vec![w("a", false, HERE, 0, false), w("b", true, ELSEWHERE, 0, false), w("c", true, HERE, 0, false)], true),
+        ] {
+            assert_eq!(first_over(above.into_iter().map(Some), (50, 50), 512), want, "{name}");
+        }
+        // The walk losing its place (a window gone mid-walk) is covered,
+        // whatever came before it; reaching the top is not.
+        let lost = vec![Some(w("a", false, HERE, 0, false)), None];
+        assert!(first_over(lost.into_iter(), (50, 50), 512), "a window gone mid-walk");
+        assert!(first_over(vec![None::<Fake>].into_iter(), (50, 50), 512), "gone at the first step");
+        // The reads are made only as needed: a hidden window's rectangle
+        // isn't read, nor the style or cloak of one beside the point.
+        log.borrow_mut().clear();
+        let ws = vec![w("hidden", false, HERE, 0, false), w("beside", true, ELSEWHERE, 0, false), w("over", true, HERE, 0, false), w("never", true, HERE, 0, false)];
+        assert!(first_over(ws.into_iter().map(Some), (50, 50), 512));
+        assert_eq!(
+            *log.borrow(),
+            ["hidden visible", "beside visible", "beside rect", "over visible", "over rect", "over ex", "over cloaked"]
+        );
+        // The cap: past it, covered; up to it, as found.
+        let many = |n: usize| (0..n).map(|_| w("x", false, HERE, 0, false)).collect::<Vec<_>>();
+        assert!(first_over(many(5).into_iter().map(Some), (50, 50), 4), "past the cap");
+        assert!(!first_over(many(4).into_iter().map(Some), (50, 50), 4), "the top reached at the cap");
+        assert!(!first_over(many(3).into_iter().map(Some), (50, 50), 4));
+    }
+
+    #[test]
+    fn passes_clicks_table() {
+        assert!(passes_clicks(THROUGH));
+        assert!(passes_clicks(THROUGH | WS_EX_TOPMOST.0));
+        assert!(!passes_clicks(WS_EX_TRANSPARENT.0));
+        assert!(!passes_clicks(WS_EX_LAYERED.0));
+        assert!(!passes_clicks(0));
+    }
+
+    #[test]
+    fn busy_gui_table() {
+        for (flags, capture, want) in [
+            (4, false, true),  // GUI_INMENUMODE
+            (16, false, true), // GUI_POPUPMENUMODE
+            (2, false, true),  // GUI_INMOVESIZE
+            (0, true, true),   // holding the capture
+            (0, false, false),
+            (1, false, false), // GUI_CARETBLINKING
+            (8, false, false), // GUI_SYSTEMMENUMODE alone
+        ] {
+            assert_eq!(busy_gui(flags, capture), want, "{flags} {capture}");
+        }
+    }
+
+    #[test]
+    fn half_table() {
+        for (cx, want) in [(4, 2), (5, 2), (8, 4), (1, 1), (0, 1), (-6, 1)] {
+            assert_eq!(half(cx), want, "{cx}");
+        }
+    }
+
+    /// Never a window that isn't shown; nothing for no window; a window
+    /// that is gone counts as covered.
+    #[test]
+    fn real_windows() {
+        let hidden = Hidden::new(WINDOW_EX_STYLE(THROUGH));
+        assert!(!click_through(hidden.id()), "hidden, so not his to click");
+        assert!(!click_through(0));
+        assert!(covered_at(0, (0, 0), 512));
+        // From a window still there, the walk reaches the top without losing
+        // its place.
+        assert!(super::windows_above(hidden.id()).all(|w| w.is_some()));
+        let gone = hidden.id();
+        drop(hidden);
+        assert!(covered_at(gone, (0, 0), 512));
+        // From one that has gone, it says so at once.
+        let walked: Vec<_> = super::windows_above(gone).collect();
+        assert!(walked.len() == 1 && walked[0].is_none(), "{}", walked.len());
+        // A window above gone mid-walk: the walk says it lost its place, not
+        // that it reached the top.
+        let below = Hidden::new(WINDOW_EX_STYLE(0));
+        let above = Hidden::new(WINDOW_EX_STYLE(0)); // made later, so higher among the windows that aren't topmost
+        let mut walk = super::windows_above(below.id());
+        assert!(walk.by_ref().take(10_000).any(|w| w.is_some_and(|w| w.0 == above.0)), "the later window is above");
+        drop(above);
+        assert!(matches!(walk.next(), Some(None)), "lost its place, not the top");
+        let (ms, w, h) = double_click_limits(0);
+        assert!(ms > 0 && w >= 1 && h >= 1, "{ms} {w} {h}");
+    }
+
+    /// How long the walk takes on this desktop: run on purpose
+    /// (`cargo test ... -- --ignored the_walk_is_quick --nocapture`), never
+    /// in CI. Read-only; no window is made or shown, and only counts and
+    /// times are printed.
+    #[test]
+    #[ignore = "timed on the owner's desktop, on purpose"]
+    fn the_walk_is_quick() {
+        // SAFETY: plain queries walking the z-order.
+        let all: Vec<isize> = unsafe {
+            let mut out = Vec::new();
+            let mut h = GetTopWindow(None).unwrap_or_default();
+            while !h.0.is_null() && out.len() < 10_000 {
+                out.push(h.0 as isize);
+                h = GetWindow(h, GW_HWNDNEXT).unwrap_or_default();
+            }
+            out
+        };
+        let topmost = all.iter().filter(|&&h| super::Win(super::hwnd(h)).ex() & WS_EX_TOPMOST.0 != 0).count();
+        let at = super::cursor_pos().unwrap_or((0, 0));
+        let time = |what: &str, n: u32, f: &mut dyn FnMut()| -> Duration {
+            let (mut total, mut slowest) = (Duration::ZERO, Duration::ZERO);
+            for _ in 0..n {
+                let t = Instant::now();
+                f();
+                let d = t.elapsed();
+                total += d;
+                slowest = slowest.max(d);
+            }
+            let mean = total / n;
+            println!("{what}: mean {} µs, slowest {} µs ({n} runs)", mean.as_micros(), slowest.as_micros());
+            mean
+        };
+        println!("{} top-level windows, {topmost} of them topmost", all.len());
+        // From the last topmost window, as his is: the usual walk.
+        let from = all.get(topmost.saturating_sub(1)).copied().unwrap_or(0);
+        println!("{} windows above the last topmost one", topmost.saturating_sub(1));
+        let usual = time("covered_at from the last topmost window", 1_000, &mut || {
+            std::hint::black_box(covered_at(from, at, 512));
+        });
+        // The longest walk: from the bottom, every window read, never stopping.
+        let bottom = all.last().copied().unwrap_or(0);
+        time("every window read, from the bottom up", 100, &mut || {
+            for w in super::windows_above(bottom).flatten() {
+                std::hint::black_box((w.visible(), w.rect(), w.ex(), w.cloaked()));
+            }
+        });
+        let fg = super::foreground_window();
+        time("the cloak alone", 1_000, &mut || {
+            std::hint::black_box(super::Win(super::hwnd(fg)).cloaked());
+        });
+        time("foreground_busy", 1_000, &mut || {
+            std::hint::black_box(super::foreground_busy());
+        });
+        time("double_click_limits", 1_000, &mut || {
+            std::hint::black_box(double_click_limits(0));
+        });
+        assert!(usual < Duration::from_micros(500), "the usual walk takes {usual:?}");
     }
 }

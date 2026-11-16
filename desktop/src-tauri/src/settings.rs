@@ -136,6 +136,9 @@ pub struct Avatar {
     pub vrm_path: Option<String>,
     /// Whether his eyes follow the cursor (PR 2's second part).
     pub lookat_cursor: bool,
+    /// Whether a press on his body is his (Settings › Fritz › Clicks on
+    /// him): the mouse hook goes in only while it is on.
+    pub clicks: bool,
 }
 
 impl Default for Avatar {
@@ -146,6 +149,7 @@ impl Default for Avatar {
             parked: false,
             vrm_path: None,
             lookat_cursor: true,
+            clicks: true,
         }
     }
 }
@@ -839,6 +843,7 @@ mod tests {
         assert!((s.theme.motion - 0.6).abs() < 1e-6 && s.theme.grain && !s.theme.motion_user);
         assert_eq!(s.audio.tts_voice, "bm_george");
         assert!(s.avatar.lookat_cursor && !s.avatar.parked && s.avatar.rect.is_none());
+        assert!(s.avatar.clicks, "clicks on him are on by default");
         assert!(!s.diagnostics.foreground_log, "the foreground log is opt-in");
         validate(&s).unwrap();
     }
@@ -888,6 +893,7 @@ mod tests {
     fn the_file_is_camel_case() {
         let v = serde_json::to_value(Settings::default()).unwrap();
         assert!(v["avatar"].get("lookatCursor").is_some(), "{v}");
+        assert_eq!(v["avatar"]["clicks"], true, "{v}");
         assert!(v["brain"].get("clientId").is_some(), "{v}");
         assert!(v.get("runAtStartup").is_some() && v.get("widgetLayout").is_some(), "{v}");
         assert!(v["diagnostics"].get("foregroundLog").is_some(), "{v}");
@@ -931,7 +937,7 @@ mod tests {
         .unwrap();
         let (s, loaded) = read(&d.join(FILE));
         assert_eq!(loaded, Loaded::Read);
-        assert!(s.avatar.parked && s.avatar.lookat_cursor);
+        assert!(s.avatar.parked && s.avatar.lookat_cursor && s.avatar.clicks, "a file without clicks has them on");
         assert_eq!(s.hotkeys.park, "Ctrl+Shift+H");
         assert_eq!(s.hotkeys.arrange, "Ctrl+Alt+A");
     }
@@ -1271,6 +1277,7 @@ mod tests {
             ("avatar.parked", json!(true), "kept by Fritz"),
             ("avatar.nonsense", json!(1), "no setting"),
             ("avatar.lookatCursor", json!("yes"), "avatar.lookatCursor"),
+            ("avatar.clicks", json!("yes"), "avatar.clicks"),
             ("brain", json!({"url": "ws://elsewhere/companion"}), "set whole"),
             ("avatar", serde_json::to_value(Avatar::default()).unwrap(), "Fritz keeps himself"),
             ("theme", json!("dark"), "group of settings"),

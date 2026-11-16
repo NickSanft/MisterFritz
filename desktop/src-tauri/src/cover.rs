@@ -5,7 +5,7 @@
 //! parked him. A Hide from the tray or hotkey is the owner's: the watch never
 //! undoes it, and only the owner's is saved (`overlay_windows::owner_parked`).
 
-use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -21,11 +21,26 @@ const EVERY: Duration = Duration::from_secs(1);
 static LOCKED: AtomicU8 = AtomicU8::new(0);
 /// The shell's notification state as the watch last heard it; -1 unknown.
 static NOTIFICATION: AtomicI32 = AtomicI32::new(-1);
+/// Another app's fullscreen window was in front at the watch's last look.
+static FULLSCREEN: AtomicBool = AtomicBool::new(false);
 
-/// Keep what the watch heard, for [`locked`] and [`busy`].
-fn remember(locked: Option<bool>, notification: Option<i32>) {
-    LOCKED.store(locked.map_or(0, |l| if l { 2 } else { 1 }), Ordering::SeqCst);
-    NOTIFICATION.store(notification.unwrap_or(-1), Ordering::SeqCst);
+/// Keep what the watch heard, for [`locked`], [`busy`] and [`fullscreen`];
+/// whether any of it changed.
+fn remember(locked: Option<bool>, notification: Option<i32>, fullscreen: bool) -> bool {
+    let lock = locked.map_or(0, |l| if l { 2 } else { 1 });
+    let note = notification.unwrap_or(-1);
+    // Each swapped whatever the others say.
+    let lock_changed = LOCKED.swap(lock, Ordering::SeqCst) != lock;
+    let note_changed = NOTIFICATION.swap(note, Ordering::SeqCst) != note;
+    let front_changed = FULLSCREEN.swap(fullscreen, Ordering::SeqCst) != fullscreen;
+    lock_changed || note_changed || front_changed
+}
+
+/// Whether another app's fullscreen window was in front, on any monitor,
+/// at the watch's last look (the prompt's gate asks Windows itself; the
+/// mouse hook, which may not wait, asks this).
+pub fn fullscreen() -> bool {
+    FULLSCREEN.load(Ordering::SeqCst)
 }
 
 /// Whether the session was locked at the watch's last look (about a second
@@ -106,12 +121,17 @@ pub fn start(app: AppHandle) {
             // can only be seen as a fullscreen window, as before.
             let locked = windows_ext::session_locked();
             tracing::info!(?locked, "cover watch started");
-            remember(locked, windows_ext::notification_state());
+            remember(locked, windows_ext::notification_state(), windows_ext::fullscreen_foreground().is_some());
+            crate::hook::poke();
             loop {
                 thread::sleep(EVERY);
-                // Each tick, whatever Fritz is doing, for the prompt's gate.
+                // Each tick, whatever Fritz is doing, for the prompt's gate
+                // and the mouse hook's, which looks again when it changed.
                 let locked = windows_ext::session_locked();
-                remember(locked, windows_ext::notification_state());
+                let front = windows_ext::fullscreen_foreground().is_some();
+                if remember(locked, windows_ext::notification_state(), front) {
+                    crate::hook::poke();
+                }
                 let status = crate::overlay_windows::status(&app);
                 if !status.open {
                     continue;
@@ -147,7 +167,7 @@ pub fn start(app: AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{busy, busy_now, covered_by, decide, lock_now, locked, remember};
+    use super::{busy, busy_now, covered_by, decide, fullscreen, lock_now, locked, remember};
 
     /// Not busy in the cache is trusted; busy is checked with the shell, and
     /// a game quit a moment ago no longer refuses the press.
@@ -170,16 +190,25 @@ mod tests {
         }
     }
 
-    /// The prompt's gate reads what the watch last heard, never Windows:
-    /// the lock as it was, and the shell's busy states only.
+    /// The prompt's gate and the mouse hook's read what the watch last
+    /// heard, never Windows: the lock as it was, the shell's busy states
+    /// only, and a fullscreen app in front. The hook is poked only when
+    /// something changed. One test, as the cells are the process's.
     #[test]
-    fn the_watch_remembers_for_the_prompts_gate() {
-        remember(Some(true), Some(3));
-        assert_eq!((locked(), busy()), (Some(true), Some("a Direct3D fullscreen app")));
-        remember(Some(false), Some(2));
+    fn the_watch_remembers_for_the_gates() {
+        remember(None, None, false);
+        assert!(remember(Some(true), Some(3), false));
+        assert_eq!((locked(), busy(), fullscreen()), (Some(true), Some("a Direct3D fullscreen app"), false));
+        assert!(!remember(Some(true), Some(3), false), "nothing changed");
+        assert!(remember(Some(false), Some(2), false));
         assert_eq!((locked(), busy()), (Some(false), None));
-        remember(None, None);
-        assert_eq!((locked(), busy()), (None, None));
+        assert!(remember(Some(false), Some(2), true), "a fullscreen app came to the front");
+        assert!(fullscreen());
+        assert!(remember(Some(false), Some(2), false));
+        assert!(remember(Some(false), Some(4), false), "the notification state alone");
+        assert!(remember(None, Some(4), false), "the lock alone");
+        assert!(remember(None, None, false));
+        assert_eq!((locked(), busy(), fullscreen()), (None, None, false));
     }
 
     /// Locked, he is covered by the lock screen whatever is at a monitor's

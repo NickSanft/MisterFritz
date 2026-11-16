@@ -1,7 +1,7 @@
 //! Where Fritz's body is on his window, as his page measures it
 //! (`set_hit_rects`): up to six boxes, kept as fractions of his window in
-//! atomics, so the mouse hook's procedure (the next commit) can ask whether
-//! a point is on him without taking a lock. Nothing reads it yet.
+//! atomics, so the mouse hook's procedure (`hook.rs`) can ask whether a
+//! point is on him without taking a lock.
 //!
 //! Fractions, not screen pixels: a drag, a park or a change of DPI moves
 //! his window, and the boxes are mapped onto wherever it stands at the
@@ -281,6 +281,15 @@ impl Store {
         }
     }
 
+    /// Whether a shape of the live window `live`, heard within `STALE`,
+    /// is held.
+    pub(crate) fn held(&self, live: u32, now_ms: u64) -> bool {
+        let stale = u64::try_from(STALE.as_millis()).unwrap_or(u64::MAX);
+        self.count.load(Ordering::Acquire) > 0
+            && self.instance.load(Ordering::Relaxed) == live
+            && now_ms.saturating_sub(self.heard_ms.load(Ordering::Relaxed)) <= stale
+    }
+
     /// Whether the screen point `at` is on him, for the live window
     /// `live` standing at `window`, at `now_ms`: inside a box of a shape
     /// that is that window's and was heard within `STALE`. Atomics only.
@@ -338,11 +347,16 @@ pub(crate) fn keep(live: Option<u32>, next: Stamp, packed: &[u64]) -> Kept {
     STORE.keep(live, next, packed, now_ms())
 }
 
-/// Whether a screen point is on him now: the hook's question, which the
-/// next commit asks.
-#[allow(dead_code)]
+/// Whether a screen point is on him now: the mouse hook's question
+/// (`hook::Live::shape_holds`).
 pub fn contains(at: (i32, i32), window: Bounds, live: u32) -> bool {
     STORE.contains(at, window, live, now_ms())
+}
+
+/// Whether a fresh shape of the live window `live` is held: the pretend
+/// click waits for one.
+pub fn held(live: u32) -> bool {
+    STORE.held(live, now_ms())
 }
 
 #[cfg(test)]
@@ -513,8 +527,13 @@ mod tests {
         let (s, body) = loaded();
         let at = window(1000, 500, 680, 1280); // his window, at twice the page's scale
         assert!(!s.contains((1340, 1000), at, 1, 0), "no shape yet");
+        assert!(!s.held(1, 0), "no shape yet");
         assert_eq!(s.keep(Some(1), stamp(1, 1, 1), &body, 1_000), Kept::Changed { boxes: 1, percent: 18, news: true });
         let stale = u64::try_from(STALE.as_millis()).unwrap();
+        // Held while fresh, for its own window only.
+        assert!(s.held(1, 1_000 + stale));
+        assert!(!s.held(1, 1_001 + stale));
+        assert!(!s.held(2, 1_000));
         for (point, live, now, yes, why) in [
             ((1340, 1000), 1, 1_000, true, "on him"),
             ((1240, 880), 1, 1_000, true, "his box's top-left corner"),
@@ -542,7 +561,9 @@ mod tests {
         let at = window(0, 0, 340, 640);
         s.keep(Some(1), stamp(1, 1, 5), &body, 0);
         assert!(s.contains((170, 300), at, 1, 0));
+        assert!(s.held(1, 0));
         assert_eq!(s.page_started(), 2);
+        assert!(!s.held(1, 0), "forgotten as the page loads again");
         assert!(!s.contains((170, 300), at, 1, 0), "forgotten as the page starts again");
         assert_eq!(s.keep(Some(1), stamp(1, 1, 6), &body, 0), Kept::Older, "the old page, late");
         assert!(!s.contains((170, 300), at, 1, 0));

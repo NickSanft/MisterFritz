@@ -26,7 +26,7 @@
 //! even focusable (`WS_EX_NOACTIVATE`); only Arrange makes it so. Who gets
 //! the keyboard back is [`crate::keyboard`]'s to say.
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
@@ -38,7 +38,7 @@ use tauri::{
 
 use crate::overlay_machine::{
     hotkey_overlay_request, placement_settled, should_return_focus, Effect, HandshakeStage, Input,
-    Mode, ModeRequest, OverlayCore, OverlayRect, OverlayStatus, Phase, Refusal, Setter, CLOSING,
+    Mode, ModeRequest, OverlayCore, OverlayRect, OverlayStatus, Phase, PhaseName, Refusal, Setter, CLOSING,
     LEASE_TICK, NOT_OPEN, NO_READY_GLOBAL, OVERLAY_LABEL, OVERLAY_STATUS_EVENT, OVERLAY_TITLE,
     PRETEND_NO_READY_ENV, R1_RUNG, WATCHDOG,
 };
@@ -118,6 +118,52 @@ impl OverlayShared {
 
 /// The thread the event loop runs on, set at setup.
 static MAIN_THREAD: OnceLock<ThreadId> = OnceLock::new();
+
+/// The core's state as the mouse hook's procedure reads it, which may take
+/// no lock (managed state is looked up under one): stored at every step,
+/// still under `core`, packed so it is never read torn.
+static MIRROR: AtomicU64 = AtomicU64::new(0);
+/// The live window's HWND, beside `OverlayShared::hwnd`, for the same reader.
+static HWND_NOW: AtomicIsize = AtomicIsize::new(0);
+
+/// The avatar as the mouse hook sees it.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Mirror {
+    pub open: bool,
+    pub painted: bool,
+    pub arranging: bool,
+    pub parked: bool,
+    pub instance: u32,
+    pub hwnd: isize,
+}
+
+/// A status packed for [`MIRROR`]: the instance in the low 32 bits, then
+/// open, painted, arranging and parked.
+pub(crate) fn pack_mirror(s: &OverlayStatus) -> u64 {
+    u64::from(s.instance)
+        | u64::from(s.open) << 32
+        | u64::from(s.phase == PhaseName::Painted) << 33
+        | u64::from(s.mode == Mode::Arrange) << 34
+        | u64::from(s.parked) << 35
+}
+
+pub(crate) fn unpack_mirror(v: u64, hwnd: isize) -> Mirror {
+    Mirror {
+        open: v >> 32 & 1 == 1,
+        painted: v >> 33 & 1 == 1,
+        arranging: v >> 34 & 1 == 1,
+        parked: v >> 35 & 1 == 1,
+        #[allow(clippy::cast_possible_truncation)]
+        instance: v as u32,
+        hwnd,
+    }
+}
+
+/// The avatar now, from atomics only.
+pub(crate) fn mirror() -> Mirror {
+    unpack_mirror(MIRROR.load(Ordering::SeqCst), HWND_NOW.load(Ordering::SeqCst))
+}
 
 fn on_main_thread() -> bool {
     MAIN_THREAD.get() == Some(&thread::current().id())
@@ -217,6 +263,7 @@ async fn build_window(
     let _ = window.set_ignore_cursor_events(true);
     let hwnd = window_id(&window);
     shared.hwnd.store(hwnd, Ordering::SeqCst);
+    HWND_NOW.store(hwnd, Ordering::SeqCst);
     let _ = app.run_on_main_thread(move || {
         if !crate::non_rude::mark_non_rude(hwnd) {
             tracing::warn!("couldn't mark the avatar window NonRudeHWND");
@@ -257,6 +304,7 @@ fn window_id(window: &WebviewWindow) -> isize {
 /// The cells for a new window: its HWND, nothing remembered yet.
 fn adopt(shared: &OverlayShared, hwnd: isize) {
     shared.hwnd.store(hwnd, Ordering::SeqCst);
+    HWND_NOW.store(hwnd, Ordering::SeqCst);
     shared.return_to.store(0, Ordering::SeqCst);
     shared.window_parked.store(false, Ordering::SeqCst);
 }
@@ -278,6 +326,7 @@ fn going(shared: &OverlayShared, n: &impl Native) {
 /// window opens where this one stood.
 fn forget(shared: &OverlayShared) {
     shared.hwnd.store(0, Ordering::SeqCst);
+    HWND_NOW.store(0, Ordering::SeqCst);
     shared.return_to.store(0, Ordering::SeqCst);
     shared.window_parked.store(false, Ordering::SeqCst);
 }
@@ -518,6 +567,8 @@ fn step_effects(app: &AppHandle, input: Input) -> Result<(OverlayStatus, Vec<Eff
     shared
         .arranging
         .store(core.mode == Mode::Arrange, Ordering::SeqCst);
+    // Under `core`, so two steps' mirrors land in their steps' order.
+    MIRROR.store(pack_mirror(&status), Ordering::SeqCst);
     if on_main {
         // The window calls run inline, and may come straight back here.
         drop(core);
@@ -528,6 +579,8 @@ fn step_effects(app: &AppHandle, input: Input) -> Result<(OverlayStatus, Vec<Eff
         dispatch(app, &effects, false);
         drop(core);
     }
+    // The mouse hook looks again: in only while he can be clicked.
+    crate::hook::poke();
     Ok((status, effects))
 }
 
@@ -1662,5 +1715,50 @@ mod tests {
             no_ready_script(true).as_deref(),
             Some("window.__FRITZ_AVATAR_NO_READY__ = true;")
         );
+    }
+
+    /// The mouse hook's mirror holds each part of a status apart.
+    #[test]
+    fn the_mirror_round_trips() {
+        let closed = crate::overlay_machine::OverlayCore::new().status();
+        assert_eq!(
+            super::unpack_mirror(super::pack_mirror(&closed), 0),
+            super::Mirror { open: false, painted: false, arranging: false, parked: false, instance: 0, hwnd: 0 }
+        );
+        for (open, painted, arranging, parked, instance) in [
+            (true, true, false, false, u32::MAX),
+            (true, false, true, false, 1),
+            (false, false, false, true, 7),
+            (true, true, true, true, 0x8000_0001),
+        ] {
+            let mut s = closed.clone();
+            s.open = open;
+            s.phase = if painted { crate::overlay_machine::PhaseName::Painted } else { crate::overlay_machine::PhaseName::Shown };
+            s.mode = if arranging { crate::overlay_machine::Mode::Arrange } else { crate::overlay_machine::Mode::Locked };
+            s.parked = parked;
+            s.instance = instance;
+            let m = super::unpack_mirror(super::pack_mirror(&s), 42);
+            assert_eq!(m, super::Mirror { open, painted, arranging, parked, instance, hwnd: 42 }, "{s:?}");
+        }
+    }
+
+    /// Every step stores the mirror under `core`, and pokes the hook once
+    /// `core` is let go, whichever thread it ran on.
+    #[test]
+    fn the_mirror_follows_every_step() {
+        let src = include_str!("overlay_windows.rs").replace("\r\n", "\n");
+        let at = src.find("fn step_effects(").unwrap();
+        let body = &src[at..at + src[at..].find("\n}\n").unwrap()];
+        let stepped = body.find("core.step(input)?").unwrap();
+        let stored = body.find("MIRROR.store(pack_mirror(&status)").unwrap();
+        let first_drop = body.find("drop(core)").unwrap();
+        let last_drop = body.rfind("drop(core)").unwrap();
+        let poked = body.find("crate::hook::poke();").unwrap();
+        assert!(stepped < stored && stored < first_drop, "stored under core, after the step");
+        assert!(last_drop < poked, "poked once core is let go");
+        // The HWND beside it, wherever the shell's own is stored.
+        let code = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert_eq!(code.matches("shared.hwnd.store(").count(), 3);
+        assert_eq!(code.matches("HWND_NOW.store(").count(), 3);
     }
 }

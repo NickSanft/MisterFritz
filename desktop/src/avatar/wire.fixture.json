@@ -11,7 +11,8 @@
     "loaded": "avatar:loaded",
     "companionStatus": "companion:status",
     "companionConfig": "companion:config",
-    "companionSay": "companion:say"
+    "companionSay": "companion:say",
+    "hookStatus": "hook:status"
   },
   "hotkeys": {
     "arrange": "avatar:arrange"
@@ -99,9 +100,29 @@
     "noReadyEnv": "FRITZ_PRETEND_AVATAR_NO_READY",
     "noReadyGlobal": "__FRITZ_AVATAR_NO_READY__",
     "pretendSayEnv": "FRITZ_PRETEND_SAY",
-    "pretendPromptEnv": "FRITZ_PRETEND_PROMPT"
+    "pretendPromptEnv": "FRITZ_PRETEND_PROMPT",
+    "hookWhileHiddenEnv": "FRITZ_HOOK_WHILE_HIDDEN",
+    "pretendClickEnv": "FRITZ_PRETEND_CLICK"
   },
   "sayKeys": ["id", "text"],
+  "hookStatusKeys": [
+    "covered",
+    "events",
+    "gestures",
+    "installed",
+    "on",
+    "onShape",
+    "panicked",
+    "presses",
+    "putBack",
+    "slowestMicros",
+    "taken",
+    "why"
+  ],
+  "hookOff": {
+    "switch": "clicks on him are off in Settings",
+    "hidden": "he's hidden"
+  },
   "hitShape": { "maxRects": 6, "bands": 12, "minMove": 2, "keepMs": 5000, "staleMs": 15000, "most": 0.85 },
   "hitRectsSample": {
     "instance": 1,
@@ -160,6 +181,10 @@
     },
     "hotkeysBound": {
       "name": "hotkeys_bound",
+      "args": []
+    },
+    "mouseHookStatus": {
+      "name": "mouse_hook_status",
       "args": []
     },
     "powerDisplay": {

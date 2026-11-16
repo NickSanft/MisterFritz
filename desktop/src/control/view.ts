@@ -4,7 +4,36 @@
  */
 import type { AvatarStatus } from "../avatar/status";
 import type { LinkStatus } from "../shared/companion";
-import type { HotkeyAction, ModelInfo } from "./api";
+import type { HookStatus, HotkeyAction, ModelInfo } from "./api";
+
+/** What Settings › Fritz › Clicks on him says the switch does. */
+export const CLICKS_DESC =
+  "While he's on screen, Fritz watches the mouse buttons across the desktop to tell a click on him from one beside him. He keeps no record of where you click.";
+
+/** Settings › Diagnostics › The mouse hook: in or out and why, how quick
+ * it is, how often it went quiet and was put back (Windows dropped it, or
+ * the mouse was over an app run as administrator, which Windows never
+ * shows it), and whether it failed. */
+export function hookLine(s: HookStatus | null): string {
+  if (!s) return "Not known.";
+  const slowest = `${(s.slowestMicros / 1000).toFixed(2)} ms`;
+  const head = s.installed
+    ? s.events > 0
+      ? `In while he's on screen; the slowest answer took ${slowest}.`
+      : "In while he's on screen."
+    : s.why
+      ? `Out: ${s.why}.`
+      : "Out.";
+  const back = s.putBack > 0
+    ? ` It went quiet ${s.putBack === 1 ? "once" : `${s.putBack} times`} while the mouse moved, and Fritz put it back${s.putBack === 1 ? "" : " each time"}.`
+    : "";
+  const failed = !s.panicked
+    ? ""
+    : s.installed
+      ? " It failed, and lets every click through until it is put in again: turn Clicks on him off and on."
+      : " It failed, and lets every click through until it goes in again.";
+  return head + back + failed;
+}
 
 export interface Standing {
   /** One line on where he is. */

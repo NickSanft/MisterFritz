@@ -4,17 +4,27 @@ import {
   LOADED_CMD, RELOAD_EVENT, loadedArgs, parseStatus, vrmFetchError, type AvatarStatus,
 } from "../avatar/status";
 import {
-  CMD, COMPANION_STATUS_EVENT, HOTKEY_ACTIONS, HOTKEY_DEFAULTS, LOADED_EVENT, SECTIONS, SETTINGS_EVENT, WIZARD, args,
-  parseCompanionStatus, parseHotkeysBound, parseModelInfo, parseOpening, parseSection, parseSettings, type ModelInfo,
+  CMD, COMPANION_STATUS_EVENT, HOOK_KEYS, HOOK_STATUS_EVENT, HOTKEY_ACTIONS, HOTKEY_DEFAULTS, LOADED_EVENT, SECTIONS,
+  SETTINGS_EVENT, WIZARD, args, parseCompanionStatus, parseHookStatus, parseHotkeysBound, parseModelInfo, parseOpening,
+  parseSection, parseSettings, type HookStatus, type ModelInfo,
 } from "./api";
 import {
-  HOTKEY_DOES, connectionLines, hotkeyLine, identityLine, megabytes, modelLines, onThisPc, orPress, standing,
-  winNamed,
+  CLICKS_DESC, HOTKEY_DOES, connectionLines, hookLine, hotkeyLine, identityLine, megabytes, modelLines, onThisPc, orPress,
+  standing, winNamed,
 } from "./view";
 import { COMBOS, contrast, token } from "../shared/testContrast";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { LinkStatus } from "../shared/companion";
+
+/** The mouse hook out while he is hidden, and in. */
+const HOOK_OUT: HookStatus = {
+  on: true, installed: false, why: fixture.hookOff.hidden, events: 0, presses: 0, onShape: 0, covered: 0, taken: 0,
+  gestures: 0, slowestMicros: 0, putBack: 0, panicked: false,
+};
+const HOOK_IN: HookStatus = {
+  ...HOOK_OUT, installed: true, why: null, events: 812, presses: 9, onShape: 2, gestures: 1, slowestMicros: 41,
+};
 
 /** A status sample from the fixture, read as the page reads one. */
 function status(name: keyof typeof fixture.statusSamples): AvatarStatus {
@@ -153,6 +163,34 @@ describe("the control window's wire", () => {
     }
   });
 
+  /** Settings › Diagnostics › The mouse hook: its status is read from
+   * `mouse_hook_status` and heard as `hook:status`, strictly. */
+  it("reads the mouse hook's status strictly", () => {
+    expect(CMD.mouseHookStatus).toBe(fixture.commands.mouseHookStatus.name);
+    expect(fixture.commands.mouseHookStatus.args).toEqual([]);
+    expect(HOOK_STATUS_EVENT).toBe(fixture.events.hookStatus);
+    expect(HOOK_KEYS).toEqual([...fixture.hookStatusKeys].sort());
+    expect(parseHookStatus(HOOK_OUT)).toEqual(HOOK_OUT);
+    expect(parseHookStatus(HOOK_IN)).toEqual(HOOK_IN);
+    const { putBack: _, ...short } = HOOK_IN;
+    for (const bad of [
+      null,
+      [HOOK_IN],
+      short,
+      { ...HOOK_IN, x: 1 },
+      { ...HOOK_IN, on: "yes" },
+      { ...HOOK_IN, installed: 1 },
+      { ...HOOK_IN, panicked: null },
+      { ...HOOK_IN, why: 3 },
+      { ...HOOK_IN, events: -1 },
+      { ...HOOK_IN, slowestMicros: 0.5 },
+      { ...HOOK_IN, putBack: "2" },
+      { ...HOOK_IN, onShape: Number.NaN },
+    ]) {
+      expect(parseHookStatus(bad), JSON.stringify(bad)).toBeNull();
+    }
+  });
+
   it("asks only for the folders the shell opens", () => {
     for (const which of ["logs", "avatar"] as const) expect(fixture.folders).toContain(args.openFolder(which).which);
   });
@@ -160,7 +198,7 @@ describe("the control window's wire", () => {
   const settings = {
     version: 1,
     brain: { url: "ws://127.0.0.1:8001/companion", clientId: "nick-pc", clientName: "NICK-PC" },
-    avatar: { rect: null, scale: 1, parked: false, vrmPath: null, lookatCursor: true },
+    avatar: { rect: null, scale: 1, parked: false, vrmPath: null, lookatCursor: true, clicks: true },
     hotkeys: { prompt: "Ctrl+Alt+F", ptt: "Ctrl+Alt+Space", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" },
     diagnostics: { foregroundLog: false },
     theme: { theme: "dark", mood: "ink", accent: "brand", motion: 0.6, grain: true, motionUser: false },
@@ -169,7 +207,7 @@ describe("the control window's wire", () => {
   it("reads the settings it uses, strictly", () => {
     expect(parseSettings(settings)).toEqual({
       brain: { url: "ws://127.0.0.1:8001/companion", clientId: "nick-pc", clientName: "NICK-PC" },
-      avatar: { lookatCursor: true, vrmPath: null },
+      avatar: { lookatCursor: true, clicks: true, vrmPath: null },
       hotkeys: { prompt: "Ctrl+Alt+F", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" },
       diagnostics: { foregroundLog: false },
       theme: { theme: "dark", mood: "ink", accent: "brand", motion: 0.6, grain: true, motionUser: false },
@@ -181,6 +219,10 @@ describe("the control window's wire", () => {
       .toBe("D:/m/fritz.vrm");
     expect(parseSettings(null)).toBeNull();
     expect(parseSettings({ ...settings, avatar: { ...settings.avatar, lookatCursor: "yes" } })).toBeNull();
+    expect(parseSettings({ ...settings, avatar: { ...settings.avatar, clicks: false } })?.avatar.clicks).toBe(false);
+    expect(parseSettings({ ...settings, avatar: { ...settings.avatar, clicks: "yes" } })).toBeNull();
+    const { clicks: _c, ...noClicks } = settings.avatar;
+    expect(parseSettings({ ...settings, avatar: noClicks })).toBeNull();
     expect(parseSettings({ ...settings, avatar: { ...settings.avatar, vrmPath: 3 } })).toBeNull();
     expect(parseSettings({ ...settings, hotkeys: { ...settings.hotkeys, park: null } })).toBeNull();
     expect(parseSettings({ ...settings, diagnostics: {} })).toBeNull();
@@ -363,6 +405,36 @@ describe("what the control window says of his brain", () => {
       "ws://localhost.example/x", "ws://127.0.0.1.example/x", "not a url", ""]) {
       expect(onThisPc(url), url).toBe(false);
     }
+  });
+});
+
+describe("what Settings says of clicks on him", () => {
+  it("the switch says what is watched, and that no record is kept", () => {
+    expect(CLICKS_DESC).toMatch(/mouse buttons across the desktop/);
+    expect(CLICKS_DESC).toMatch(/keeps no record of where you click/);
+  });
+
+  it("the mouse hook's line: in and how quick, or out and why, and every time it went quiet and was put back", () => {
+    expect(hookLine(null)).toBe("Not known.");
+    expect(hookLine(HOOK_OUT)).toBe(`Out: ${fixture.hookOff.hidden}.`);
+    expect(hookLine({ ...HOOK_OUT, on: false, why: fixture.hookOff.switch })).toBe(
+      "Out: clicks on him are off in Settings.",
+    );
+    expect(hookLine({ ...HOOK_OUT, why: null })).toBe("Out.");
+    expect(hookLine(HOOK_IN)).toBe("In while he's on screen; the slowest answer took 0.04 ms.");
+    expect(hookLine({ ...HOOK_IN, slowestMicros: 1234 })).toBe("In while he's on screen; the slowest answer took 1.23 ms.");
+    expect(hookLine({ ...HOOK_IN, events: 0, slowestMicros: 0 })).toBe("In while he's on screen.");
+    // "In" only while it is in, whatever else it has heard.
+    expect(hookLine({ ...HOOK_IN, installed: false, why: "he's hidden" })).toBe("Out: he's hidden.");
+    expect(hookLine({ ...HOOK_IN, putBack: 1 })).toMatch(/ It went quiet once while the mouse moved, and Fritz put it back\.$/);
+    expect(hookLine({ ...HOOK_IN, putBack: 3 })).toMatch(/ It went quiet 3 times while the mouse moved, and Fritz put it back each time\.$/);
+    expect(hookLine({ ...HOOK_OUT, panicked: true })).toBe(
+      "Out: he's hidden. It failed, and lets every click through until it goes in again.",
+    );
+    // Failed while still in: what puts it in again.
+    expect(hookLine({ ...HOOK_IN, panicked: true })).toBe(
+      "In while he's on screen; the slowest answer took 0.04 ms. It failed, and lets every click through until it is put in again: turn Clicks on him off and on.",
+    );
   });
 });
 

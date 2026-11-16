@@ -14,10 +14,10 @@ import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { STATUS_EVENT, parseStatus, type AvatarStatus } from "../avatar/status";
 import {
-  COMPANION_STATUS_EVENT, LOADED_EVENT, SETTINGS_EVENT, WIZARD, arrange, avatarModel, avatarStatus, companionConnect, companionSay,
-  companionStatus, controlOpening, getSettings, getTokenPresent, hotkeysBound, openFolder, parseCompanionStatus,
-  parseSettings, reloadModel, setHotkey, setParked, setSetting, setToken, type ControlSettings, type HotkeyAction,
-  type HotkeysBound, type ModelInfo,
+  COMPANION_STATUS_EVENT, HOOK_STATUS_EVENT, LOADED_EVENT, SETTINGS_EVENT, WIZARD, arrange, avatarModel, avatarStatus,
+  companionConnect, companionSay, companionStatus, controlOpening, getSettings, getTokenPresent, hotkeysBound,
+  mouseHookStatus, openFolder, parseCompanionStatus, parseHookStatus, parseSettings, reloadModel, setHotkey, setParked,
+  setSetting, setToken, type ControlSettings, type HookStatus, type HotkeyAction, type HotkeysBound, type ModelInfo,
 } from "./api";
 import type { LinkStatus } from "../shared/companion";
 import { afterAsking } from "../shared/asking";
@@ -30,7 +30,7 @@ import { Brain } from "./sections/Brain";
 import { Hotkeys, type HotkeysProps } from "./sections/Hotkeys";
 import { ModelRows, type ModelRowsProps } from "./sections/Model";
 import type { BrainProps } from "./sections/Brain";
-import { orPress, standing } from "./view";
+import { CLICKS_DESC, hookLine, orPress, standing } from "./view";
 import { Wizard } from "./Wizard";
 import { wearTheme } from "./wear";
 
@@ -44,6 +44,17 @@ export function App(): JSX.Element {
   const [tokenPresent, setTokenPresent] = createSignal<boolean | null>(null);
   /** The keys the shell holds now, which may not be the ones set. */
   const [bound, setBound] = createSignal<HotkeysBound | null>(null);
+  /** The mouse hook, for Diagnostics: read with the rest, and kept up to
+   * date by the shell's word whenever it goes in or out. */
+  const [hook, setHook] = createSignal<HookStatus | null>(null);
+  /** Hook reports heard, so a late answer can't undo a newer one. */
+  let hookEvents = 0;
+  const readHook = (): void => {
+    const heard = hookEvents;
+    void mouseHookStatus().then((h) => {
+      if (h && heard === hookEvents) setHook(h);
+    }, () => {});
+  };
   /** The first run, shown in place of the sections; null until the shell
    * has said where to open, so neither view shows only to be replaced. */
   const [wizard, setWizard] = createSignal<boolean | null>(null);
@@ -92,6 +103,7 @@ export function App(): JSX.Element {
     } catch (e) {
       setProblem(`Couldn't ${ASKING}: ${typeof e === "string" ? e : String(e)}`);
     }
+    readHook();
   };
 
   const unlisten: Promise<UnlistenFn>[] = [];
@@ -103,6 +115,13 @@ export function App(): JSX.Element {
       if (s) setStatus(s);
     }));
     unlisten.push(listen<unknown>(SETTINGS_EVENT, (e) => took(parseSettings(e.payload))));
+    // The mouse hook went in or out.
+    unlisten.push(listen<unknown>(HOOK_STATUS_EVENT, (e) => {
+      const h = parseHookStatus(e.payload);
+      if (!h) return;
+      hookEvents += 1;
+      setHook(h);
+    }));
     // The avatar's page says where the brain's link stands, on every change.
     unlisten.push(listen<unknown>(COMPANION_STATUS_EVENT, (e) => {
       const s = parseCompanionStatus(e.payload);
@@ -266,6 +285,14 @@ export function App(): JSX.Element {
                   onChange={(on) => set("avatar.lookatCursor", on, "change that")}
                 />
               </Row>
+              <Row title="Clicks on him" desc={CLICKS_DESC}>
+                <Toggle
+                  ariaLabel="Clicks on him"
+                  on={settings()?.avatar.clicks ?? false}
+                  disabled={!settings()}
+                  onChange={(on) => void set("avatar.clicks", on, "change that").then(readHook)}
+                />
+              </Row>
             </Section>
 
             <Hotkeys {...hotkeysProps()} />
@@ -303,6 +330,7 @@ export function App(): JSX.Element {
                   onChange={(on) => set("diagnostics.foregroundLog", on, "change that")}
                 />
               </Row>
+              <Row title="The mouse hook" desc={hookLine(hook())} />
             </Section>
 
             <Section id="about" sigil="info" eyebrow="About" title={`Mister Fritz ${version()}`} desc="Fritz's body on the Windows desktop.">

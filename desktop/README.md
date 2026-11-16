@@ -42,9 +42,21 @@ on the placeholder.
 
 His page also tells the shell where his body is on his window: a few boxes
 round him, measured from the model itself, so a click on him can be told
-from one beside him or in the room over his head. Nothing acts on it yet
-(the mouse hook that will is the next step of plan 14's PR 5); it is the
-shape only, never anything about the pointer.
+from one beside him or in the room over his head. It is the shape only,
+never anything about the pointer.
+
+While he is on screen, a mouse hook (`src-tauri/src/hook.rs`) watches the
+mouse buttons across the desktop to tell a press on his body from one
+beside him. For now it only watches: a right-click or a double-click on him
+is logged as what it will do (his menu, the prompt), and every click still
+lands where it did. It is in only while he can be clicked: never while he
+is hidden or arranged, under a fullscreen app or presentation mode, on the
+lock screen or with the display asleep. It keeps no record of where you
+click (the log names gestures, never a point), ignores clicks a script or a
+remote tool injects, and lets the middle button, the wheel and moves pass
+untouched. Settings › Fritz › *Clicks on him* (`avatar.clicks`, on by
+default) turns it off, and Settings › Diagnostics › *The mouse hook* says
+whether it is in, why not, and the slowest answer it gave.
 
 Both windows wear `settings.theme`: the mood (`ink`, `dusk`, `midnight`),
 the accent (`brand`, `abyssal`, `ember`), dark or light, and the motion
