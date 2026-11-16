@@ -47,9 +47,11 @@ never anything about the pointer.
 
 While he is on screen, a mouse hook (`src-tauri/src/hook.rs`) watches the
 mouse buttons across the desktop to tell a press on his body from one
-beside him. For now it only watches: a right-click or a double-click on him
-is logged as what it will do (his menu, the prompt), and every click still
-lands where it did. It is in only while he can be clicked: never while he
+beside him. Right-click him for his menu, the tray's: it works by mouse,
+so the app you were in keeps the keyboard, and a click elsewhere (or 20 s)
+closes it. A double-click on him is only logged for now, as what it will
+do (the prompt); left clicks still land where they did. It is in only
+while he can be clicked: never while he
 is hidden or arranged, under a fullscreen app or presentation mode, on the
 lock screen or with the display asleep. It keeps no record of where you
 click (the log names gestures, never a point), ignores clicks a script or a

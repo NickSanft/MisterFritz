@@ -35,6 +35,10 @@ use windows::Win32::UI::Shell::{
     DefSubclassProc, RemoveWindowSubclass, SHQueryUserNotificationState, SetWindowSubclass,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
+    EnumThreadWindows, PostMessageW, SendMessageW, TrackPopupMenu, HMENU, TPM_LEFTALIGN, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TPM_TOPALIGN, WM_COMMAND, WM_NULL,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, GetClassNameW, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetShellWindow,
     GetTopWindow, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsIconic,
     IsWindow, IsWindowVisible, IsZoomed, SetForegroundWindow, SetLayeredWindowAttributes,
@@ -165,7 +169,7 @@ pub fn apply_toolwindow(window: isize) -> bool {
 }
 
 /// The subclass id: "FRIT".
-const PIN_ID: usize = 0x4652_4954;
+pub(crate) const PIN_ID: usize = 0x4652_4954;
 
 /// Keeps every rewrite of the extended style out of Alt-Tab, and takes
 /// itself off as the window goes.
@@ -209,7 +213,7 @@ pub fn pin_toolwindow(window: isize) -> bool {
 }
 
 /// The deactivation watch's subclass id: "FRDA".
-const DEACTIVATE_ID: usize = 0x4652_4441;
+pub(crate) const DEACTIVATE_ID: usize = 0x4652_4441;
 
 /// Calls the watcher stored with the subclass when the window stops being
 /// the active one, and takes itself off as the window goes.
@@ -861,6 +865,81 @@ pub fn foreground_busy() -> bool {
     }
 }
 
+// His menu (popup.rs): on the tray's window, on the main thread.
+
+/// Show `menu` at `at` on `owner` by mouse, and the id chosen (0 for none):
+/// `TPM_RETURNCMD`, so nothing is queued and the caller sends the choice on
+/// at once; `TPM_RIGHTBUTTON`, so either button picks. Main thread: the
+/// menu's modal loop runs here.
+pub fn track_menu(menu: isize, owner: isize, at: (i32, i32)) -> u32 {
+    if menu == 0 || owner == 0 {
+        return 0;
+    }
+    let flags = TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD;
+    // SAFETY: a menu and a window of this thread; a stale one only fails.
+    let id = unsafe { TrackPopupMenu(HMENU(menu as *mut c_void), flags, at.0, at.1, None, hwnd(owner), None) };
+    u32::try_from(id.0).unwrap_or(0)
+}
+
+/// A menu item's id to `owner` as `WM_COMMAND`, at once (muda's subclass on
+/// the tray's window turns it into the tray's own menu event).
+pub fn send_command(owner: isize, id: u32) {
+    if owner == 0 {
+        return;
+    }
+    // SAFETY: a window of this thread; the id is a menu item's.
+    unsafe { SendMessageW(hwnd(owner), WM_COMMAND, Some(WPARAM(id as usize)), Some(LPARAM(0))) };
+}
+
+/// The benign message Windows documents after a popup menu.
+pub fn post_null(owner: isize) {
+    if owner == 0 {
+        return;
+    }
+    // SAFETY: a window handle; a stale one only makes the post fail.
+    let _ = unsafe { PostMessageW(Some(hwnd(owner)), WM_NULL, WPARAM(0), LPARAM(0)) };
+}
+
+/// Whether any of `rects` holds `at`.
+pub(crate) fn any_holds(rects: &[Bounds], at: (i32, i32)) -> bool {
+    rects.iter().any(|&r| crate::hit_shape::holds(r, at))
+}
+
+/// The class Windows gives a popup menu's window.
+const MENU_CLASS: &str = "#32768";
+
+/// Whether a window of the menu's thread is one of its menus: shown, and of
+/// the menu class (his own window and Settings are that thread's too).
+pub(crate) fn is_menu_window(visible: bool, menu_class: bool) -> bool {
+    visible && menu_class
+}
+
+/// Whether `at` is on a menu `thread` shows (his menu, or one of its
+/// submenus): the visible menu windows of that thread. For the hook's
+/// owner thread, never the procedure.
+pub fn our_menu_at(thread: u32, at: (i32, i32)) -> bool {
+    unsafe extern "system" fn each(h: HWND, data: LPARAM) -> BOOL {
+        // SAFETY: `data` is the Vec below, alive for the whole enumeration.
+        let rects = unsafe { &mut *(data.0 as *mut Vec<Bounds>) };
+        // SAFETY: plain queries on a window of the thread being walked.
+        if is_menu_window(unsafe { IsWindowVisible(h) }.as_bool(), class_is(h, MENU_CLASS)) {
+            let mut r = RECT::default();
+            // SAFETY: a window handle and a valid out-pointer.
+            if unsafe { GetWindowRect(h, &raw mut r) }.is_ok() {
+                rects.push(Bounds::of(r));
+            }
+        }
+        BOOL(1)
+    }
+    if thread == 0 {
+        return false;
+    }
+    let mut rects: Vec<Bounds> = Vec::new();
+    // SAFETY: a callback that only pushes into `rects`, which outlives it.
+    let _ = unsafe { EnumThreadWindows(thread, Some(each), LPARAM(&raw mut rects as isize)) };
+    any_holds(&rects, at)
+}
+
 /// Half a double-click rectangle's side, at least 1 px.
 pub(crate) fn half(cx: i32) -> i32 {
     (cx / 2).max(1)
@@ -1476,6 +1555,46 @@ mod under_the_mouse {
         ] {
             assert_eq!(busy_gui(flags, capture), want, "{flags} {capture}");
         }
+    }
+
+    #[test]
+    fn any_holds_table() {
+        let menus = [HERE, ELSEWHERE];
+        assert!(super::any_holds(&menus, (50, 50)));
+        assert!(super::any_holds(&menus, (250, 99)));
+        assert!(!super::any_holds(&menus, (150, 50)), "between them");
+        assert!(!super::any_holds(&menus, (100, 50)), "the right edge is outside");
+        assert!(!super::any_holds(&[], (50, 50)));
+        // No menu of this test's thread is open.
+        // SAFETY: this thread's id.
+        let me = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+        assert!(!super::our_menu_at(me, (50, 50)));
+        assert!(!super::our_menu_at(0, (50, 50)));
+    }
+
+    #[test]
+    fn only_a_shown_menu_window_counts_as_the_menu() {
+        assert!(super::is_menu_window(true, true));
+        assert!(!super::is_menu_window(true, false), "his window, Settings");
+        assert!(!super::is_menu_window(false, true), "a menu gone");
+        assert!(!super::is_menu_window(false, false));
+        let src = include_str!("windows_ext.rs").replace("\r\n", "\n");
+        let at = src.find("pub fn our_menu_at(").unwrap();
+        let body = &src[at..at + src[at..].find("\n}\n").unwrap()];
+        assert!(body.contains("if is_menu_window(unsafe { IsWindowVisible(h) }.as_bool(), class_is(h, MENU_CLASS)) {\n            let mut r = RECT::default();"));
+        assert!(body.contains("EnumThreadWindows(thread, Some(each),") && body.trim_end().ends_with("any_holds(&rects, at)"));
+        // The class it looks for is the one Windows gives a hidden window's
+        // class back as: a check on a real window of this test's thread.
+        let w = super::tests::Hidden::new(windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE(0));
+        assert!(super::class_is(w.0, "Static") && !super::class_is(w.0, super::MENU_CLASS));
+    }
+
+    #[test]
+    fn the_menu_calls_do_nothing_without_a_window() {
+        assert_eq!(super::track_menu(0, 7, (0, 0)), 0);
+        assert_eq!(super::track_menu(7, 0, (0, 0)), 0);
+        super::send_command(0, 1003);
+        super::post_null(0);
     }
 
     #[test]

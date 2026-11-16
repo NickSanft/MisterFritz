@@ -410,6 +410,7 @@ describe("what the control window says of his brain", () => {
 
 describe("what Settings says of clicks on him", () => {
   it("the switch says what is watched, and that no record is kept", () => {
+    expect(CLICKS_DESC).toMatch(/^Right-click him for his menu\. /);
     expect(CLICKS_DESC).toMatch(/mouse buttons across the desktop/);
     expect(CLICKS_DESC).toMatch(/keeps no record of where you click/);
   });

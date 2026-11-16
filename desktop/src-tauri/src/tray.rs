@@ -10,10 +10,17 @@
 //! click by the id's low 16 bits, so every object built shortens the tray's
 //! life: rebuilding the submenu's fourteen objects for each change would
 //! spend them three times as fast.
+//!
+//! His menu (a right-click on him) is this menu, shown by popup.rs on the
+//! tray's own window. A rebuild waits while any menu of Fritz's is open:
+//! the check and the swap both run on the main thread, where a menu opens,
+//! so one can't open between them.
+
+use std::sync::atomic::{AtomicIsize, Ordering};
 
 use serde_json::{json, Value};
 use tauri::menu::{
-    CheckMenuItem, CheckMenuItemBuilder, Menu, MenuBuilder, MenuEvent, Submenu, SubmenuBuilder,
+    CheckMenuItem, CheckMenuItemBuilder, ContextMenu, Menu, MenuBuilder, MenuEvent, Submenu, SubmenuBuilder,
 };
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, Wry};
@@ -29,6 +36,10 @@ const ARRANGE: &str = "arrange";
 const SETTINGS: &str = "settings";
 const LOGS: &str = "logs";
 const QUIT: &str = "quit";
+
+/// The menu the tray holds now, as Win32 knows it, for his menu; 0 before
+/// the first. Set on the main thread with the menu.
+static HMENU: AtomicIsize = AtomicIsize::new(0);
 
 /// The Appearance submenu's choices, as Settings › Appearance names them:
 /// (the setting's value, the item's id, its label).
@@ -201,9 +212,11 @@ fn menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
     app.manage(build_look(app)?);
+    let held = menu(app)?;
+    HMENU.store(held.hpopupmenu().unwrap_or(0), Ordering::SeqCst);
     let mut tray = TrayIconBuilder::with_id(TRAY_ID)
         .tooltip("Mister Fritz")
-        .menu(&menu(app)?)
+        .menu(&held)
         .show_menu_on_left_click(true)
         .on_menu_event(on_menu);
     if let Some(icon) = app.default_window_icon() {
@@ -213,17 +226,45 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Rebuild the menu for the current state. Main thread.
+/// Rebuild the menu for the current state, on the main thread: inline
+/// when already there, else posted.
 pub fn refresh(app: &AppHandle) {
+    let h = app.clone();
+    let _ = app.run_on_main_thread(move || rebuild(&h));
+}
+
+/// Main thread. While a menu of Fritz's is open the rebuild only marks
+/// itself due, and runs once the menu has closed (popup.rs).
+fn rebuild(app: &AppHandle) {
+    if !crate::popup::may_rebuild() {
+        tracing::debug!("the tray menu waits to be rebuilt: a menu of Fritz's is open");
+        return;
+    }
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
     };
     match menu(app) {
         Ok(m) => {
+            let held = m.hpopupmenu().unwrap_or(0);
             let _ = tray.set_menu(Some(m));
+            HMENU.store(held, Ordering::SeqCst);
+            tracing::debug!("the tray menu was rebuilt");
         }
         Err(e) => tracing::warn!(error = %e, "couldn't rebuild the tray menu"),
     }
+}
+
+/// The menu the tray holds now; 0 before the first.
+pub fn hmenu() -> isize {
+    HMENU.load(Ordering::SeqCst)
+}
+
+/// The tray's own hidden window (tray-icon's `tray_icon_app`), as an
+/// integer; 0 when there is no tray. On the main thread it runs inline.
+pub(crate) fn window(app: &AppHandle) -> isize {
+    app.tray_by_id(TRAY_ID)
+        .and_then(|t| t.with_inner_tray_icon(|i| i.window_handle() as isize).ok())
+        .unwrap_or(0)
 }
 
 fn on_menu(app: &AppHandle, event: MenuEvent) {
@@ -412,6 +453,23 @@ mod tests {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), labels.len(), "{labels:?}");
+    }
+
+    /// A rebuild runs on the main thread, and checks for an open menu first.
+    #[test]
+    fn a_rebuild_checks_for_an_open_menu_first() {
+        let src = include_str!("tray.rs").replace("\r\n", "\n");
+        let at = src.find("pub fn refresh(").unwrap();
+        let refresh = &src[at..at + src[at..].find("\n}\n").unwrap()];
+        assert!(refresh.contains("run_on_main_thread(move || rebuild(&h))"), "{refresh}");
+        let at = src.find("fn rebuild(").unwrap();
+        let rebuild = &src[at..at + src[at..].find("\n}\n").unwrap()];
+        let first = rebuild[rebuild.find('{').unwrap() + 1..].trim_start();
+        assert!(
+            first.starts_with("if !crate::popup::may_rebuild() {\n        tracing::debug!(\"the tray menu waits to be rebuilt: a menu of Fritz's is open\");\n        return;\n    }"),
+            "{first}"
+        );
+        assert!(rebuild.find("HMENU.store(held").unwrap() > rebuild.find("tray.set_menu(Some(m))").unwrap());
     }
 
     #[test]

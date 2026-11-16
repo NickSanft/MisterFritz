@@ -1,8 +1,8 @@
 //! The mouse hook: a press on Fritz's body is his. A `WH_MOUSE_LL` hook sees
 //! every mouse button pressed on the desktop and decides, as it is pressed,
-//! whether it is on him; this commit only watches. Nothing is swallowed and
-//! nothing is acted on: a right-click or a double-click on him is logged as
-//! what it would do, and the next commits act on them one at a time (`ACTS`).
+//! whether it is on him. A right-click on him opens his menu (popup.rs); a
+//! double-click is still only watched, logged as what it would do, until a
+//! later commit acts on it (`ACTS`).
 //!
 //! **What it sees, and what it keeps.** Button presses and releases. Moves
 //! and the wheel are only counted, never looked at. It keeps the last left
@@ -143,6 +143,9 @@ pub(crate) struct Counts {
     gestures: AtomicU64,
     slowest_ns: AtomicU64,
     put_back: AtomicU32,
+    /// His menu was asked for and no real press has come since: a menu
+    /// late to open (the main thread busy) opens only while this holds.
+    asked: AtomicBool,
 }
 
 impl Counts {
@@ -156,6 +159,7 @@ impl Counts {
             gestures: AtomicU64::new(0),
             slowest_ns: AtomicU64::new(0),
             put_back: AtomicU32::new(0),
+            asked: AtomicBool::new(false),
         }
     }
 }
@@ -176,8 +180,10 @@ static TO_OWNER: OnceLock<Sender<Msg>> = OnceLock::new();
 enum Msg {
     /// Look now: an overlay step, a display change, a setting.
     Poke,
-    /// The procedure decided a gesture: acted on, or (`would`) only watched.
-    Gesture { g: Gesture, would: bool },
+    /// The procedure decided a gesture: acted on, or (`would`) only watched;
+    /// `menu` is his menu's number when it was made (0: none up), and
+    /// `pretend` marks debug builds' pretend click.
+    Gesture { g: Gesture, would: bool, menu: u32, pretend: bool },
     /// Take the hook out and end; acked.
     Stop(mpsc::SyncSender<()>),
 }
@@ -216,7 +222,7 @@ pub(crate) struct Limits {
     pub half_h: i32,
 }
 
-/// What a press on him, or one while a menu of ours or the prompt waits,
+/// What a press on him, or one while his menu is up or the prompt waits,
 /// asks of the shell.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Gesture {
@@ -224,8 +230,8 @@ pub(crate) enum Gesture {
     Menu { at: (i32, i32) },
     /// Two left presses on him within Windows' time and rectangle.
     DoubleClick,
-    /// A press while a menu of ours is up or the prompt waits: on him
-    /// (`his`) or elsewhere. It ends the menu or the waiting prompt.
+    /// A press while his menu is up or the prompt waits: on him (`his`) or
+    /// elsewhere. It ends the menu or the waiting prompt.
     Pressed { at: (i32, i32), his: bool },
 }
 
@@ -241,10 +247,11 @@ enum Held {
     Menu,
 }
 
-/// What else is up that a press may end.
+/// What else is up that a press may end: his menu (its number; 0 when
+/// none is up) and the waiting prompt.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Ctx {
-    pub menu_up: bool,
+    pub menu: u32,
     pub waiting: bool,
 }
 
@@ -258,15 +265,15 @@ pub(crate) struct Tracker {
 }
 
 /// Which buttons are acted on (swallowed, and their gestures done) rather
-/// than only watched: nothing yet. The right-click comes with the next
-/// commit, the double-click two after.
+/// than only watched: the right, for his menu. The double-click comes two
+/// commits later.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Acts {
     pub left: bool,
     pub right: bool,
 }
 
-pub(crate) const ACTS: Acts = Acts { left: false, right: false };
+pub(crate) const ACTS: Acts = Acts { left: false, right: true };
 
 /// What becomes of one event.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -292,7 +299,8 @@ pub(crate) enum Look {
 /// What `look` asks of the desktop: atomics and plain reads.
 pub(crate) trait Scene {
     fn armed(&self) -> bool;
-    /// The switch is on and `why_off` says nothing.
+    /// The switch is on, `why_off` says nothing, and no other menu of
+    /// Fritz's (the tray icon's own) is open.
     fn gate_open(&self) -> bool;
     /// His window; 0 when none.
     fn avatar(&self) -> isize;
@@ -342,7 +350,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
             TRACKER.with(|t| {
                 // Never re-entered, but a busy tracker only lets it pass.
                 t.try_borrow_mut()
-                    .is_ok_and(|mut t| decide(&Live, &mut t, ctx_now(), &COUNTS, msg, info, deliver))
+                    .is_ok_and(|mut t| decide(&Live, &mut t, ctx_now, &COUNTS, msg, info, deliver))
             })
         })
     };
@@ -372,10 +380,10 @@ fn note_slowest(counts: &Counts, started: Instant) {
     counts.slowest_ns.fetch_max(ns, Ordering::Relaxed);
 }
 
-/// The menu and the waiting prompt come with later commits.
+/// His menu, if it is up; the waiting prompt comes with a later commit.
 fn ctx_now() -> Ctx {
     Ctx {
-        menu_up: false,
+        menu: crate::popup::his_menu(),
         waiting: false,
     }
 }
@@ -392,7 +400,7 @@ fn deliver(m: Msg) {
 fn decide(
     s: &impl Scene,
     t: &mut Tracker,
-    cx: Ctx,
+    cx: impl FnOnce() -> Ctx,
     counts: &Counts,
     msg: u32,
     info: &MSLLHOOKSTRUCT,
@@ -403,7 +411,13 @@ fn decide(
     };
     if e.edge == Edge::Down && !e.injected {
         counts.presses.fetch_add(1, Ordering::Relaxed);
+        // A press after a right-click: a menu not yet open stays shut.
+        counts.asked.store(false, Ordering::SeqCst);
     }
+    // Which menu is up, read after the answer is cleared: a menu opening
+    // now either finds the answer gone, or is seen here, and this press
+    // ends it (popup::show stores, then reads, too).
+    let cx = cx();
     let mut seen = None;
     let (his, g) = t.step(
         &e,
@@ -425,11 +439,16 @@ fn decide(
     if a.swallow {
         counts.taken.fetch_add(1, Ordering::Relaxed);
     }
+    if matches!(a.act, Some(Gesture::Menu { .. })) {
+        counts.asked.store(true, Ordering::SeqCst);
+    }
     if let Some(g) = a.act.or(a.would) {
         counts.gestures.fetch_add(1, Ordering::Relaxed);
         send(Msg::Gesture {
             g,
             would: a.act.is_none(),
+            menu: cx.menu,
+            pretend: false,
         });
     }
     a.swallow
@@ -455,6 +474,12 @@ pub(crate) fn event_of(msg: u32, x: i32, y: i32, time: u32, flags: u32) -> Optio
         time,
         injected: flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED) != 0,
     })
+}
+
+impl Ctx {
+    fn menu_up(self) -> bool {
+        self.menu != 0
+    }
 }
 
 impl Tracker {
@@ -502,10 +527,10 @@ impl Tracker {
                 *h = Held::No;
             }
             self.first = None;
-            let g = (cx.menu_up || cx.waiting).then_some(Gesture::Pressed { at: e.at, his: false });
+            let g = (cx.menu_up() || cx.waiting).then_some(Gesture::Pressed { at: e.at, his: false });
             return (false, g);
         }
-        if cx.menu_up {
+        if cx.menu_up() {
             if let Some(h) = self.hold(e.button) {
                 *h = Held::Yes;
             }
@@ -650,8 +675,10 @@ impl Scene for Live {
         FLAGS.armed.load(Ordering::Relaxed)
     }
     fn gate_open(&self) -> bool {
+        // The tray icon's own menu open: presses are its, so it closes as
+        // any menu does.
         let clicks = CLICKS_ON.load(Ordering::Relaxed);
-        why_off(&inputs_now(clicks, false)).is_none()
+        why_off(&inputs_now(clicks, false)).is_none() && !crate::popup::other_menu_up()
     }
     fn avatar(&self) -> isize {
         overlay_windows::mirror().hwnd
@@ -955,7 +982,12 @@ fn run_pretend_with(p: Pretend, avatar: isize, limits: Limits, send: impl Fn(Msg
             time: 1_000 + dt,
             ..Default::default()
         };
-        decide(&scene, &mut t, ctx_now(), &counts, msg, &info, &send);
+        decide(&scene, &mut t, ctx_now, &counts, msg, &info, |m| {
+            send(match m {
+                Msg::Gesture { g, would, menu, .. } => Msg::Gesture { g, would, menu, pretend: true },
+                other => other,
+            });
+        });
     }
 }
 
@@ -966,8 +998,8 @@ fn gesture_line(g: Gesture, would: bool) -> &'static str {
         (Gesture::DoubleClick, true) => "a double-click on him: the prompt would open (clicks on him are only watched)",
         (Gesture::Menu { .. }, false) => "a right-click on him: his menu",
         (Gesture::DoubleClick, false) => "a double-click on him: the prompt",
-        (Gesture::Pressed { his: true, .. }, _) => "a press on him while a menu or the prompt was up",
-        (Gesture::Pressed { his: false, .. }, _) => "a press elsewhere while a menu or the prompt was up",
+        (Gesture::Pressed { his: true, .. }, _) => "a press on him while his menu or the prompt was up",
+        (Gesture::Pressed { his: false, .. }, _) => "a press elsewhere while his menu or the prompt was up",
     }
 }
 
@@ -1017,10 +1049,7 @@ fn owner(app: &AppHandle, rx: &mpsc::Receiver<Msg>, while_hidden: bool, mut pret
                 let _ = ack.send(());
                 return;
             }
-            Ok(Msg::Gesture { g, would }) => match g {
-                Gesture::Pressed { .. } => tracing::debug!("{}", gesture_line(g, would)),
-                _ => tracing::info!("{}", gesture_line(g, would)),
-            },
+            Ok(Msg::Gesture { g, would, menu, pretend }) => act(g, would, menu, pretend),
             Ok(Msg::Poke) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
@@ -1037,7 +1066,16 @@ fn owner(app: &AppHandle, rx: &mpsc::Receiver<Msg>, while_hidden: bool, mut pret
                 state_line(None)
             }
             Change::Failed(e) => format!("the mouse hook couldn't go in: {e}"),
-            Change::Removed | Change::Same => state_line(why),
+            Change::Removed => {
+                // No hook to report a press elsewhere: his menu goes with
+                // it, and one asked for and not yet open never opens.
+                COUNTS.asked.store(false, Ordering::SeqCst);
+                if let Some(up) = end_on_out(crate::popup::his_menu()) {
+                    crate::popup::end(up, crate::popup::Ended::HookOut);
+                }
+                state_line(why)
+            }
+            Change::Same => state_line(why),
         };
         INSTALLED.store(running.is_some(), Ordering::SeqCst);
         *WHY.lock().unwrap_or_else(PoisonError::into_inner) = if running.is_some() { None } else { why.or(Some(OFF_REFUSED)) };
@@ -1114,6 +1152,76 @@ fn owner(app: &AppHandle, rx: &mpsc::Receiver<Msg>, while_hidden: bool, mut pret
             }
         }
     }
+}
+
+/// What the owner thread does with a gesture: his menu opened (or, for a
+/// pretend, said), his menu ended by a press on him or off it, and the
+/// rest logged. Gestures only, never a point.
+fn act(g: Gesture, would: bool, menu: u32, pretend: bool) {
+    if matches!(g, Gesture::Pressed { .. }) {
+        tracing::debug!("{}", gesture_line(g, would));
+    } else {
+        tracing::info!("{}", gesture_line(g, would));
+    }
+    match act_of(g, would, menu, pretend, |at| windows_ext::our_menu_at(crate::popup::main_thread(), at)) {
+        Do::Ask(at) => {
+            crate::popup::ask(at);
+        }
+        Do::Pretend(at) => {
+            crate::popup::pretend_ask(at);
+        }
+        Do::End(n) => {
+            crate::popup::end(n, crate::popup::Ended::Elsewhere);
+        }
+        Do::Nothing => {}
+    }
+}
+
+/// What the owner thread does with a gesture.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Do {
+    /// Show his menu at the release point.
+    Ask((i32, i32)),
+    /// Debug builds' pretend: say what would open, draw nothing.
+    Pretend((i32, i32)),
+    /// End his menu numbered so.
+    End(u32),
+    Nothing,
+}
+
+/// A gesture's act: an acted right-click asks for his menu (or, a pretend,
+/// only says it); a press while his menu (`menu`) is up ends it unless it
+/// is on the menu itself (`on_menu`, asked only for a press beside him);
+/// anything else, or a gesture only watched, does nothing.
+pub(crate) fn act_of(g: Gesture, would: bool, menu: u32, pretend: bool, on_menu: impl FnOnce((i32, i32)) -> bool) -> Do {
+    match g {
+        Gesture::Menu { at } if !would => {
+            if pretend {
+                Do::Pretend(at)
+            } else {
+                Do::Ask(at)
+            }
+        }
+        Gesture::Pressed { at, his } if menu != 0 && ends_menu(his, || on_menu(at)) => Do::End(menu),
+        _ => Do::Nothing,
+    }
+}
+
+/// His menu to end as the hook goes out: the one up, if any.
+pub(crate) fn end_on_out(up: u32) -> Option<u32> {
+    (up != 0).then_some(up)
+}
+
+/// Whether his menu was asked for with no real press since, taking the
+/// answer: `popup::show`'s question on the main thread.
+pub fn take_asked() -> bool {
+    COUNTS.asked.swap(false, Ordering::SeqCst)
+}
+
+/// Whether a press while his menu is up ends it: one on him does, and one
+/// elsewhere unless it is on the menu itself (`on_menu`, asked only then).
+pub(crate) fn ends_menu(his: bool, on_menu: impl FnOnce() -> bool) -> bool {
+    his || !on_menu()
 }
 
 /// A panic of the procedure, said once: to the log, to crash.log and to
@@ -1196,7 +1304,7 @@ mod tests {
     use super::*;
 
     const L: Limits = Limits { ms: 500, half_w: 2, half_h: 3 };
-    const FREE: Ctx = Ctx { menu_up: false, waiting: false };
+    const FREE: Ctx = Ctx { menu: 0, waiting: false };
 
     fn ev(button: Button, edge: Edge, at: (i32, i32), time: u32) -> Event {
         Event { button, edge, at, time, injected: false }
@@ -1352,8 +1460,8 @@ mod tests {
 
     #[test]
     fn tracker_with_a_menu_or_a_waiting_prompt() {
-        let menu = Ctx { menu_up: true, waiting: false };
-        let waiting = Ctx { menu_up: false, waiting: true };
+        let menu = Ctx { menu: 3, waiting: false };
+        let waiting = Ctx { menu: 0, waiting: true };
         // A press on him with a menu up: his, it ends the menu, and its
         // release opens no other.
         let mut t = Tracker::NEW;
@@ -1415,7 +1523,7 @@ mod tests {
         // Nothing acted on: nothing swallowed, the gestures only watched.
         assert_eq!(applied(true, Some(menu), &r, none), a(false, None, Some(menu)));
         assert_eq!(applied(true, Some(Gesture::DoubleClick), &l, none), a(false, None, Some(Gesture::DoubleClick)));
-        assert_eq!(ACTS, none, "this commit only watches");
+        assert_eq!(ACTS, right, "the right button acts: his menu");
         // The right button acted on.
         assert_eq!(applied(true, Some(menu), &r, right), a(true, Some(menu), None));
         assert_eq!(applied(true, Some(Gesture::DoubleClick), &l, right), a(false, None, Some(Gesture::DoubleClick)));
@@ -1717,6 +1825,119 @@ mod tests {
         assert!(!f.armed.load(Ordering::SeqCst));
     }
 
+    /// A right-click on him is his: its press and release swallowed, his
+    /// menu asked for at the release. With his menu up, a press says which
+    /// menu it was made under.
+    #[test]
+    fn a_right_click_on_him_is_his_and_opens_his_menu() {
+        let info = |x: i32, time: u32| MSLLHOOKSTRUCT { pt: POINT { x, y: 50 }, time, ..Default::default() };
+        let s = scene();
+        let c = Counts::new();
+        let mut t = Tracker::NEW;
+        let sent = RefCell::new(Vec::new());
+        let send = |m: Msg| {
+            if let Msg::Gesture { g, would, menu, .. } = m {
+                sent.borrow_mut().push((g, would, menu));
+            }
+        };
+        assert!(decide(&s, &mut t, || FREE, &c, WM_RBUTTONDOWN, &info(50, 0), send), "the press swallowed");
+        assert!(decide(&s, &mut t, || FREE, &c, WM_RBUTTONUP, &info(60, 5), send), "the release swallowed");
+        assert_eq!(*sent.borrow(), [(Gesture::Menu { at: (60, 50) }, false, 0)]);
+        assert_eq!(c.taken.load(Ordering::Relaxed), 2);
+        assert!(c.asked.load(Ordering::SeqCst), "his menu asked for");
+        // A left press on him isn't swallowed yet; as any real press, it
+        // keeps a menu not yet open from opening.
+        assert!(!decide(&s, &mut t, || FREE, &c, WM_LBUTTONDOWN, &info(50, 100), send));
+        assert!(!c.asked.load(Ordering::SeqCst));
+        // An injected press doesn't.
+        c.asked.store(true, Ordering::SeqCst);
+        let fake = MSLLHOOKSTRUCT { flags: LLMHF_INJECTED, ..info(500, 200) };
+        decide(&s, &mut t, || FREE, &c, WM_LBUTTONDOWN, &fake, send);
+        assert!(c.asked.load(Ordering::SeqCst));
+        // His menu (number 4) up: a press beside him says so, and passes.
+        sent.borrow_mut().clear();
+        let up = Ctx { menu: 4, waiting: false };
+        let beside = FakeScene { shape: false, ..scene() };
+        assert!(!decide(&beside, &mut t, || up, &c, WM_LBUTTONDOWN, &info(50, 900), send));
+        assert_eq!(*sent.borrow(), [(Gesture::Pressed { at: (50, 50), his: false }, false, 4)]);
+        assert!(!c.asked.load(Ordering::SeqCst), "a press elsewhere keeps a late menu shut");
+        // So does any other real button.
+        c.asked.store(true, Ordering::SeqCst);
+        decide(&beside, &mut t, || up, &c, WM_MBUTTONDOWN, &info(50, 950), send);
+        assert!(!c.asked.load(Ordering::SeqCst), "a middle press too");
+    }
+
+    /// `popup::show` takes the "asked" answer: a menu opens once per
+    /// right-click, never again from an answer already taken. (The live
+    /// cell: no other test touches it.)
+    #[test]
+    fn the_asked_answer_is_taken_once() {
+        COUNTS.asked.store(true, Ordering::SeqCst);
+        assert!(take_asked());
+        assert!(!take_asked(), "taken");
+        assert!(!COUNTS.asked.load(Ordering::SeqCst));
+    }
+
+    /// What the owner thread does with each gesture, and only that.
+    #[test]
+    fn act_of_table() {
+        const AT: (i32, i32) = (12, 34);
+        let menu = Gesture::Menu { at: AT };
+        let on = Gesture::Pressed { at: AT, his: true };
+        let beside = Gesture::Pressed { at: AT, his: false };
+        let never = |_: (i32, i32)| -> bool { panic!("the menu isn't asked about") };
+        assert_eq!(act_of(menu, false, 0, false, never), Do::Ask(AT));
+        assert_eq!(act_of(menu, false, 0, true, never), Do::Pretend(AT), "a pretend never draws a menu");
+        assert_eq!(act_of(menu, true, 0, false, never), Do::Nothing, "only watched");
+        assert_eq!(act_of(on, false, 4, false, never), Do::End(4), "a press on him");
+        assert_eq!(act_of(beside, false, 4, false, |at| { assert_eq!(at, AT); false }), Do::End(4), "elsewhere");
+        assert_eq!(act_of(beside, false, 4, false, |_| true), Do::Nothing, "on the menu itself");
+        assert_eq!(act_of(on, false, 0, false, never), Do::Nothing, "no menu up");
+        assert_eq!(act_of(Gesture::DoubleClick, true, 4, false, never), Do::Nothing);
+        assert_eq!(end_on_out(0), None);
+        assert_eq!(end_on_out(9), Some(9));
+        // act carries each out, and the procedure asks which menu is up.
+        let src = source("hook");
+        let act = body(&src, "fn act(");
+        for arm in [
+            "act_of(g, would, menu, pretend, |at| windows_ext::our_menu_at(crate::popup::main_thread(), at))",
+            "Do::Ask(at) => {\n            crate::popup::ask(at);",
+            "Do::Pretend(at) => {\n            crate::popup::pretend_ask(at);",
+            "Do::End(n) => {\n            crate::popup::end(n, crate::popup::Ended::Elsewhere);",
+        ] {
+            assert!(act.contains(arm), "{arm}");
+        }
+        assert!(body(&src, "fn ctx_now(").contains("menu: crate::popup::his_menu(),"));
+    }
+
+    #[test]
+    fn a_press_ends_his_menu_unless_it_is_on_the_menu() {
+        assert!(ends_menu(true, || panic!("a press on him isn't asked about the menu")));
+        assert!(ends_menu(false, || false), "elsewhere");
+        assert!(!ends_menu(false, || true), "on the menu itself");
+    }
+
+    /// The owner thread asks for his menu; it never shows one itself.
+    #[test]
+    fn the_menu_is_asked_for_never_shown_from_the_owner_thread() {
+        let src = source("hook");
+        let code = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(code.contains("crate::popup::ask(at)") && code.contains("crate::popup::pretend_ask(at)"));
+        for never in [concat!("TrackPopup", "Menu"), concat!("track_", "menu("), concat!("EndM", "enu(")] {
+            assert!(!code.contains(never), "hook.rs uses {never}");
+        }
+        // His menu ends as the hook goes out, and one not yet open never opens.
+        let owner = body(&src, "fn owner(");
+        assert!(owner.contains("Ok(Msg::Gesture { g, would, menu, pretend }) => act(g, would, menu, pretend),"), "acted under the menu the press was made under");
+        // The procedure reads which menu is up after clearing the answer.
+        let decide_ = body(&src, "fn decide(");
+        assert!(decide_.find("counts.asked.store(false, Ordering::SeqCst);").unwrap() < decide_.find("let cx = cx();").unwrap());
+        let removed = &owner[owner.find("Change::Removed => {").unwrap()..];
+        let removed = &removed[..removed.find("Change::Same").unwrap()];
+        assert!(removed.contains("COUNTS.asked.store(false, Ordering::SeqCst);"));
+        assert!(removed.contains("if let Some(up) = end_on_out(crate::popup::his_menu()) {\n                    crate::popup::end(up, crate::popup::Ended::HookOut);"));
+    }
+
     #[test]
     fn decide_counts_and_delivers() {
         let info = |msg_x: i32, time: u32, flags: u32| MSLLHOOKSTRUCT { pt: POINT { x: msg_x, y: 50 }, time, flags, ..Default::default() };
@@ -1725,33 +1946,34 @@ mod tests {
         let mut t = Tracker::NEW;
         let sent = RefCell::new(Vec::new());
         let send = |m: Msg| {
-            if let Msg::Gesture { g, would } = m {
+            if let Msg::Gesture { g, would, menu, pretend } = m {
+                assert!(!pretend && menu == 0);
                 sent.borrow_mut().push((g, would));
             }
         };
         // A move: nothing, and never looked at.
-        assert!(!decide(&s, &mut t, FREE, &c, 0x200, &info(50, 0, 0), send));
+        assert!(!decide(&s, &mut t, || FREE, &c, 0x200, &info(50, 0, 0), send));
         assert!(s.asked.borrow().is_empty());
         // A double-click on him: two presses, two on his shape, one gesture,
         // only watched, nothing swallowed.
         for (msg, time) in [(WM_LBUTTONDOWN, 0), (WM_LBUTTONUP, 5), (WM_LBUTTONDOWN, 100), (WM_LBUTTONUP, 105)] {
-            assert!(!decide(&s, &mut t, FREE, &c, msg, &info(50, time, 0), send));
+            assert!(!decide(&s, &mut t, || FREE, &c, msg, &info(50, time, 0), send));
         }
         assert_eq!(*sent.borrow(), [(Gesture::DoubleClick, true)]);
         let n = |a: &AtomicU64| a.load(Ordering::Relaxed);
         assert_eq!((n(&c.presses), n(&c.on_shape), n(&c.covered), n(&c.taken), n(&c.gestures)), (2, 2, 0, 0, 1));
         // A press covered by a window above: on his shape, covered, not his.
         let s = FakeScene { covered: true, ..scene() };
-        decide(&s, &mut t, FREE, &c, WM_RBUTTONDOWN, &info(50, 300, 0), send);
-        decide(&s, &mut t, FREE, &c, WM_RBUTTONUP, &info(50, 305, 0), send);
+        decide(&s, &mut t, || FREE, &c, WM_RBUTTONDOWN, &info(50, 300, 0), send);
+        decide(&s, &mut t, || FREE, &c, WM_RBUTTONUP, &info(50, 305, 0), send);
         assert_eq!((n(&c.presses), n(&c.on_shape), n(&c.covered)), (3, 3, 1));
         assert_eq!(sent.borrow().len(), 1, "no menu for a covered press");
         // An injected press is no press.
-        decide(&scene(), &mut t, FREE, &c, WM_LBUTTONDOWN, &info(50, 400, LLMHF_INJECTED), send);
+        decide(&scene(), &mut t, || FREE, &c, WM_LBUTTONDOWN, &info(50, 400, LLMHF_INJECTED), send);
         assert_eq!(n(&c.presses), 3);
         // Beside his shape: a press, not on it.
         let s = FakeScene { shape: false, ..scene() };
-        decide(&s, &mut t, FREE, &c, WM_LBUTTONDOWN, &info(50, 500, 0), send);
+        decide(&s, &mut t, || FREE, &c, WM_LBUTTONDOWN, &info(50, 500, 0), send);
         assert_eq!((n(&c.presses), n(&c.on_shape)), (4, 3));
     }
 
@@ -1762,13 +1984,14 @@ mod tests {
         let pretend = |p, ms| {
             let sent = RefCell::new(Vec::new());
             run_pretend_with(p, 1, Limits { ms, half_w: 1, half_h: 1 }, |m| {
-                if let Msg::Gesture { g, would } = m {
+                if let Msg::Gesture { g, would, pretend, .. } = m {
+                    assert!(pretend, "marked as a pretend");
                     sent.borrow_mut().push((g, would));
                 }
             });
             sent.into_inner()
         };
-        assert_eq!(pretend(Pretend::Right, 500), [(Gesture::Menu { at: (0, 0) }, true)]);
+        assert_eq!(pretend(Pretend::Right, 500), [(Gesture::Menu { at: (0, 0) }, false)], "his menu acts");
         assert_eq!(pretend(Pretend::Double, 500), [(Gesture::DoubleClick, true)]);
         // Its two presses are 160 ms apart, down to down.
         assert_eq!(pretend(Pretend::Double, 160), [(Gesture::DoubleClick, true)]);
@@ -1801,11 +2024,11 @@ mod tests {
         assert!(counted > back.find("Change::Put =>").unwrap() && counted < back.find("Change::Failed(e) =>").unwrap(), "counted only when in");
         let code = &src[..src.find("#[cfg(test)]").unwrap()];
         assert_eq!(code.matches("COUNTS.put_back.fetch_add(").count(), 1);
-        // And the procedure's own gate never overrides the hiding.
-        assert!(
-            body(&src, "impl Scene for Live").contains("why_off(&inputs_now(clicks, false))"),
-            "the procedure's gate never takes while_hidden"
-        );
+        // And the procedure's own gate never overrides the hiding, and lets
+        // presses pass while the tray icon's own menu is open.
+        let live = body(&src, "impl Scene for Live");
+        assert!(live.contains("why_off(&inputs_now(clicks, false))"), "the procedure's gate never takes while_hidden");
+        assert!(live.contains("&& !crate::popup::other_menu_up()"), "the tray icon's menu takes its own presses");
     }
 
     #[test]
@@ -1920,7 +2143,7 @@ mod tests {
             .join("\n");
         assert_clean("the procedure's region", &code);
         assert_eq!(code.matches(".send(").count(), 1, "one send");
-        for f in ["fn mouse_proc(", "fn guarded(", "fn decide(", "fn event_of(", "fn step(", "fn applied(", "fn look(", "fn why_off(", "fn inputs_now(", "impl Scene for Live", "fn within(", "fn deliver(", "fn note_slowest(", "fn ctx_now("] {
+        for f in ["fn mouse_proc(", "fn guarded(", "fn decide(", "fn event_of(", "fn step(", "fn applied(", "fn look(", "fn why_off(", "fn inputs_now(", "impl Scene for Live", "fn within(", "fn deliver(", "fn note_slowest(", "fn ctx_now(", "fn menu_up("] {
             assert!(code.contains(f), "{f} lies between the markers");
         }
     }
@@ -1936,6 +2159,10 @@ mod tests {
             ("cover", "pub fn locked("),
             ("cover", "pub fn busy("),
             ("cover", "pub fn fullscreen("),
+            ("popup", "pub fn his_menu("),
+            ("popup", "pub fn other_menu_up("),
+            ("popup", "pub(crate) fn other_up("),
+            ("popup", "pub(crate) fn up(&self)"),
             ("windows_ext", "pub fn busy_state("),
             ("windows_ext", "pub(crate) fn hwnd("),
             ("windows_ext", "pub fn click_through("),

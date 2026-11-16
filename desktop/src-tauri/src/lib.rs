@@ -23,6 +23,7 @@ mod logs;
 mod non_rude;
 mod overlay_machine;
 mod overlay_windows;
+mod popup;
 mod power;
 mod prompt;
 mod settings;
@@ -1121,6 +1122,8 @@ pub fn run() {
                 overlay_windows::set_parked(&handle, true);
             }
             tray::build(&handle)?;
+            // His menu is the tray's, shown on its window.
+            popup::adopt(&handle);
             hotkeys::register(&handle, &s.hotkeys);
             if let Some(path) = foreground_log_path(&s) {
                 foreground_log::start(handle.clone(), path);
