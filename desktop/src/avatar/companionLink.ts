@@ -18,6 +18,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { CompanionClient, CompanionConfig, LinkStatus } from "../shared/companion";
 import { SETTINGS_EVENT, parseBrain } from "../shared/settings";
+import { oneAtATime as newestOnly } from "../shared/oneAtATime";
 
 export const CONFIG_CMD = "companion_config";
 export const REPORT_CMD = "companion_report";
@@ -132,31 +133,10 @@ export const reportArgs = (s: LinkStatus) => ({
   },
 });
 
-/** Send each report only once the one before it has been taken, and only
- * the newest of those that came meanwhile: two invokes in flight aren't
- * ordered, and the shell keeps the last it hears (connecting, then online a
- * moment later, must never end as connecting). */
-export function oneAtATime(send: (s: LinkStatus) => Promise<void>): (s: LinkStatus) => void {
-  let next: LinkStatus | null = null;
-  let busy = false;
-  const pump = async (): Promise<void> => {
-    busy = true;
-    while (next) {
-      const s = next;
-      next = null;
-      try {
-        await send(s);
-      } catch {
-        // The sender says why; the next report still goes.
-      }
-    }
-    busy = false;
-  };
-  return (s) => {
-    next = s;
-    if (!busy) void pump();
-  };
-}
+/** Each report once the one before it has been taken, and only the newest
+ * of those that came meanwhile (shared/oneAtATime.ts): connecting, then
+ * online a moment later, must never end as connecting. */
+export const oneAtATime = (send: (s: LinkStatus) => Promise<void>): ((s: LinkStatus) => void) => newestOnly(send);
 
 export interface LinkDeps {
   ask(): Promise<unknown>;

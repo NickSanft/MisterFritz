@@ -15,6 +15,7 @@ mod companion;
 mod cover;
 mod cursor;
 mod foreground_log;
+mod hit_shape;
 mod hotkeys;
 mod keyboard;
 mod logs;
@@ -656,6 +657,53 @@ async fn avatar_loaded(app: AppHandle, wearing: String, error: Option<String>) -
     Ok(())
 }
 
+/// His window as far as a shape goes: the one that is open and not on its
+/// way out. A shape for any other is nobody's.
+fn live_window(open: bool, phase: overlay_machine::PhaseName, instance: u32) -> Option<u32> {
+    (open && phase != overlay_machine::PhaseName::Closing).then_some(instance)
+}
+
+/// Which load of his page this is, by the shell's count: his page asks
+/// once, and stamps every shape it sends with the answer.
+#[tauri::command]
+async fn avatar_page(webview: tauri::Webview) -> Result<u32, String> {
+    from_the_avatar(webview.label())?;
+    Ok(hit_shape::page())
+}
+
+/// His page says where his body is on his window: up to six boxes, in CSS
+/// pixels of a page `view` big. Whether it was kept: a send that isn't the
+/// live window's, this load's and the latest is dropped, which is no
+/// error. Refused with why when it can't be a shape (hit_shape.rs).
+#[tauri::command]
+async fn set_hit_rects(
+    app: AppHandle,
+    webview: tauri::Webview,
+    instance: u32,
+    page: u32,
+    seq: u32,
+    view: hit_shape::View,
+    rects: Vec<hit_shape::PageRect>,
+) -> Result<bool, String> {
+    from_the_avatar(webview.label())?;
+    let packed = hit_shape::pack(&view, &rects)?;
+    let s = overlay_windows::status(&app);
+    let live = live_window(s.open, s.phase, s.instance);
+    Ok(match hit_shape::keep(live, hit_shape::Stamp { instance, page, seq }, &packed) {
+        // His shape, never the owner's input: nothing here says where a click was.
+        hit_shape::Kept::Changed { boxes, percent, news: true } => {
+            tracing::info!("his hit shape: {boxes} boxes, {percent}% of his window (window {instance})");
+            true
+        }
+        hit_shape::Kept::Changed { boxes, percent, news: false } => {
+            tracing::debug!("his hit shape: {boxes} boxes, {percent}% of his window (window {instance})");
+            true
+        }
+        hit_shape::Kept::Same => true,
+        hit_shape::Kept::Older => false,
+    })
+}
+
 /// Open one of Fritz's folders in Explorer (made first if it isn't there).
 #[tauri::command]
 async fn open_folder(which: String) -> Result<(), String> {
@@ -1028,6 +1076,8 @@ pub fn run() {
             open_folder,
             reload_model,
             avatar_loaded,
+            avatar_page,
+            set_hit_rects,
             control_opening,
             get_token_present,
             set_token,
@@ -1051,6 +1101,7 @@ pub fn run() {
                 tracing::warn!(%problem, "a setting was put back to its default");
             }
             let s = settings::get();
+            hit_shape::init();
             overlay_windows::init(app);
             prompt::adopt(app);
             if s.avatar.parked {
@@ -1083,12 +1134,19 @@ pub fn run() {
             if webview.label() == prompt::LABEL && payload.event() == PageLoadEvent::Started {
                 prompt::on_page_started(webview.app_handle());
             }
+            // His page loading, for the first time or again: the load is
+            // numbered, and the shape the page before it sent forgotten.
+            if webview.label() == OVERLAY_LABEL && payload.event() == PageLoadEvent::Started {
+                let page = hit_shape::page_started();
+                tracing::debug!(page, "his page starts loading");
+            }
         })
         .on_window_event(|window, event| {
             if window.label() == OVERLAY_LABEL {
                 overlay_windows::on_window_event(window.app_handle(), event);
                 if matches!(event, WindowEvent::Destroyed) {
                     companion_page_gone(window.app_handle());
+                    hit_shape::forget();
                 }
             } else if window.label() == prompt::LABEL {
                 prompt::on_window_event(window.app_handle(), event);
@@ -1744,6 +1802,8 @@ mod tests {
             ("prompt_close", "from_the_prompt"),
             ("prompt_ready", "from_the_prompt"),
             ("set_hotkey", "from_the_control"),
+            ("avatar_page", "from_the_avatar"),
+            ("set_hit_rects", "from_the_avatar"),
         ] {
             let at = src.find(&format!("async fn {name}(")).unwrap_or_else(|| panic!("no command {name}"));
             let body = &src[at + src[at..].find('{').unwrap() + 1..];
@@ -1763,6 +1823,47 @@ mod tests {
         assert_eq!(calls.len(), 1, "one caller");
         let call = &src[calls[0].0..];
         assert!(call.starts_with("companion::pretend_say_text(cfg!(debug_assertions), "), "{}", &call[..80]);
+    }
+
+    /// A shape is kept only for his window as it stands: open, and not on
+    /// its way out (a closing window's page may still be sending).
+    #[test]
+    fn a_shape_is_only_for_his_open_window() {
+        use crate::overlay_machine::PhaseName;
+        for (open, phase, want) in [
+            (true, PhaseName::Starting, Some(7)),
+            (true, PhaseName::Shown, Some(7)),
+            (true, PhaseName::Painted, Some(7)),
+            (true, PhaseName::Closing, None),
+            (false, PhaseName::Closed, None),
+            (false, PhaseName::Painted, None),
+        ] {
+            assert_eq!(super::live_window(open, phase, 7), want, "{open} {phase:?}");
+        }
+    }
+
+    /// His page starting to load numbers the load and forgets the shape of
+    /// the page before it, and his window going forgets it too: a shape
+    /// must never outlive the page that measured it.
+    #[test]
+    fn his_shape_is_forgotten_as_his_page_loads_again() {
+        let all = include_str!("lib.rs").replace("\r\n", "\n");
+        let src = &all[..all.find("#[cfg(test)]").unwrap()];
+        let at = src.find(".on_page_load(|webview, payload| {").unwrap();
+        let body = &src[at..at + src[at..].find("\n        })\n").unwrap()];
+        assert!(
+            body.contains(
+                "if webview.label() == OVERLAY_LABEL && payload.event() == PageLoadEvent::Started {\n                let page = hit_shape::page_started();"
+            ),
+            "{body}"
+        );
+        let at = src.find(".on_window_event(|window, event| {").unwrap();
+        let body = &src[at..at + src[at..].find("\n        })\n").unwrap()];
+        let gone = &body[body.find("if matches!(event, WindowEvent::Destroyed) {").unwrap()..];
+        assert!(gone[..gone.find('}').unwrap()].contains("hit_shape::forget();"), "{gone}");
+        // The page's number is the shell's count, asked by his page alone.
+        let at = src.find("async fn avatar_page(").unwrap();
+        assert!(src[at..at + 200].contains("Ok(hit_shape::page())"));
     }
 
     /// The pretend prompt is read only where the build says debug: the one

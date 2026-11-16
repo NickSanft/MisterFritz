@@ -9,6 +9,10 @@
  * - nothing on this page asks for focus. Input is only handled in Arrange,
  *   when the shell has made the window take clicks.
  *
+ * At every fit the page tells the shell where his body is on it
+ * (hitShape.ts), and again every few seconds from the same tick while it
+ * draws, so the shell can tell a click on him from one beside him.
+ *
  * The speech bubble over his head (BubbleView.ts) is drawn from the same
  * tick: the turn it shows is state.ts's, moved on by the brain's frames and
  * by `companion:say` (the shell's bridge, from Settings › Brain's Ask and
@@ -35,6 +39,8 @@ import { SAY_EVENT, answerSay, onSay, startCompanion, takeSay } from "./companio
 import { BubbleClock, anchorAbove, charCount, plainText } from "./bubble";
 import { createBubble } from "./BubbleView";
 import { INITIAL, cancelFirst, reduce, type TurnEvent, type TurnView } from "./state";
+import { HitPublisher, shapeNow, stamped } from "./hitShape";
+import { fetchPage, hitArgs, sendHitRects } from "./hitWire";
 import {
   NO_READY_GLOBAL,
   RELOAD_EVENT,
@@ -108,6 +114,13 @@ let turn: TurnView = INITIAL;
 const bubble = createBubble(document);
 const bubbleClock = new BubbleClock();
 let wasOnline = false;
+/** His shape on the page, sent to the shell as it changes; and whether the
+ * WebGL context is lost (a GPU reset), when nothing of him is drawn. */
+const hits = new HitPublisher(
+  stamped(fetchPage, (page, s) => sendHitRects(hitArgs(instance, page, s))),
+  () => performance.now(),
+);
+let contextLost = false;
 
 /** Move the turn on, and the bubble with it: up for a new turn, held once
  * it ends. */
@@ -170,6 +183,18 @@ function fit(): void {
   // shows a blank window until the next paced tick. One event-driven frame,
   // not a loop, so the paced-loop rule holds; never while he is parked.
   if (loop.running) renderer.render(scene, camera);
+  offerShape();
+}
+
+/** Tell the shell where his body is on the page now: after every fit (a
+ * model loaded, a resize, a new scale), parked or not, so the shape is
+ * there when he is shown. None while there is no model, or nothing of him
+ * can be drawn. */
+function offerShape(): void {
+  const w = Math.max(1, window.innerWidth);
+  const h = Math.max(1, window.innerHeight);
+  const a = actor;
+  hits.offer(shapeNow(a !== null && !contextLost, () => a!.hitRects(camera, w, h)), { width: w, height: h });
 }
 
 /** Moving onto a monitor with another scale changes devicePixelRatio without
@@ -210,6 +235,7 @@ const loop = new PacedLoop((dt) => {
   }
   actor?.update(dt);
   renderer.render(scene, camera);
+  hits.keep();
   paintBubble(dt);
   if (paintIn > 0 && --paintIn === 0) {
     paintIn = -1;
@@ -236,8 +262,11 @@ function onStatus(next: AvatarStatus | null): void {
  * present. Only a change starts or stops it. */
 function draw(): void {
   const on = shouldDraw(status, displayOn);
-  if (on && !loop.running) loop.start();
-  else if (!on && loop.running) loop.stop();
+  if (on && !loop.running) {
+    // The shell may have counted his shape as gone while nothing drew.
+    hits.resume();
+    loop.start();
+  } else if (!on && loop.running) loop.stop();
 }
 
 /** The placeholder that ships with the app. */
@@ -309,6 +338,16 @@ document.addEventListener("keydown", (e) => {
 document.addEventListener("contextmenu", (e) => e.preventDefault());
 window.addEventListener("resize", fit);
 watchPixelRatio();
+// A GPU reset: nothing of him is drawn until the context is back, so a
+// click on where he was is no longer his.
+canvas.addEventListener("webglcontextlost", () => {
+  contextLost = true;
+  offerShape();
+});
+canvas.addEventListener("webglcontextrestored", () => {
+  contextLost = false;
+  fit();
+});
 
 async function main(): Promise<void> {
   fit();

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "avatar",
-  "description": "The avatar window (built at runtime by overlay_windows.rs): its status events, and moving and resizing itself while in Arrange. App commands (avatar_handshake, avatar_beat, set_avatar_mode, avatar_vrm, avatar_loaded, get_settings, power_display, cursor_now, companion_config, companion_report, companion_take, companion_said) are not ACL-checked without an app manifest, and must be granted here if one is ever added; companion_config (the brain's token), companion_report, companion_take and companion_said must be granted to this window alone, and they check the calling window themselves.",
+  "description": "The avatar window (built at runtime by overlay_windows.rs): its status events, and moving and resizing itself while in Arrange. App commands (avatar_handshake, avatar_beat, set_avatar_mode, avatar_vrm, avatar_loaded, get_settings, power_display, cursor_now, companion_config, companion_report, companion_take, companion_said, avatar_page, set_hit_rects) are not ACL-checked without an app manifest, and must be granted here if one is ever added; companion_config (the brain's token), companion_report, companion_take, companion_said, avatar_page and set_hit_rects (where his body is on his window) must be granted to this window alone, and they check the calling window themselves.",
   "windows": ["avatar"],
   "permissions": [
     "core:event:allow-listen",

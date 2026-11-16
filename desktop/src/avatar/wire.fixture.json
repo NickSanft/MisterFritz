@@ -102,6 +102,18 @@
     "pretendPromptEnv": "FRITZ_PRETEND_PROMPT"
   },
   "sayKeys": ["id", "text"],
+  "hitShape": { "maxRects": 6, "bands": 12, "minMove": 2, "keepMs": 5000, "staleMs": 15000, "most": 0.85 },
+  "hitRectsSample": {
+    "instance": 1,
+    "page": 1,
+    "seq": 3,
+    "view": { "width": 340, "height": 640 },
+    "rects": [
+      { "x": 132, "y": 181, "width": 76, "height": 96 },
+      { "x": 96, "y": 277, "width": 148, "height": 190 },
+      { "x": 118, "y": 467, "width": 104, "height": 160 }
+    ]
+  },
   "commands": {
     "handshake": {
       "name": "avatar_handshake",
@@ -184,6 +196,14 @@
         "wearing",
         "error"
       ]
+    },
+    "avatarPage": {
+      "name": "avatar_page",
+      "args": []
+    },
+    "setHitRects": {
+      "name": "set_hit_rects",
+      "args": ["instance", "page", "seq", "view", "rects"]
     },
     "controlOpening": {
       "name": "control_opening",

@@ -215,12 +215,13 @@ mod tests {
     }
 
     /// Every module of the shell, by name, with its source.
-    const SOURCES: [(&str, &str); 18] = [
+    const SOURCES: [(&str, &str); 19] = [
         ("avatar_state", include_str!("avatar_state.rs")),
         ("companion", include_str!("companion.rs")),
         ("cover", include_str!("cover.rs")),
         ("cursor", include_str!("cursor.rs")),
         ("foreground_log", include_str!("foreground_log.rs")),
+        ("hit_shape", include_str!("hit_shape.rs")),
         ("hotkeys", include_str!("hotkeys.rs")),
         ("keyboard", include_str!("keyboard.rs")),
         ("lib", include_str!("lib.rs")),

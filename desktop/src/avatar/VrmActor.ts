@@ -20,6 +20,7 @@ import {
   VRMExpressionMaterialColorBind, VRMLoaderPlugin, VRMUtils, type VRM, type VRMHumanBoneName,
 } from "@pixiv/three-vrm";
 import { AHEAD, EYE_TAU, HEAD_SHARE_PITCH, HEAD_SHARE_YAW, HEAD_TAU, approach, type Gaze } from "./look";
+import { restBands, toView, type Band, type HitRect } from "./hitShape";
 import type { Phase } from "./state";
 
 const RAD = Math.PI / 180;
@@ -101,6 +102,9 @@ export class VrmActor {
   private glance = 0;
   private tilt = 0;
   private crown: number | null = null;
+  /** His shape standing at rest, in world metres (hitShape.ts): measured
+   * once, from his own vertices. */
+  private readonly rest: Band[];
   /** Each MToon material's own outline and rim, as the file has them:
    * every tint starts from these, so tints never compound. */
   private readonly authored = new WeakMap<Toon, Authored>();
@@ -125,6 +129,7 @@ export class VrmActor {
     // Pose the bones now, so bounds() frames him standing, not in T-pose.
     vrm.humanoid?.update();
     this.placeLookTarget();
+    this.rest = restBands(vrm.scene, this.bounds());
   }
 
   /** Parse a .vrm (glTF binary). Throws when the file isn't a VRM. */
@@ -160,6 +165,15 @@ export class VrmActor {
     this.vrm.scene.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(this.vrm.scene);
     return { bottom: box.min.y, top: box.max.y };
+  }
+
+  /** Where his body is on a page `width` × `height` CSS pixels big, seen by
+   * `camera`: his shape at rest as a few boxes, padded for his idle's sway
+   * (hitShape.ts). The speech bubble over his head is no part of it. */
+  hitRects(camera: THREE.Camera, width: number, height: number): HitRect[] {
+    // The camera may have been moved since it last drew.
+    camera.updateMatrixWorld(true);
+    return toView(this.rest, camera, { width, height });
   }
 
   /** Advance the idle by `dt` seconds. */

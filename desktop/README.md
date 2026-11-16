@@ -6,8 +6,8 @@ over the `/companion` WebSocket ([plan 14](../plans/14-desktop-companion.md),
 
 Today it is one persistent, transparent, click-through, never-focused avatar
 window with a WebGL VRM in it, a control window (tray > Settings…), a tray,
-three hotkeys, and the prompt (*Ask Fritz*), Ctrl+Alt+F (PR 4 of the build
-plan is under way). Spike 0 proved the window ([docs/SPIKE0.md](docs/SPIKE0.md)), and
+three hotkeys, and the prompt (*Ask Fritz*), Ctrl+Alt+F. PR 5 of the build
+plan (clicking him) is under way. Spike 0 proved the window ([docs/SPIKE0.md](docs/SPIKE0.md)), and
 its table is PR 2's acceptance.
 
 ## What it keeps, and where
@@ -39,6 +39,12 @@ give it), and *Default* puts the default back. A key edited into
 `avatar.lookatCursor` is `true` (the default): on a VRoid export the eyes
 turn, and on any model his head turns part of the way, which is what shows
 on the placeholder.
+
+His page also tells the shell where his body is on his window: a few boxes
+round him, measured from the model itself, so a click on him can be told
+from one beside him or in the room over his head. Nothing acts on it yet
+(the mouse hook that will is the next step of plan 14's PR 5); it is the
+shape only, never anything about the pointer.
 
 Both windows wear `settings.theme`: the mood (`ink`, `dusk`, `midnight`),
 the accent (`brand`, `abyssal`, `ember`), dark or light, and the motion
