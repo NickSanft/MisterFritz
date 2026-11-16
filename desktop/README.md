@@ -56,10 +56,13 @@ usually keeps the keyboard where it was after a click on him, so the box
 asks you to click in it ("Click here to type…"); Ctrl+Alt+F gives it the
 keyboard at once. A click anywhere but in the box or on him, the
 double-click again or 20 s with no click closes it, and the keyboard stays
-where you left it.
+where you left it. On his menu, what you choose decides: *Ask Fritz…*
+gives the box the keyboard, and anything else closes it.
 
 Right-click him for his menu, the tray's: it works by mouse, so the app
 you were in keeps the keyboard, and a click elsewhere (or 20 s) closes it.
+Its first item, *Ask Fritz…*, opens the box with the keyboard in it (or
+gives a waiting box the keyboard).
 The hook is in only while he can be clicked: never while he
 is hidden or arranged, under a fullscreen app or presentation mode, on the
 lock screen or with the display asleep. It keeps no record of where you
@@ -140,10 +143,11 @@ in it until you arrange him taller.
 
 ## The prompt
 
-*Ask Fritz* is a small window, hidden until Ctrl+Alt+F (`hotkeys.prompt`)
-or a double-click on him opens it, just above Fritz on his monitor (below
+*Ask Fritz* is a small window, hidden until Ctrl+Alt+F (`hotkeys.prompt`),
+*Ask Fritz…* in his menu (the tray icon's, or a right-click on him) or a
+double-click on him opens it, just above Fritz on his monitor (below
 him if there's no room above; where he would stand while he is hidden).
-The key opens it with the keyboard in it; after a double-click Windows
+The key and the menu open it with the keyboard in it; after a double-click Windows
 usually keeps the keyboard where it was, and the box waits for you to click
 in it (see *Clicks on him* above). The key again closes it, or, while it
 waits, gives it the keyboard; the double-click again closes it. It doesn't open over the lock screen, another

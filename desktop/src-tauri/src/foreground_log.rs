@@ -7,9 +7,10 @@
 //! it can be seen what Fritz took the keyboard from. The control window
 //! (tray > Settings) is an ordinary window and takes the keyboard when it is
 //! opened: its lines say SETTINGS, never HIT. The prompt takes it when the
-//! owner opens it (its key, or a double-click on him): a PROMPT line, but
-//! only for an open that took the keyboard, or a waiting prompt the hook
-//! saw the owner press into or its key took the keyboard into
+//! owner opens it (its key, Ask Fritz… in his menu, or a double-click on
+//! him): a PROMPT line, but only for an open that took the keyboard, or a
+//! waiting prompt the hook saw the owner press into or its key or Ask Fritz…
+//! took the keyboard into
 //! (`prompt::takes`); the prompt in front with no such open, or the
 //! keyboard still with it after it closed, is a HIT.
 //!
@@ -285,7 +286,7 @@ pub fn start(app: AppHandle, path: PathBuf) {
                 "start pid={me} poll=100ms; a HIT line is a failure of Spike 0's first row \
                  (ARRANGE lines are Arrange taking the keyboard on purpose, TRAY lines the \
                  tray menu, SETTINGS lines the control window the owner opened, PROMPT \
-                 lines the prompt the owner opened, by its key or a double-click on him)"
+                 lines the prompt the owner opened, by its key, Ask Fritz… in his menu or a double-click on him)"
             ));
             let (mut polls, mut changes, mut hits, mut arranges, mut trays, mut settings, mut prompts) =
                 (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);

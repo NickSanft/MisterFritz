@@ -1,8 +1,13 @@
-//! The tray: Show / Hide Fritz, Arrange / Lock, Appearance ▸, Settings,
-//! Fritz's logs, Quit. The menu is rebuilt when Arrange starts or ends (the
+//! The tray: Ask Fritz…, Show / Hide Fritz, Arrange / Lock, Appearance ▸,
+//! Settings, Fritz's logs, Quit. The menu is rebuilt when Arrange starts or ends (the
 //! machine's `RefreshTray`) and when Fritz is parked or shown, since its
 //! items follow both. Show and Hide are separate ids, so a click does what
 //! the label it showed said, whatever the state is by the time it lands.
+//!
+//! Ask Fritz… opens the prompt with the keyboard in it: a click on Fritz's
+//! own menu is input his process received, so Windows lets the prompt take
+//! the keyboard. It and the separator after it, like the Appearance submenu,
+//! are built once and held by every rebuilt menu.
 //!
 //! The Appearance submenu is built once and held by every rebuilt menu; a
 //! theme change (from here or the control window) only moves its ticks. muda
@@ -20,7 +25,8 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 
 use serde_json::{json, Value};
 use tauri::menu::{
-    CheckMenuItem, CheckMenuItemBuilder, ContextMenu, Menu, MenuBuilder, MenuEvent, Submenu, SubmenuBuilder,
+    CheckMenuItem, CheckMenuItemBuilder, ContextMenu, Menu, MenuBuilder, MenuEvent, MenuItem, MenuItemBuilder,
+    PredefinedMenuItem, Submenu, SubmenuBuilder,
 };
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, Wry};
@@ -30,6 +36,8 @@ use crate::overlay_windows;
 use crate::settings::{self, Theme};
 
 const TRAY_ID: &str = "fritz";
+const ASK: &str = "ask";
+const ASK_LABEL: &str = "Ask Fritz…";
 const SHOW: &str = "show";
 const HIDE: &str = "hide";
 const ARRANGE: &str = "arrange";
@@ -116,6 +124,20 @@ pub fn follows(path: &str) -> bool {
     path == "theme" || path.starts_with("theme.")
 }
 
+/// Ask Fritz… and the separator after it, built once and held by every
+/// rebuilt menu: a separator is a menu object with an id of its own too.
+struct Ask {
+    item: MenuItem<Wry>,
+    after: PredefinedMenuItem<Wry>,
+}
+
+fn build_ask(app: &AppHandle) -> tauri::Result<Ask> {
+    Ok(Ask {
+        item: MenuItemBuilder::with_id(ASK, ASK_LABEL).build(app)?,
+        after: PredefinedMenuItem::separator(app)?,
+    })
+}
+
 /// The Appearance submenu, built once, and its items by id.
 struct Look {
     submenu: Submenu<Wry>,
@@ -193,7 +215,12 @@ fn menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let status = overlay_windows::status(app);
     let ((sh_id, sh_label), arrange) =
         items(status.open, status.parked, overlay_windows::arranging(app));
-    let mut m = MenuBuilder::new(app).text(sh_id, sh_label);
+    let mut m = MenuBuilder::new(app);
+    // Ask Fritz… first, and its separator: the held ones, never built here.
+    if let Some(ask) = app.try_state::<Ask>() {
+        m = m.item(&ask.item).item(&ask.after);
+    }
+    m = m.text(sh_id, sh_label);
     if let Some((id, label)) = arrange {
         m = m.text(id, label);
     }
@@ -211,6 +238,7 @@ fn menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 }
 
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
+    app.manage(build_ask(app)?);
     app.manage(build_look(app)?);
     let held = menu(app)?;
     HMENU.store(held.hpopupmenu().unwrap_or(0), Ordering::SeqCst);
@@ -248,7 +276,8 @@ fn rebuild(app: &AppHandle) {
             let held = m.hpopupmenu().unwrap_or(0);
             let _ = tray.set_menu(Some(m));
             HMENU.store(held, Ordering::SeqCst);
-            tracing::debug!("the tray menu was rebuilt");
+            // The first item's id is Ask Fritz…'s, the same at every rebuild.
+            tracing::debug!("the tray menu was rebuilt (its first item's id {})", crate::windows_ext::menu_item_id(held, 0));
         }
         Err(e) => tracing::warn!(error = %e, "couldn't rebuild the tray menu"),
     }
@@ -271,8 +300,26 @@ fn on_menu(app: &AppHandle, event: MenuEvent) {
     crate::logs::guard("tray menu", || on_menu_item(app, event.id().as_ref()));
 }
 
+/// Whether choosing `id` closes a prompt waiting for a click: every
+/// choice but Ask Fritz…, which takes the keyboard into it. (A press on his
+/// menu spares a waiting prompt so that its choice decides.)
+fn closes_wait(id: &str) -> bool {
+    id != ASK
+}
+
 fn on_menu_item(app: &AppHandle, id: &str) {
+    if closes_wait(id) {
+        let open = crate::prompt::waiting_open();
+        if open != 0 {
+            crate::prompt::close_later(app, crate::prompt::Why::Chose, open);
+        }
+    }
     match id {
+        // The menu shows nothing that changes with the prompt: no rebuild.
+        ASK => {
+            crate::prompt::toggle(app, crate::prompt::Opener::Menu);
+            return;
+        }
         SHOW => crate::show_avatar(app),
         HIDE => {
             overlay_windows::set_parked(app, true);
@@ -310,7 +357,7 @@ fn on_menu_item(app: &AppHandle, id: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        appearance, appearance_change, follows, items, ACCENTS, ARRANGE, HIDE, LIGHT, LOGS,
+        appearance, appearance_change, follows, items, ACCENTS, ARRANGE, ASK, ASK_LABEL, HIDE, LIGHT, LOGS,
         MOODS, MOTIONS, QUIT, SETTINGS, SHOW, TRAY_ID,
     };
     use crate::overlay_machine::{TRAY_LOCK_ID, TRAY_LOCK_LABEL};
@@ -442,7 +489,7 @@ mod tests {
     /// another item, or another's for one of them.
     #[test]
     fn every_menu_id_is_unique() {
-        let mut ids: Vec<&str> = vec![SHOW, HIDE, ARRANGE, TRAY_LOCK_ID, SETTINGS, LOGS, QUIT, TRAY_ID];
+        let mut ids: Vec<&str> = vec![ASK, SHOW, HIDE, ARRANGE, TRAY_LOCK_ID, SETTINGS, LOGS, QUIT, TRAY_ID];
         ids.extend(appearance(&Theme::default()).iter().flatten().map(|i| i.id));
         let n = ids.len();
         ids.sort_unstable();
@@ -470,6 +517,60 @@ mod tests {
             "{first}"
         );
         assert!(rebuild.find("HMENU.store(held").unwrap() > rebuild.find("tray.set_menu(Some(m))").unwrap());
+    }
+
+    /// Ask Fritz… and its separator are built once, at the tray's build,
+    /// and every menu holds those two, first: a rebuild spends no id on
+    /// them.
+    #[test]
+    fn ask_is_built_once_and_held_first() {
+        let src = include_str!("tray.rs").replace("\r\n", "\n");
+        let code = &src[..src.find("#[cfg(test)]").unwrap()];
+        let body = |sig: &str| {
+            let at = code.find(sig).unwrap_or_else(|| panic!("no {sig}"));
+            &code[at..at + code[at..].find("\n}\n").unwrap()]
+        };
+        for built in ["MenuItemBuilder::with_id(ASK, ASK_LABEL)", "PredefinedMenuItem::separator(app)"] {
+            assert_eq!(code.matches(built).count(), 1, "{built}");
+            assert!(body("fn build_ask(").contains(built), "{built} only in build_ask");
+        }
+        // Its id and label nowhere else: no other builder makes another.
+        let words = |w: &str| {
+            code.match_indices(w)
+                .filter(|&(i, _)| {
+                    let after = code[i + w.len()..].chars().next().unwrap_or(' ');
+                    let before = code[..i].chars().next_back().unwrap_or(' ');
+                    !(after.is_alphanumeric() || after == '_' || before.is_alphanumeric() || before == '_')
+                })
+                .count()
+        };
+        assert_eq!(words("ASK"), 4, "its const, build_ask, closes_wait, and the click's arm");
+        assert_eq!(words("ASK_LABEL"), 2, "its const and build_ask");
+        let menu = body("fn menu(");
+        let held = menu.find("m = m.item(&ask.item).item(&ask.after);").expect("held, appended");
+        assert!(held < menu.find("m = m.text(sh_id, sh_label);").unwrap(), "first");
+        let build = body("pub fn build(");
+        assert!(build.find("app.manage(build_ask(app)?);").unwrap() < build.find("let held = menu(app)?;").unwrap());
+        assert_eq!(code.matches("build_ask(").count(), 2, "its definition, and the one call, in build");
+        assert_eq!(ASK_LABEL, "Ask Fritz…");
+    }
+
+    /// A click on it opens the prompt from his menu, and rebuilds nothing;
+    /// any other choice first closes a prompt waiting for a click.
+    #[test]
+    fn ask_opens_the_prompt_and_never_rebuilds() {
+        let src = include_str!("tray.rs").replace("\r\n", "\n");
+        let at = src.find("fn on_menu_item(").unwrap();
+        let f = &src[at..at + src[at..].find("\n}\n").unwrap()];
+        assert!(f.contains("        ASK => {\n            crate::prompt::toggle(app, crate::prompt::Opener::Menu);\n            return;\n        }"));
+        let close = f
+            .find("    if closes_wait(id) {\n        let open = crate::prompt::waiting_open();\n        if open != 0 {\n            crate::prompt::close_later(app, crate::prompt::Why::Chose, open);\n        }\n    }")
+            .expect("a choice closes a waiting prompt");
+        assert!(close < f.find("    match id {").unwrap(), "before the choice runs");
+        assert!(!super::closes_wait(ASK));
+        for other in [SHOW, HIDE, ARRANGE, TRAY_LOCK_ID, SETTINGS, LOGS, QUIT, LIGHT.0, MOODS[0].1] {
+            assert!(super::closes_wait(other), "{other}");
+        }
     }
 
     #[test]

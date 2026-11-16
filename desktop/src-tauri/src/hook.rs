@@ -5,7 +5,8 @@
 //! refused, waits for a click. While it waits, a press into it is counted as
 //! the owner's open there and then, before Windows activates it (the
 //! foreground log's PROMPT), and a press anywhere but in it or his (a left
-//! or right press on his body) closes it.
+//! or right press on his body) closes it; one on his menu, while it is up,
+//! leaves it to the menu's choice (tray.rs).
 //!
 //! **What it sees, and what it keeps.** Button presses and releases. Moves
 //! and the wheel are only counted, never looked at. It keeps the last left
@@ -235,7 +236,8 @@ pub(crate) enum Gesture {
     /// Two left presses on him within Windows' time and rectangle.
     DoubleClick,
     /// A press while his menu is up or the prompt waits: on him (`his`) or
-    /// elsewhere. It ends the menu, and (elsewhere) the waiting prompt.
+    /// elsewhere. It ends the menu (unless it is on it), and, elsewhere, the
+    /// waiting prompt unless it spares it (`spares`).
     Pressed { at: (i32, i32), his: bool },
     /// A press into the prompt while it waits, counted as the owner's open
     /// already; `fg` had the keyboard then. It ends his menu.
@@ -1225,7 +1227,8 @@ fn act(app: &AppHandle, g: Gesture, would: bool, menu: u32, waiting: u64, preten
     } else {
         tracing::info!("{}", gesture_line(g, would));
     }
-    match act_of(g, would, menu, pretend, |at| windows_ext::our_menu_at(crate::popup::main_thread(), at)) {
+    let on_menu = |at| windows_ext::our_menu_at(crate::popup::main_thread(), at);
+    match act_of(g, would, menu, pretend, on_menu) {
         Do::Ask(at) => {
             crate::popup::ask(at);
         }
@@ -1238,7 +1241,8 @@ fn act(app: &AppHandle, g: Gesture, would: bool, menu: u32, waiting: u64, preten
         Do::Nothing => {}
     }
     let in_prompt = |at| windows_ext::window_bounds(crate::prompt::hwnd()).is_some_and(|b| crate::hit_shape::holds(b, at));
-    match prompt_of(g, would, waiting, pretend, in_prompt) {
+    let spared = |at| spares(in_prompt(at), menu, || on_menu(at));
+    match prompt_of(g, would, waiting, pretend, spared) {
         ToPrompt::Open => crate::prompt::toggle_later(app, crate::prompt::Opener::Click),
         ToPrompt::Pretend => crate::prompt::toggle_later(app, crate::prompt::Opener::PretendWait),
         ToPrompt::Close(open) => crate::prompt::close_later(app, crate::prompt::Why::Elsewhere, open),
@@ -1263,12 +1267,11 @@ pub(crate) enum ToPrompt {
 }
 
 /// A gesture's act on the prompt: an acted double-click opens it (a
-/// pretend, its pretend); while it waits (`waiting`, its open), a press
-/// outside its window closes it (`in_prompt`, asked only then: a press
-/// inside that the procedure couldn't place neither counts nor closes) and
-/// one into it says who had the keyboard; a press on him, or a gesture only
-/// watched, does nothing to it.
-pub(crate) fn prompt_of(g: Gesture, would: bool, waiting: u64, pretend: bool, in_prompt: impl FnOnce((i32, i32)) -> bool) -> ToPrompt {
+/// pretend, its pretend); while it waits (`waiting`, its open), a press it
+/// isn't spared from closes it (`spared`, asked only then; see [`spares`])
+/// and one into it says who had the keyboard; a press on him, or a gesture
+/// only watched, does nothing to it.
+pub(crate) fn prompt_of(g: Gesture, would: bool, waiting: u64, pretend: bool, spared: impl FnOnce((i32, i32)) -> bool) -> ToPrompt {
     match g {
         Gesture::DoubleClick if !would => {
             if pretend {
@@ -1277,10 +1280,18 @@ pub(crate) fn prompt_of(g: Gesture, would: bool, waiting: u64, pretend: bool, in
                 ToPrompt::Open
             }
         }
-        Gesture::Pressed { at, his: false } if waiting != 0 && !in_prompt(at) => ToPrompt::Close(waiting),
+        Gesture::Pressed { at, his: false } if waiting != 0 && !spared(at) => ToPrompt::Close(waiting),
         Gesture::IntoPrompt { fg, .. } if waiting != 0 => ToPrompt::Saw(waiting, fg),
         _ => ToPrompt::Nothing,
     }
+}
+
+/// Whether a press that isn't his spares the waiting prompt: one inside its
+/// window (the procedure couldn't place it: neither counts nor closes), or
+/// one on his own menu while it is up (`menu`; `on_menu` asked only then),
+/// whose choice says what happens to it (Ask Fritz… takes the keyboard in).
+pub(crate) fn spares(in_prompt: bool, menu: u32, on_menu: impl FnOnce() -> bool) -> bool {
+    in_prompt || (menu != 0 && on_menu())
 }
 
 /// The waiting prompt to end as the hook goes out: its open, if one waits.
@@ -2040,7 +2051,8 @@ mod tests {
         let src = source("hook");
         let act = body(&src, "fn act(");
         for arm in [
-            "act_of(g, would, menu, pretend, |at| windows_ext::our_menu_at(crate::popup::main_thread(), at))",
+            "let on_menu = |at| windows_ext::our_menu_at(crate::popup::main_thread(), at);",
+            "match act_of(g, would, menu, pretend, on_menu) {",
             "Do::Ask(at) => {\n            crate::popup::ask(at);",
             "Do::Pretend(at) => {\n            crate::popup::pretend_ask(at);",
             "Do::End(n) => {\n            crate::popup::end(n, crate::popup::Ended::Elsewhere);",
@@ -2297,7 +2309,14 @@ mod tests {
         assert_eq!(prompt_of(Gesture::DoubleClick, false, 0, true, never), ToPrompt::Pretend, "a pretend opens a pretend");
         assert_eq!(prompt_of(Gesture::DoubleClick, true, 0, false, never), ToPrompt::Nothing, "only watched");
         assert_eq!(prompt_of(elsewhere, false, 3, false, outside), ToPrompt::Close(3));
-        assert_eq!(prompt_of(elsewhere, false, 3, false, |_| true), ToPrompt::Nothing, "inside its window, though the hook couldn't place it");
+        assert_eq!(prompt_of(elsewhere, false, 3, false, |_| true), ToPrompt::Nothing, "spared: inside its window, or on his menu");
+        // What spares it.
+        let never_menu = || -> bool { panic!("the menu isn't asked about") };
+        assert!(spares(true, 0, never_menu), "inside the prompt's window");
+        assert!(spares(true, 4, never_menu), "inside the prompt's window, his menu up");
+        assert!(spares(false, 4, || true), "on his menu, up");
+        assert!(!spares(false, 4, || false), "beside his menu");
+        assert!(!spares(false, 0, never_menu), "no menu up");
         assert_eq!(prompt_of(elsewhere, false, 0, false, never), ToPrompt::Nothing, "nothing waiting (his menu's press)");
         assert_eq!(prompt_of(on, false, 3, false, never), ToPrompt::Nothing, "a press on him never closes it");
         assert_eq!(prompt_of(into, false, 3, false, never), ToPrompt::Saw(3, 9));
@@ -2318,7 +2337,8 @@ mod tests {
         let act = body(&src, "fn act(");
         for arm in [
             "let in_prompt = |at| windows_ext::window_bounds(crate::prompt::hwnd()).is_some_and(|b| crate::hit_shape::holds(b, at));",
-            "match prompt_of(g, would, waiting, pretend, in_prompt) {",
+            "let spared = |at| spares(in_prompt(at), menu, || on_menu(at));",
+            "match prompt_of(g, would, waiting, pretend, spared) {",
             "ToPrompt::Open => crate::prompt::toggle_later(app, crate::prompt::Opener::Click),",
             "ToPrompt::Pretend => crate::prompt::toggle_later(app, crate::prompt::Opener::PretendWait),",
             "ToPrompt::Close(open) => crate::prompt::close_later(app, crate::prompt::Why::Elsewhere, open),",

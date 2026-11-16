@@ -12,7 +12,9 @@
 //! above), on his monitor, at that monitor's DPI. It saves who had the
 //! keyboard (`keyboard::return_target`), shows without activating, then
 //! takes the keyboard with plain `SetForegroundWindow`; if Windows refuses,
-//! it hides again at once. The key again closes it.
+//! it hides again at once. The key again closes it. Ask Fritz… in his menu
+//! (the tray icon's, or a right-click on him) opens it as the key does, since
+//! a click on Fritz's own menu is his process's input; it never closes it.
 //!
 //! **A prompt that waits for a click.** Opened by a gesture on him (a
 //! double-click, which the mouse hook reports) that Windows won't give the
@@ -20,10 +22,10 @@
 //! type…", and the owner's click into it is a click on a window of ours,
 //! which Windows activates. It closes unanswered after `WAIT_FOR_CLICK`, on
 //! a click elsewhere, on the double-click again, and as the hook goes out;
-//! its key takes the keyboard into it. A waiting open isn't the owner's for
-//! the foreground log until the hook reports a press into it (counted there,
-//! before Windows activates it) or its key takes it (`takes`): the prompt
-//! coming to the front otherwise is a HIT.
+//! its key, or Ask Fritz…, takes the keyboard into it. A waiting open isn't
+//! the owner's for the foreground log until the hook reports a press into it
+//! (counted there, before Windows activates it) or its key or Ask Fritz…
+//! takes it (`takes`): the prompt coming to the front otherwise is a HIT.
 //!
 //! **The owner's count** is one word, `credit`: the open counted in `takes`.
 //! The main thread counts its opens, the hook's procedure a press into a
@@ -153,6 +155,10 @@ pub enum Why {
     Gesture,
     /// A click elsewhere, while it waited for one (the hook's report).
     Elsewhere,
+    /// Another choice from his menu than Ask Fritz…, while it waited for a
+    /// click (tray.rs): the press on the menu spared it, so the choice
+    /// decides.
+    Chose,
     /// Nobody clicked into it in time.
     Unanswered,
     /// The mouse hook went out while it waited: a click elsewhere would go
@@ -171,6 +177,7 @@ impl Why {
             Self::Toggle => "its key again",
             Self::Gesture => "a double-click on him again",
             Self::Elsewhere => "a click elsewhere",
+            Self::Chose => "another choice from his menu",
             Self::Unanswered => "nobody clicked it",
             Self::HookOut => "the mouse hook went out",
         }
@@ -202,6 +209,10 @@ pub enum Opener {
     /// A gesture on him (the double-click): it takes the keyboard, or,
     /// refused, waits for a click.
     Click,
+    /// Ask Fritz… in his menu (the tray icon's, or a right-click on him): a
+    /// click on Fritz's own menu, so it takes the keyboard. Open already, it
+    /// leaves a prompt in use alone and takes the keyboard into one waiting.
+    Menu,
     /// `FRITZ_PRETEND_PROMPT`, in a debug build: off screen, the keyboard
     /// untouched, and never counted as the owner's open.
     Pretend,
@@ -233,7 +244,7 @@ pub(crate) enum WhenOpen {
 impl Opener {
     /// Shown where the owner sees it, the keyboard taken (or asked for).
     pub(crate) fn on_screen(self) -> bool {
-        matches!(self, Self::Hotkey | Self::Click)
+        matches!(self, Self::Hotkey | Self::Click | Self::Menu)
     }
 
     /// Counted as the owner's open before the take, so the foreground log
@@ -252,6 +263,7 @@ impl Opener {
         match self {
             Self::Hotkey => "hotkey",
             Self::Click => "a double-click on him",
+            Self::Menu => "his menu",
             Self::Pretend => "pretend",
             Self::PretendWait => "pretend double-click",
         }
@@ -261,28 +273,31 @@ impl Opener {
     pub(crate) fn closes_as(self) -> Why {
         match self {
             Self::Click => Why::Gesture,
-            Self::Hotkey | Self::Pretend | Self::PretendWait => Why::Toggle,
+            Self::Hotkey | Self::Menu | Self::Pretend | Self::PretendWait => Why::Toggle,
         }
     }
 
     /// Its key again closes the prompt, but takes the keyboard into one that
-    /// waits (the owner asked to type); a gesture again closes it; a pretend
-    /// never touches an open prompt.
+    /// waits (the owner asked to type); a gesture again closes it; his menu
+    /// takes the keyboard into a waiting one and leaves one in use alone; a
+    /// pretend never touches an open prompt.
     pub(crate) fn when_open(self, open: OpenKind) -> WhenOpen {
         match (self, open) {
-            (Self::Hotkey, OpenKind::Waiting) => WhenOpen::Take,
+            (Self::Hotkey | Self::Menu, OpenKind::Waiting) => WhenOpen::Take,
             (Self::Hotkey | Self::Click, _) => WhenOpen::Close,
+            (Self::Menu, _) => WhenOpen::Refuse,
             (Self::Pretend | Self::PretendWait, _) => WhenOpen::Refuse,
         }
     }
 }
 
-/// Why the prompt stays hidden.
+/// Why an open is refused (the prompt left as it was).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Refusal {
     NoWindow,
     NotReady,
-    /// A pretend open while it is open already.
+    /// A pretend open, or his menu, on a prompt open already (left as it
+    /// is).
     AlreadyOpen,
     Arranging,
     NoPlace,
@@ -323,7 +338,8 @@ pub(crate) enum Opened {
     Shown(Place),
     /// Shown, waiting for a click: Windows kept the keyboard (or a pretend).
     Waiting(Place),
-    /// Its key took the keyboard into the prompt waiting for a click.
+    /// Its key, or his menu, took the keyboard into the prompt waiting for a
+    /// click.
     Taken,
     /// It was open: the key again closed it.
     Closed(Closed),
@@ -512,7 +528,7 @@ pub(crate) fn close_on(s: &State, k: &impl Keyboard, w: &impl PromptDesk, why: W
     // prompt still waiting: never one the owner has clicked into, or its key
     // took. One in front is in use, its activation unseen: it no longer
     // waits.
-    if matches!(why, Why::Elsewhere | Why::Unanswered | Why::HookOut) {
+    if matches!(why, Why::Elsewhere | Why::Chose | Why::Unanswered | Why::HookOut) {
         if !s.waiting.load(Ordering::SeqCst) {
             return Closed::NotOpen;
         }
@@ -596,8 +612,8 @@ fn off_screen(at: Bounds) -> Bounds {
 /// Open the prompt, or, open already, close it or take the keyboard into
 /// it (`Opener::when_open`). The gates come first and touch no window; then
 /// who has the keyboard is saved, the prompt placed and shown, and (an
-/// on-screen open) the keyboard taken. Refused, the hotkey's open is
-/// undone; a gesture's waits for a click. Main thread.
+/// on-screen open) the keyboard taken. Refused, the hotkey's or his menu's
+/// open is undone; a gesture's waits for a click. Main thread.
 pub(crate) fn open_on(s: &State, k: &impl Keyboard, d: &impl PromptDesk, how: Opener) -> Opened {
     let ours = s.hwnd.load(Ordering::SeqCst);
     if ours == 0 {
@@ -651,7 +667,7 @@ pub(crate) fn open_on(s: &State, k: &impl Keyboard, d: &impl PromptDesk, how: Op
     }
     d.show();
     match how {
-        Opener::Hotkey | Opener::Click => {
+        Opener::Hotkey | Opener::Click | Opener::Menu => {
             // A gesture's open waits from the take on: a press into it
             // meanwhile is the owner's click, and one elsewhere closes it.
             if how.may_wait() {
@@ -681,9 +697,11 @@ pub(crate) fn open_on(s: &State, k: &impl Keyboard, d: &impl PromptDesk, how: Op
     }
 }
 
-/// Its key on the prompt waiting for a click: the keyboard taken into it,
-/// counted first, and who had it saved afresh (the wait may have been long,
-/// and the owner may have moved on); refused, it goes on waiting,
+/// Its key (or his menu) on the prompt waiting for a click: the keyboard
+/// taken into it, counted first, and who had it saved afresh (the wait may
+/// have been long, and the owner may have moved on; with the tray's window
+/// in front, the app in use now, as a fresh open from it saves); refused, it
+/// goes on waiting,
 /// uncounted (unless the owner clicked into it meanwhile), the save from
 /// its open kept.
 fn take_into(s: &State, k: &impl Keyboard, d: &impl PromptDesk, ours: isize) -> Opened {
@@ -878,6 +896,7 @@ pub fn toggle(app: &AppHandle, how: Opener) {
             tracing::info!("the waiting prompt goes on waiting for a click: {}", r.says());
         }
         Opened::Refused(r @ Refusal::NotGiven) => tracing::warn!("the prompt stays hidden: {}", r.says()),
+        Opened::Refused(r @ Refusal::AlreadyOpen) => tracing::info!("the prompt stays as it is ({}): {}", how.says(), r.says()),
         Opened::Refused(r) => tracing::info!("the prompt stays hidden: {}", r.says()),
     }
     if waits {
@@ -1620,6 +1639,7 @@ mod tests {
         for (how, on_screen, may_wait) in [
             (Opener::Hotkey, true, false),
             (Opener::Click, true, true),
+            (Opener::Menu, true, false),
             (Opener::Pretend, false, false),
             (Opener::PretendWait, false, true),
         ] {
@@ -1628,23 +1648,24 @@ mod tests {
         for (how, when) in [
             (Opener::Hotkey, [Close, Take, Close]),
             (Opener::Click, [Close, Close, Close]),
+            (Opener::Menu, [Refuse, Take, Refuse]),
             (Opener::Pretend, [Refuse, Refuse, Refuse]),
             (Opener::PretendWait, [Refuse, Refuse, Refuse]),
         ] {
             assert_eq!([Holding, Waiting, Pretending].map(|k| how.when_open(k)), when, "{how:?}");
         }
         assert_eq!(
-            [Opener::Hotkey, Opener::Click, Opener::Pretend, Opener::PretendWait].map(Opener::says),
-            ["hotkey", "a double-click on him", "pretend", "pretend double-click"]
+            [Opener::Hotkey, Opener::Click, Opener::Menu, Opener::Pretend, Opener::PretendWait].map(Opener::says),
+            ["hotkey", "a double-click on him", "his menu", "pretend", "pretend double-click"]
         );
         // A gesture's close says so; the rest are its key's.
         assert_eq!(
-            [Opener::Hotkey, Opener::Click, Opener::Pretend, Opener::PretendWait].map(Opener::closes_as),
-            [Why::Toggle, Why::Gesture, Why::Toggle, Why::Toggle]
+            [Opener::Hotkey, Opener::Click, Opener::Menu, Opener::Pretend, Opener::PretendWait].map(Opener::closes_as),
+            [Why::Toggle, Why::Gesture, Why::Toggle, Why::Toggle, Why::Toggle]
         );
         assert_eq!(
-            [Why::Gesture, Why::Elsewhere, Why::Unanswered, Why::HookOut].map(Why::says),
-            ["a double-click on him again", "a click elsewhere", "nobody clicked it", "the mouse hook went out"]
+            [Why::Gesture, Why::Elsewhere, Why::Chose, Why::Unanswered, Why::HookOut].map(Why::says),
+            ["a double-click on him again", "a click elsewhere", "another choice from his menu", "nobody clicked it", "the mouse hook went out"]
         );
         assert_eq!(super::WAIT_FOR_CLICK, std::time::Duration::from_secs(20));
     }
@@ -1713,8 +1734,9 @@ mod tests {
         assert_eq!(d.calls(), ["hide", "waiting false"]);
         assert!(is_closed(&s) && !s.waiting.load(Ordering::SeqCst));
         assert_eq!(takes(&s), 0);
-        // Unanswered, or the hook going out, the same.
-        for why in [Why::Unanswered, Why::HookOut] {
+        // Unanswered, another choice from his menu, or the hook going out,
+        // the same.
+        for why in [Why::Unanswered, Why::Chose, Why::HookOut] {
             let (s, d) = waiting_click();
             assert_eq!(close_on(&s, &d, &d, why, 1), Closed::Hidden, "{why:?}");
             assert_eq!(d.calls(), ["hide", "waiting false"], "{why:?}");
@@ -1738,7 +1760,7 @@ mod tests {
     /// none in time never closes it.
     #[test]
     fn elsewhere_and_unanswered_never_close_a_prompt_in_use() {
-        for why in [Why::Elsewhere, Why::Unanswered, Why::HookOut] {
+        for why in [Why::Elsewhere, Why::Chose, Why::Unanswered, Why::HookOut] {
             let (s, d) = waiting_click();
             activated(&s);
             assert_eq!(close_on(&s, &d, &d, why, 1), Closed::NotOpen, "{why:?}");
@@ -2230,6 +2252,75 @@ mod tests {
         ]);
         assert!(body("fn take_into(").contains("if take(s, k, ours, open, counted_now) {\n        s.waiting.store(false, Ordering::SeqCst);"), "waiting through the take");
         order(body("pub(crate) fn activated("), &["if s.taking.load(Ordering::SeqCst) {\n        return false;\n    }", "s.took.store(true, Ordering::SeqCst);", "s.waiting.swap(false, Ordering::SeqCst)"]);
+    }
+
+    /// Ask Fritz… opens it as its key does: the keyboard taken, counted
+    /// first; refused, it hides again (it never waits). From the tray icon's
+    /// menu (its hidden window in front), the app beneath is saved; from his
+    /// right-click menu (mouse-only), the app the owner is in.
+    #[test]
+    fn a_menu_open_takes_the_keyboard_and_counts() {
+        let s = Rc::new(ready());
+        let mut d = fake(NOTEPAD, &[NOTEPAD, PROMPT, BENEATH]);
+        d.watch = Some(Rc::clone(&s));
+        assert_eq!(open_on(&s, &d, &d, Opener::Menu), Opened::Shown(place()));
+        assert_eq!(d.calls(), [format!("place {}", rect(place().at)), "show".into(), "foreground PROMPT".into()]);
+        assert_eq!(*d.seen.borrow(), [(1, 1)], "counted before the take");
+        assert_eq!((takes(&s), s.back_to.load(Ordering::SeqCst)), (1, NOTEPAD));
+        assert!(s.took.load(Ordering::SeqCst) && !s.waiting.load(Ordering::SeqCst));
+        // From the tray icon's menu.
+        let s = ready();
+        let d = fake(TRAY, &[NOTEPAD, PROMPT, BENEATH]);
+        assert_eq!(open_on(&s, &d, &d, Opener::Menu), Opened::Shown(place()));
+        assert_eq!(s.back_to.load(Ordering::SeqCst), BENEATH);
+        // Refused: hidden again, the count given back, never waiting.
+        let s = ready();
+        let d = fake(NOTEPAD, &[NOTEPAD, BENEATH]);
+        assert_eq!(open_on(&s, &d, &d, Opener::Menu), Opened::Refused(Refusal::NotGiven));
+        assert!(d.calls().ends_with(&["foreground PROMPT".into(), "hide".into()]));
+        assert!(!s.open.load(Ordering::SeqCst) && !s.waiting.load(Ordering::SeqCst));
+        assert_eq!(takes(&s), 0);
+    }
+
+    /// On a prompt the owner is typing in, or a pretend one, Ask Fritz…
+    /// changes nothing.
+    #[test]
+    fn the_menu_leaves_a_prompt_in_use_alone() {
+        let s = opened(NOTEPAD);
+        s.ready.store(true, Ordering::SeqCst);
+        let d = fake(PROMPT, &[NOTEPAD, PROMPT]);
+        assert_eq!(open_on(&s, &d, &d, Opener::Menu), Opened::Refused(Refusal::AlreadyOpen));
+        assert!(d.calls().is_empty() && s.open.load(Ordering::SeqCst));
+        let s = ready();
+        let d = fake(NOTEPAD, &[NOTEPAD, PROMPT]);
+        assert_eq!(open_on(&s, &d, &d, Opener::Pretend), Opened::Shown(place()));
+        assert_eq!(open_on(&s, &d, &d, Opener::Menu), Opened::Refused(Refusal::AlreadyOpen));
+        // A waiting prompt the owner clicked into (in front): in use.
+        let (s, mut d) = waiting_click();
+        d.fg.set(PROMPT);
+        d.takeable.push(PROMPT);
+        assert_eq!(open_on(&s, &d, &d, Opener::Menu), Opened::Refused(Refusal::AlreadyOpen));
+        assert!(s.open.load(Ordering::SeqCst) && !s.waiting.load(Ordering::SeqCst));
+    }
+
+    /// On a waiting prompt, Ask Fritz… takes the keyboard into it, counted
+    /// once, and saves who has the keyboard now: from his right-click menu
+    /// (mouse-only), the app the owner is in; from the tray icon's menu (its
+    /// hidden window in front), the app in use, as a fresh open from it does.
+    #[test]
+    fn the_menu_takes_the_keyboard_into_a_waiting_prompt() {
+        let (s, mut d) = waiting_click();
+        d.takeable.push(PROMPT);
+        d.fg.set(NOTEPAD);
+        assert_eq!(open_on(&s, &d, &d, Opener::Menu), Opened::Taken);
+        assert_eq!(takes(&s), 1);
+        assert_eq!(s.back_to.load(Ordering::SeqCst), NOTEPAD);
+        assert_eq!(close_on(&s, &d, &d, Why::Esc, 1), Closed::HandedTo(NOTEPAD));
+        let (s, mut d) = waiting_click();
+        d.takeable.push(PROMPT);
+        d.fg.set(TRAY);
+        assert_eq!(open_on(&s, &d, &d, Opener::Menu), Opened::Taken);
+        assert_eq!(s.back_to.load(Ordering::SeqCst), BENEATH, "the app in use");
     }
 
     /// The count's word, step by step: claimed once, given back only by

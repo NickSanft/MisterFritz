@@ -35,7 +35,7 @@ use windows::Win32::UI::Shell::{
     DefSubclassProc, RemoveWindowSubclass, SHQueryUserNotificationState, SetWindowSubclass,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumThreadWindows, PostMessageW, SendMessageW, TrackPopupMenu, HMENU, TPM_LEFTALIGN, TPM_RETURNCMD,
+    EnumThreadWindows, GetMenuItemID, PostMessageW, SendMessageW, TrackPopupMenu, HMENU, TPM_LEFTALIGN, TPM_RETURNCMD,
     TPM_RIGHTBUTTON, TPM_TOPALIGN, WM_COMMAND, WM_NULL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -888,6 +888,16 @@ pub fn track_menu(menu: isize, owner: isize, at: (i32, i32)) -> u32 {
     // SAFETY: a menu and a window of this thread; a stale one only fails.
     let id = unsafe { TrackPopupMenu(HMENU(menu as *mut c_void), flags, at.0, at.1, None, hwnd(owner), None) };
     u32::try_from(id.0).unwrap_or(0)
+}
+
+/// The command id of the item at `pos` in menu `menu`, for the log; 0 for
+/// no menu (and Windows' own answers for a separator or a submenu).
+pub fn menu_item_id(menu: isize, pos: i32) -> u32 {
+    if menu == 0 {
+        return 0;
+    }
+    // SAFETY: a read of a menu handle; a stale one only fails.
+    unsafe { GetMenuItemID(HMENU(menu as *mut c_void), pos) }
 }
 
 /// A menu item's id to `owner` as `WM_COMMAND`, at once (muda's subclass on
