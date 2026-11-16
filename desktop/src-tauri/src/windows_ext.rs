@@ -212,12 +212,22 @@ pub fn pin_toolwindow(window: isize) -> bool {
     pinned && apply_toolwindow(window)
 }
 
-/// The deactivation watch's subclass id: "FRDA".
-pub(crate) const DEACTIVATE_ID: usize = 0x4652_4441;
+/// The activation watch's subclass id: "FRDA".
+pub(crate) const ACTIVATION_ID: usize = 0x4652_4441;
 
-/// Calls the watcher stored with the subclass when the window stops being
-/// the active one, and takes itself off as the window goes.
-unsafe extern "system" fn deactivate_proc(
+/// `WM_ACTIVATE`'s wParam as active or not: its low word `WA_ACTIVE` or
+/// `WA_CLICKACTIVE` (a click activated it) is active, `WA_INACTIVE` is not;
+/// the high word (minimised) is no part of it. Pure.
+pub(crate) fn activation_state(wp: usize) -> bool {
+    #[allow(clippy::cast_possible_truncation)]
+    let state = (wp & 0xFFFF) as u32;
+    state != WA_INACTIVE
+}
+
+/// Calls the watcher stored with the subclass each time the window becomes
+/// the active one or stops being it, and takes itself off as the window
+/// goes.
+unsafe extern "system" fn activate_proc(
     h: HWND,
     msg: u32,
     wp: WPARAM,
@@ -225,33 +235,32 @@ unsafe extern "system" fn deactivate_proc(
     _id: usize,
     data: usize,
 ) -> LRESULT {
-    #[allow(clippy::cast_possible_truncation)]
-    let state = (wp.0 & 0xFFFF) as u32;
-    if msg == WM_ACTIVATE && state == WA_INACTIVE && data != 0 {
-        // SAFETY: `data` is the `fn()` that `watch_deactivation` stored, as
+    if msg == WM_ACTIVATE && data != 0 {
+        // SAFETY: `data` is the `fn(bool)` that `watch_activation` stored, as
         // an integer the size of a pointer; nothing else sets this id.
-        let on_inactive = unsafe { std::mem::transmute::<usize, fn()>(data) };
-        on_inactive();
+        let on_change = unsafe { std::mem::transmute::<usize, fn(bool)>(data) };
+        on_change(activation_state(wp.0));
     } else if msg == WM_NCDESTROY {
         // SAFETY: our own subclass on the window it was set on.
-        let _ = unsafe { RemoveWindowSubclass(h, Some(deactivate_proc), DEACTIVATE_ID) };
+        let _ = unsafe { RemoveWindowSubclass(h, Some(activate_proc), ACTIVATION_ID) };
     }
     // SAFETY: passes the message on down the subclass chain unchanged.
     unsafe { DefSubclassProc(h, msg, wp, lp) }
 }
 
-/// Call `on_inactive` each time `window` stops being the active window
-/// (`WM_ACTIVATE` with `WA_INACTIVE`), from inside its window procedure, so
-/// it must only post, never act there. Windows says so whatever the webview
-/// inside was told, which is why a window can't rely on the webview's own
-/// blur alone. Must run on the window's own thread (the main thread).
-pub fn watch_deactivation(window: isize, on_inactive: fn()) -> bool {
+/// Call `on_change` each time `window` becomes the active window (true:
+/// `WA_ACTIVE`, or `WA_CLICKACTIVE` for a click into it) or stops being it
+/// (false), from inside its window procedure, so it must only store and
+/// post, never act there. Windows says so whatever the webview inside was
+/// told, which is why a window can't rely on the webview's own focus alone.
+/// Must run on the window's own thread (the main thread).
+pub fn watch_activation(window: isize, on_change: fn(bool)) -> bool {
     if window == 0 {
         return false;
     }
     // SAFETY: a window of this thread and a static procedure, which removes
     // itself at WM_NCDESTROY; the data is a plain function pointer.
-    unsafe { SetWindowSubclass(hwnd(window), Some(deactivate_proc), DEACTIVATE_ID, on_inactive as usize) }.as_bool()
+    unsafe { SetWindowSubclass(hwnd(window), Some(activate_proc), ACTIVATION_ID, on_change as usize) }.as_bool()
 }
 
 /// The window at the top of `window`'s owner chain (itself, with no owner);
@@ -1595,6 +1604,25 @@ mod under_the_mouse {
         assert_eq!(super::track_menu(7, 0, (0, 0)), 0);
         super::send_command(0, 1003);
         super::post_null(0);
+    }
+
+    #[test]
+    fn activation_state_table() {
+        for (wp, active) in [
+            (0usize, false),     // WA_INACTIVE
+            (1, true),           // WA_ACTIVE
+            (2, true),           // WA_CLICKACTIVE: a click into it
+            (0x0001_0000, false), // inactive and minimised
+            (0x0001_0002, true), // clicked into, minimised flag set
+        ] {
+            assert_eq!(super::activation_state(wp), active, "{wp:#x}");
+        }
+        // The procedure passes Windows' word on, read by that table.
+        let src = include_str!("windows_ext.rs").replace("\r\n", "\n");
+        let at = src.find("unsafe extern \"system\" fn activate_proc(").unwrap();
+        let proc_ = &src[at..at + src[at..].find("\n}\n").unwrap()];
+        assert!(proc_.contains("if msg == WM_ACTIVATE && data != 0 {"));
+        assert!(proc_.contains("on_change(activation_state(wp.0));"));
     }
 
     #[test]

@@ -14,9 +14,19 @@
 //! takes the keyboard with plain `SetForegroundWindow`; if Windows refuses,
 //! it hides again at once. The key again closes it.
 //!
+//! **A prompt that waits for a click.** Opened by a gesture on him (a
+//! double-click, from a later commit) that Windows won't give the keyboard
+//! to, it stays shown and waits: its page says "Click here to type…", and
+//! the owner's click into it is a click on a window of ours, which Windows
+//! activates. It closes unanswered after `WAIT_FOR_CLICK`, and on a click
+//! elsewhere; its key takes the keyboard into it. A waiting open isn't the
+//! owner's for the foreground log until they click into it or its key
+//! takes it (`takes`): the prompt coming to the front otherwise is a HIT.
+//!
 //! Every way out is one close, which runs once however many ask for it: a
 //! question taken (Enter), Esc, Alt+F4, its key again, its page loading
-//! again, or the owner going to another window.
+//! again, the owner going to another window, or, while it waits for a
+//! click, a click elsewhere or nobody clicking it in time.
 //! 1. While the prompt still has the keyboard, it hands it back, by
 //!    [`crate::keyboard`]'s rules: to the window saved before it took it,
 //!    else the app in use.
@@ -39,8 +49,9 @@
 use std::ffi::OsString;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::time::Duration;
 
-use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewWindow, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow, WindowEvent};
 
 use crate::keyboard::{self, Keyboard};
 use crate::overlay_machine::should_return_focus;
@@ -60,11 +71,20 @@ const GAP: f64 = 12.0;
 pub const PRETEND_ENV: &str = "FRITZ_PRETEND_PROMPT";
 /// The pretend open happens once a run.
 static PRETENDED: AtomicBool = AtomicBool::new(false);
+/// `FRITZ_PRETEND_PROMPT`'s value for a pretend open that waits for a click.
+pub const PRETEND_WAIT: &str = "wait";
+/// Tells the prompt's page whether it waits for a click (`true`) or not.
+pub const WAITING_EVENT: &str = "prompt:waiting";
+/// How long a prompt waits for a click before it closes.
+pub const WAIT_FOR_CLICK: Duration = Duration::from_secs(20);
 
 /// Where the prompt stands: its HWND, whether its page is ready and whether
 /// it is open, who had the keyboard before it took it, how many times it has
 /// been opened (each close carries the open it was asked in), and how many
-/// of those opens took the keyboard (the foreground log's fresh open).
+/// of those opens are the owner's (the foreground log's fresh open). For the
+/// open showing now: whether it waits for a click, whether it ever had the
+/// keyboard, whether it is counted in `takes`, whether it is a pretend, and
+/// whether its page was told it waits.
 pub(crate) struct State {
     hwnd: AtomicIsize,
     ready: AtomicBool,
@@ -72,6 +92,11 @@ pub(crate) struct State {
     back_to: AtomicIsize,
     opens: AtomicU64,
     takes: AtomicU64,
+    waiting: AtomicBool,
+    took: AtomicBool,
+    counted: AtomicBool,
+    pretend: AtomicBool,
+    told: AtomicBool,
 }
 
 impl State {
@@ -83,12 +108,17 @@ impl State {
             back_to: AtomicIsize::new(0),
             opens: AtomicU64::new(0),
             takes: AtomicU64::new(0),
+            waiting: AtomicBool::new(false),
+            took: AtomicBool::new(false),
+            counted: AtomicBool::new(false),
+            pretend: AtomicBool::new(false),
+            told: AtomicBool::new(false),
         }
     }
 }
 
 static STATE: State = State::new();
-/// The app, for the deactivation watch (a plain `fn()` in a window procedure).
+/// The app, for the activation watch (a plain `fn(bool)` in a window procedure).
 static APP: OnceLock<AppHandle> = OnceLock::new();
 
 /// Why the prompt is closing.
@@ -104,6 +134,12 @@ pub enum Why {
     Reload,
     /// Its key, pressed again.
     Toggle,
+    /// A click elsewhere, while it waited for one (the hook's, from the
+    /// double-click's commit).
+    #[allow(dead_code)]
+    Elsewhere,
+    /// Nobody clicked into it in time.
+    Unanswered,
 }
 
 impl Why {
@@ -115,6 +151,8 @@ impl Why {
             Self::Blur => "the owner went elsewhere",
             Self::Reload => "its page loaded again",
             Self::Toggle => "its key again",
+            Self::Elsewhere => "a click elsewhere",
+            Self::Unanswered => "nobody clicked it",
         }
     }
 }
@@ -140,9 +178,75 @@ pub(crate) enum Closed {
 pub enum Opener {
     /// Its hotkey: it takes the keyboard.
     Hotkey,
+    /// A gesture on him: it takes the keyboard, or, refused, waits for a
+    /// click (the double-click, from its own commit).
+    #[allow(dead_code)]
+    Click,
     /// `FRITZ_PRETEND_PROMPT`, in a debug build: off screen, the keyboard
     /// untouched, and never counted as the owner's open.
     Pretend,
+    /// `FRITZ_PRETEND_PROMPT=wait`: a pretend open that waits for a click,
+    /// as a refused gesture's does.
+    PretendWait,
+}
+
+/// What is open when an opener comes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenKind {
+    /// It has (or had) the keyboard.
+    Holding,
+    /// It waits for a click.
+    Waiting,
+    /// A pretend open.
+    Pretend,
+}
+
+/// What an opener does to a prompt already open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WhenOpen {
+    Close,
+    /// Take the keyboard into the waiting prompt.
+    Take,
+    Refuse,
+}
+
+impl Opener {
+    /// Shown where the owner sees it, the keyboard taken (or asked for).
+    pub(crate) fn on_screen(self) -> bool {
+        matches!(self, Self::Hotkey | Self::Click)
+    }
+
+    /// Counted as the owner's open before the take, so the foreground log
+    /// never sees the prompt in front without it.
+    pub(crate) fn counts(self) -> bool {
+        self.on_screen()
+    }
+
+    /// Refused the keyboard, it waits for a click rather than hiding.
+    pub(crate) fn may_wait(self) -> bool {
+        matches!(self, Self::Click | Self::PretendWait)
+    }
+
+    /// The opener, for the log.
+    pub(crate) fn says(self) -> &'static str {
+        match self {
+            Self::Hotkey => "hotkey",
+            Self::Click => "a double-click on him",
+            Self::Pretend => "pretend",
+            Self::PretendWait => "pretend double-click",
+        }
+    }
+
+    /// Its key again closes the prompt, but takes the keyboard into one that
+    /// waits (the owner asked to type); a gesture again closes it; a pretend
+    /// never touches an open prompt.
+    pub(crate) fn when_open(self, open: OpenKind) -> WhenOpen {
+        match (self, open) {
+            (Self::Hotkey, OpenKind::Waiting) => WhenOpen::Take,
+            (Self::Hotkey | Self::Click, _) => WhenOpen::Close,
+            (Self::Pretend | Self::PretendWait, _) => WhenOpen::Refuse,
+        }
+    }
 }
 
 /// Why the prompt stays hidden.
@@ -189,6 +293,10 @@ pub(crate) struct Place {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Opened {
     Shown(Place),
+    /// Shown, waiting for a click: Windows kept the keyboard (or a pretend).
+    Waiting(Place),
+    /// Its key took the keyboard into the prompt waiting for a click.
+    Taken,
     /// It was open: the key again closed it.
     Closed(Closed),
     Refused(Refusal),
@@ -210,12 +318,26 @@ pub(crate) trait PromptDesk {
     fn place(&self, at: Bounds);
     /// Show it, without activating it.
     fn show(&self);
+    /// Tell its page whether it waits for a click.
+    fn tell_waiting(&self, on: bool);
+}
+
+/// Tell the page it waits, or no longer does, only when that changes.
+fn tell(s: &State, w: &impl PromptDesk, on: bool) {
+    if s.told.swap(on, Ordering::SeqCst) != on {
+        w.tell_waiting(on);
+    }
 }
 
 /// Close the prompt, if open `open` is still the one showing: the order the
 /// module's doc gives, deciding by who has the keyboard now. Main thread.
 pub(crate) fn close_on(s: &State, k: &impl Keyboard, w: &impl PromptDesk, why: Why, open: u64) -> Closed {
     if !s.open.load(Ordering::SeqCst) || s.opens.load(Ordering::SeqCst) != open {
+        return Closed::NotOpen;
+    }
+    // A click elsewhere, or none in time, closes only a prompt still
+    // waiting: never one the owner has clicked into, or its key took.
+    if matches!(why, Why::Elsewhere | Why::Unanswered) && !s.waiting.load(Ordering::SeqCst) {
         return Closed::NotOpen;
     }
     let ours = s.hwnd.load(Ordering::SeqCst);
@@ -227,9 +349,17 @@ pub(crate) fn close_on(s: &State, k: &impl Keyboard, w: &impl PromptDesk, why: W
     if !s.open.swap(false, Ordering::SeqCst) {
         return Closed::NotOpen;
     }
+    // Still waiting, it never had the keyboard (the tray's menu may have it
+    // now): nothing to hand back, unless it has it after all (its
+    // activation unseen: the watch didn't go in).
+    let waited = s.waiting.swap(false, Ordering::SeqCst);
+    // Counted, but the keyboard never went in: not the owner's after all.
+    if s.counted.swap(false, Ordering::SeqCst) && !s.took.load(Ordering::SeqCst) {
+        s.takes.fetch_sub(1, Ordering::SeqCst);
+    }
     let saved = s.back_to.swap(0, Ordering::SeqCst);
     let settings = k.settings_window();
-    let target = if why == Why::Blur {
+    let target = if why == Why::Blur || (waited && !holds(fg)) {
         0
     } else if holds(fg) {
         keyboard::hand_back(saved, ours, k)
@@ -243,6 +373,7 @@ pub(crate) fn close_on(s: &State, k: &impl Keyboard, w: &impl PromptDesk, why: W
     // The prompt has the keyboard here, or the tray's window stands in for it.
     let handed = should_return_focus(ours, ours, target, k.can_take_foreground(target)) && k.try_foreground(target);
     w.hide();
+    tell(s, w, false);
     if holds(k.foreground()) {
         let to = k.next_app_window(ours, settings);
         k.try_foreground(to);
@@ -285,10 +416,11 @@ fn off_screen(at: Bounds) -> Bounds {
     Bounds { left: x, top: y, right: x + at.width(), bottom: y + at.height() }
 }
 
-/// Open the prompt, or close it with its key again. The gates come first and
-/// touch no window; then who has the keyboard is saved, the prompt placed
-/// and shown, and (the hotkey's open only) the keyboard taken, the open
-/// undone if Windows refuses. Main thread.
+/// Open the prompt, or, open already, close it or take the keyboard into
+/// it (`Opener::when_open`). The gates come first and touch no window; then
+/// who has the keyboard is saved, the prompt placed and shown, and (an
+/// on-screen open) the keyboard taken. Refused, the hotkey's open is
+/// undone; a gesture's waits for a click. Main thread.
 pub(crate) fn open_on(s: &State, k: &impl Keyboard, d: &impl PromptDesk, how: Opener) -> Opened {
     let ours = s.hwnd.load(Ordering::SeqCst);
     if ours == 0 {
@@ -298,9 +430,17 @@ pub(crate) fn open_on(s: &State, k: &impl Keyboard, d: &impl PromptDesk, how: Op
         return Opened::Refused(Refusal::NotReady);
     }
     if s.open.load(Ordering::SeqCst) {
-        return match how {
-            Opener::Hotkey => Opened::Closed(close_on(s, k, d, Why::Toggle, s.opens.load(Ordering::SeqCst))),
-            Opener::Pretend => Opened::Refused(Refusal::AlreadyOpen),
+        let kind = if s.pretend.load(Ordering::SeqCst) {
+            OpenKind::Pretend
+        } else if s.waiting.load(Ordering::SeqCst) {
+            OpenKind::Waiting
+        } else {
+            OpenKind::Holding
+        };
+        return match how.when_open(kind) {
+            WhenOpen::Close => Opened::Closed(close_on(s, k, d, Why::Toggle, s.opens.load(Ordering::SeqCst))),
+            WhenOpen::Take => take_into(s, k, d, ours),
+            WhenOpen::Refuse => Opened::Refused(Refusal::AlreadyOpen),
         };
     }
     if d.arranging() {
@@ -312,26 +452,85 @@ pub(crate) fn open_on(s: &State, k: &impl Keyboard, d: &impl PromptDesk, how: Op
     if let Some(by) = d.blocked(place.at) {
         return Opened::Refused(Refusal::Blocked(by));
     }
-    let hotkey = how == Opener::Hotkey;
-    let back_to = if hotkey { keyboard::return_target(k.foreground(), ours, k) } else { 0 };
+    let on_screen = how.on_screen();
+    let back_to = if on_screen { keyboard::return_target(k.foreground(), ours, k) } else { 0 };
     s.back_to.store(back_to, Ordering::SeqCst);
-    d.place(if hotkey { place.at } else { off_screen(place.at) });
+    d.place(if on_screen { place.at } else { off_screen(place.at) });
+    // Every open starts afresh.
+    s.waiting.store(false, Ordering::SeqCst);
+    s.took.store(false, Ordering::SeqCst);
+    s.counted.store(false, Ordering::SeqCst);
+    s.pretend.store(!on_screen, Ordering::SeqCst);
     s.open.store(true, Ordering::SeqCst);
     s.opens.fetch_add(1, Ordering::SeqCst);
     // Counted before the take, so the foreground log, polling on its own
     // thread, never sees the prompt in front without it.
-    if hotkey {
+    if how.counts() {
         s.takes.fetch_add(1, Ordering::SeqCst);
+        s.counted.store(true, Ordering::SeqCst);
+    }
+    // Told before it shows: if it is refused the keyboard, the page already
+    // asks for a click.
+    if how.may_wait() {
+        tell(s, d, true);
     }
     d.show();
-    if hotkey && !k.try_foreground(ours) {
-        s.open.store(false, Ordering::SeqCst);
-        s.back_to.store(0, Ordering::SeqCst);
-        s.takes.fetch_sub(1, Ordering::SeqCst);
-        d.hide();
-        return Opened::Refused(Refusal::NotGiven);
+    match how {
+        Opener::Hotkey | Opener::Click => {
+            if k.try_foreground(ours) {
+                s.took.store(true, Ordering::SeqCst);
+                tell(s, d, false);
+                Opened::Shown(place)
+            } else if how.may_wait() {
+                s.waiting.store(true, Ordering::SeqCst);
+                // Not the owner's open until they click into it, or its key
+                // takes the keyboard into it.
+                s.counted.store(false, Ordering::SeqCst);
+                s.takes.fetch_sub(1, Ordering::SeqCst);
+                Opened::Waiting(place)
+            } else {
+                s.open.store(false, Ordering::SeqCst);
+                s.back_to.store(0, Ordering::SeqCst);
+                s.counted.store(false, Ordering::SeqCst);
+                s.takes.fetch_sub(1, Ordering::SeqCst);
+                d.hide();
+                Opened::Refused(Refusal::NotGiven)
+            }
+        }
+        Opener::Pretend => Opened::Shown(place),
+        Opener::PretendWait => {
+            s.waiting.store(true, Ordering::SeqCst);
+            Opened::Waiting(place)
+        }
     }
-    Opened::Shown(place)
+}
+
+/// Its key on the prompt waiting for a click: the keyboard taken into it,
+/// counted first, and who had it saved afresh (the wait may have been long,
+/// and the owner may have moved on); refused, it goes on waiting,
+/// uncounted, the save from its open kept.
+fn take_into(s: &State, k: &impl Keyboard, d: &impl PromptDesk, ours: isize) -> Opened {
+    let counted_now = !s.counted.swap(true, Ordering::SeqCst);
+    if counted_now {
+        s.takes.fetch_add(1, Ordering::SeqCst);
+    }
+    let back_to = keyboard::return_target(k.foreground(), ours, k);
+    // No longer waiting before the take: Windows activates the prompt inside
+    // it, and that activation is the key's, not the owner's click.
+    s.waiting.store(false, Ordering::SeqCst);
+    if k.try_foreground(ours) {
+        s.back_to.store(back_to, Ordering::SeqCst);
+        s.took.store(true, Ordering::SeqCst);
+        tell(s, d, false);
+        Opened::Taken
+    } else {
+        s.waiting.store(true, Ordering::SeqCst);
+        if counted_now {
+            s.counted.store(false, Ordering::SeqCst);
+            s.takes.fetch_sub(1, Ordering::SeqCst);
+        }
+        Opened::Refused(Refusal::NotGiven)
+    }
 }
 
 /// The prompt and the desktop, for `open_on` and `close_on`.
@@ -395,6 +594,10 @@ impl PromptDesk for Live<'_> {
     fn show(&self) {
         let _ = self.window.show();
     }
+
+    fn tell_waiting(&self, on: bool) {
+        let _ = self.window.emit_to(LABEL, WAITING_EVENT, on);
+    }
 }
 
 /// A rectangle for the log.
@@ -424,11 +627,16 @@ pub fn hotkey_request(id: &str, pressed: bool) -> bool {
     pressed && id == crate::hotkeys::PROMPT
 }
 
-/// Whether a pretend open is asked for: in a debug build, with
-/// `FRITZ_PRETEND_PROMPT` set (`debug` is `cfg!(debug_assertions)` at the
-/// one caller, so a release build never reads it).
-pub fn pretend_wanted(debug: bool, env: Option<OsString>) -> bool {
-    debug && env.is_some_and(|v| !v.is_empty())
+/// The pretend open asked for, if any: in a debug build, with
+/// `FRITZ_PRETEND_PROMPT` set, `wait` for one that waits for a click, any
+/// other value for PR 4's (`debug` is `cfg!(debug_assertions)` at the one
+/// caller, so a release build never reads it).
+pub fn pretend_kind(debug: bool, env: Option<OsString>) -> Option<Opener> {
+    if !debug {
+        return None;
+    }
+    let v = env.filter(|v| !v.is_empty())?;
+    Some(if v == PRETEND_WAIT { Opener::PretendWait } else { Opener::Pretend })
 }
 
 /// Open or close the prompt, and say what happened. The hotkey's runs inline
@@ -438,28 +646,63 @@ pub fn toggle(app: &AppHandle, how: Opener) {
         tracing::warn!("there is no prompt window");
         return;
     };
-    match open_on(&STATE, &keyboard::Desk::of(app), &Live { app, window: &w }, how) {
-        Opened::Shown(p) if how == Opener::Hotkey => tracing::info!("the prompt opened (hotkey) at {}", rect(p.at)),
-        Opened::Shown(p) => tracing::info!(
-            "the prompt opened (pretend: off screen, keyboard untouched); it would stand at {} in the work area {}, by his window at {}",
+    let opened = open_on(&STATE, &keyboard::Desk::of(app), &Live { app, window: &w }, how);
+    // A new open waiting for a click is timed; one its key failed to take
+    // into is timed already.
+    let waits = matches!(opened, Opened::Waiting(_));
+    match opened {
+        Opened::Shown(p) if how.on_screen() => {
+            tracing::info!("the prompt opened ({}) and took the keyboard at {}", how.says(), rect(p.at));
+        }
+        Opened::Shown(p) | Opened::Waiting(p) if !how.on_screen() => tracing::info!(
+            "the prompt opened ({}: off screen, keyboard untouched){}; it would stand at {} in the work area {}, by his window at {}",
+            how.says(),
+            if how.may_wait() { " and waits for a click" } else { "" },
             rect(p.at),
             rect(p.work),
             p.anchor.map_or_else(|| "(none)".to_owned(), rect)
         ),
+        Opened::Shown(_) => {}
+        Opened::Waiting(_) => {
+            tracing::info!("the prompt opened ({}) and waits for a click: Windows kept the keyboard where it was", how.says());
+        }
+        Opened::Taken => tracing::info!("the keyboard went into the waiting prompt ({})", how.says()),
         Opened::Closed(c) => log_closed(Why::Toggle, c),
+        Opened::Refused(r @ Refusal::NotGiven) if STATE.waiting.load(Ordering::SeqCst) => {
+            tracing::info!("the waiting prompt goes on waiting for a click: {}", r.says());
+        }
         Opened::Refused(r @ Refusal::NotGiven) => tracing::warn!("the prompt stays hidden: {}", r.says()),
         Opened::Refused(r) => tracing::info!("the prompt stays hidden: {}", r.says()),
+    }
+    if waits {
+        unanswered_after(app, opens(), WAIT_FOR_CLICK);
+    }
+}
+
+/// Close the prompt waiting for a click, open `open`, if nobody has clicked
+/// into it after `wait`. A sleeper of its own; the close is posted, and is
+/// ignored by a later open or a prompt no longer waiting.
+fn unanswered_after(app: &AppHandle, open: u64, wait: Duration) {
+    let h = app.clone();
+    let spawned = std::thread::Builder::new().name("prompt-waits".into()).spawn(move || {
+        std::thread::sleep(wait);
+        close_later(&h, Why::Unanswered, open);
+    });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "couldn't time the waiting prompt: it closes on a click elsewhere or its key");
     }
 }
 
 /// The prompt's page says it is ready (`prompt_ready`): the hotkey may open
-/// it. With `pretend`, the first time, the pretend open, posted.
-pub fn page_ready(app: &AppHandle, pretend: bool) {
+/// it. With `pretend`, the first time, that pretend open, posted.
+pub fn page_ready(app: &AppHandle, pretend: Option<Opener>) {
     if !STATE.ready.swap(true, Ordering::SeqCst) {
         tracing::info!("the prompt's page is ready");
     }
-    if pretend && !PRETENDED.swap(true, Ordering::SeqCst) {
-        post(app, |h| toggle(h, Opener::Pretend));
+    if let Some(how) = pretend {
+        if !PRETENDED.swap(true, Ordering::SeqCst) {
+            post(app, move |h| toggle(h, how));
+        }
     }
 }
 
@@ -478,7 +721,8 @@ fn post(app: &AppHandle, f: impl FnOnce(&AppHandle) + Send + 'static) {
 }
 
 /// At setup, on the main thread: remember the prompt's HWND, keep it out of
-/// Alt-Tab (as the avatar is), and watch for the owner going elsewhere.
+/// Alt-Tab (as the avatar is), and watch its activation (the owner clicking
+/// into it while it waits, or going elsewhere).
 pub fn adopt(app: &tauri::App) {
     let _ = APP.set(app.handle().clone());
     let Some(hwnd) = app
@@ -493,19 +737,47 @@ pub fn adopt(app: &tauri::App) {
     if !windows_ext::pin_toolwindow(hwnd) {
         tracing::warn!("couldn't keep the prompt out of Alt-Tab");
     }
-    if !windows_ext::watch_deactivation(hwnd, deactivated) {
-        tracing::warn!("couldn't watch the prompt for the owner going elsewhere");
+    if !windows_ext::watch_activation(hwnd, activation) {
+        tracing::warn!(
+            "couldn't watch the prompt's activation: a click into it while it waits won't be seen (it closes unanswered), and the owner going elsewhere only by its page"
+        );
     }
 }
 
-/// Windows says the prompt is no longer the active window: from inside its
-/// window procedure, so only post.
-fn deactivated() {
+/// Windows says the prompt became the active window, or stopped being it:
+/// from inside its window procedure, so only store and post. Active, it
+/// has had the keyboard (a waiting prompt clicked into stops waiting);
+/// inactive, the owner went elsewhere.
+fn activation(active: bool) {
     logs::guard("prompt", || {
-        if let Some(app) = APP.get() {
+        let Some(app) = APP.get() else {
+            return;
+        };
+        if active {
+            if activated(&STATE) {
+                post(app, no_longer_waits);
+            }
+        } else {
             close_later(app, Why::Blur, opens());
         }
     });
+}
+
+/// The waiting prompt became the active window (the owner's click into it,
+/// or Windows' own doing; never its key's take, which stops the wait
+/// first): its page told it no longer waits. Main thread, posted.
+fn no_longer_waits(h: &AppHandle) {
+    if let Some(w) = h.get_webview_window(LABEL) {
+        tell(&STATE, &Live { app: h, window: &w }, false);
+    }
+    tracing::info!("the waiting prompt became the active window: it no longer waits");
+}
+
+/// The prompt became active: it has had the keyboard. Whether it was
+/// waiting for a click, which it no longer is.
+pub(crate) fn activated(s: &State) -> bool {
+    s.took.store(true, Ordering::SeqCst);
+    s.waiting.swap(false, Ordering::SeqCst)
 }
 
 /// Close the prompt (`why`), if open `open` is still the one showing,
@@ -578,7 +850,8 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::{
-        close_on, hotkey_request, open_on, prompt_rect, Closed, Opened, Opener, Place, PromptDesk, Refusal, State, Why,
+        activated, close_on, hotkey_request, open_on, prompt_rect, Closed, OpenKind, Opened, Opener, Place, PromptDesk,
+        Refusal, State, WhenOpen, Why,
     };
     use crate::keyboard::Keyboard;
     use crate::windows_ext::Bounds;
@@ -624,7 +897,9 @@ mod tests {
     /// prompt that leaves the foreground with `after_hide` when it hides
     /// while it has it (Windows' own choice; nobody, unless a test says).
     /// `watch`, when set, is the state whose counts a take of the prompt's
-    /// records in `seen`.
+    /// records in `seen`; a granted take then activates the prompt inside
+    /// it, as Windows does, and `woke` records whether that read as the end
+    /// of a wait.
     struct Fake {
         fg: Cell<isize>,
         takeable: Vec<isize>,
@@ -635,6 +910,7 @@ mod tests {
         blocked: Option<String>,
         watch: Option<Rc<State>>,
         seen: RefCell<Vec<(u64, u64)>>,
+        woke: RefCell<Vec<bool>>,
         calls: RefCell<Vec<String>>,
     }
 
@@ -649,6 +925,7 @@ mod tests {
             blocked: None,
             watch: None,
             seen: RefCell::default(),
+            woke: RefCell::default(),
             calls: RefCell::default(),
         }
     }
@@ -671,6 +948,9 @@ mod tests {
             let ok = self.takeable.contains(&hwnd) && !self.refuses.contains(&hwnd);
             if ok {
                 self.fg.set(hwnd);
+                if let (PROMPT, Some(s)) = (hwnd, &self.watch) {
+                    self.woke.borrow_mut().push(activated(s));
+                }
             }
             ok
         }
@@ -717,6 +997,9 @@ mod tests {
         }
         fn show(&self) {
             self.calls.borrow_mut().push("show".into());
+        }
+        fn tell_waiting(&self, on: bool) {
+            self.calls.borrow_mut().push(format!("waiting {on}"));
         }
     }
 
@@ -922,6 +1205,8 @@ mod tests {
             let d = fake(fg, &[PROMPT, BENEATH]);
             assert_eq!(open_on(&s, &d, &d, Opener::Hotkey), Opened::Shown(place()), "{}", name(fg));
             assert_eq!(s.back_to.load(Ordering::SeqCst), BENEATH, "{}", name(fg));
+            // Had, by the open's own word (no activation seen here).
+            assert!(s.took.load(Ordering::SeqCst), "{}", name(fg));
         }
         // Opened from Settings, the keyboard goes back to Settings.
         let s = ready();
@@ -1090,6 +1375,323 @@ mod tests {
         // still answers, never panicking.
         assert_eq!(prompt_rect(None, WORK, 10), prompt_rect(None, WORK, 48));
         let _ = prompt_rect(Some(HIM), b(0, 0, 10, 10), 96);
+    }
+
+    #[test]
+    fn the_openers_table() {
+        use OpenKind::{Holding, Pretend as Pretending, Waiting};
+        use WhenOpen::{Close, Refuse, Take};
+        for (how, on_screen, may_wait) in [
+            (Opener::Hotkey, true, false),
+            (Opener::Click, true, true),
+            (Opener::Pretend, false, false),
+            (Opener::PretendWait, false, true),
+        ] {
+            assert_eq!((how.on_screen(), how.counts(), how.may_wait()), (on_screen, on_screen, may_wait), "{how:?}");
+        }
+        for (how, when) in [
+            (Opener::Hotkey, [Close, Take, Close]),
+            (Opener::Click, [Close, Close, Close]),
+            (Opener::Pretend, [Refuse, Refuse, Refuse]),
+            (Opener::PretendWait, [Refuse, Refuse, Refuse]),
+        ] {
+            assert_eq!([Holding, Waiting, Pretending].map(|k| how.when_open(k)), when, "{how:?}");
+        }
+        assert_eq!(
+            [Opener::Hotkey, Opener::Click, Opener::Pretend, Opener::PretendWait].map(Opener::says),
+            ["hotkey", "a double-click on him", "pretend", "pretend double-click"]
+        );
+        assert_eq!(super::WAIT_FOR_CLICK, std::time::Duration::from_secs(20));
+    }
+
+    fn takes(s: &State) -> u64 {
+        s.takes.load(Ordering::SeqCst)
+    }
+
+    /// A gesture's open the keyboard is given to is the hotkey's open, the
+    /// page told it may wait before it shows and told it doesn't once it has
+    /// the keyboard.
+    #[test]
+    fn a_click_open_granted_is_the_hotkeys_open() {
+        let s = Rc::new(ready());
+        let mut d = fake(NOTEPAD, &[NOTEPAD, PROMPT, BENEATH]);
+        d.watch = Some(Rc::clone(&s));
+        assert_eq!(open_on(&s, &d, &d, Opener::Click), Opened::Shown(place()));
+        let at = format!("place {}", rect(place().at));
+        assert_eq!(d.calls(), [at, "waiting true".into(), "show".into(), "foreground PROMPT".into(), "waiting false".into()]);
+        assert_eq!(*d.seen.borrow(), [(1, 1)], "counted before the take");
+        assert_eq!(takes(&s), 1);
+        assert!(s.took.load(Ordering::SeqCst) && !s.waiting.load(Ordering::SeqCst));
+        assert_eq!(s.back_to.load(Ordering::SeqCst), NOTEPAD);
+    }
+
+    /// Refused, it stays shown and waits, and isn't the owner's open (yet).
+    #[test]
+    fn a_click_open_refused_waits_shown() {
+        let s = Rc::new(ready());
+        let mut d = fake(NOTEPAD, &[NOTEPAD, BENEATH]);
+        d.watch = Some(Rc::clone(&s));
+        assert_eq!(open_on(&s, &d, &d, Opener::Click), Opened::Waiting(place()));
+        let at = format!("place {}", rect(place().at));
+        assert_eq!(d.calls(), [at, "waiting true".into(), "show".into(), "foreground PROMPT".into()], "never hidden");
+        assert_eq!(*d.seen.borrow(), [(1, 1)], "counted for the take");
+        assert_eq!(takes(&s), 0, "given back: not the owner's until clicked into");
+        assert!(s.open.load(Ordering::SeqCst) && s.waiting.load(Ordering::SeqCst));
+        assert!(!s.took.load(Ordering::SeqCst) && !s.counted.load(Ordering::SeqCst));
+    }
+
+    /// The hotkey's open refused still hides at once: only a gesture waits.
+    #[test]
+    fn only_a_click_may_wait() {
+        let s = ready();
+        let d = fake(NOTEPAD, &[NOTEPAD, BENEATH]);
+        assert_eq!(open_on(&s, &d, &d, Opener::Hotkey), Opened::Refused(Refusal::NotGiven));
+        assert!(!d.calls().iter().any(|c| c.starts_with("waiting")));
+        assert!(!s.open.load(Ordering::SeqCst) && !s.waiting.load(Ordering::SeqCst));
+    }
+
+    fn waiting_click() -> (State, Fake) {
+        let s = ready();
+        let d = fake(NOTEPAD, &[NOTEPAD, BENEATH]);
+        assert_eq!(open_on(&s, &d, &d, Opener::Click), Opened::Waiting(place()));
+        d.calls.borrow_mut().clear();
+        (s, d)
+    }
+
+    /// A click elsewhere closes it: hidden, the page told, nothing handed
+    /// back (the owner's app still has the keyboard), nothing counted.
+    #[test]
+    fn a_waiting_prompt_closed_elsewhere_gives_nothing_back() {
+        let (s, d) = waiting_click();
+        assert_eq!(close_on(&s, &d, &d, Why::Elsewhere, 1), Closed::Hidden);
+        assert_eq!(d.calls(), ["hide", "waiting false"]);
+        assert!(is_closed(&s) && !s.waiting.load(Ordering::SeqCst));
+        assert_eq!(takes(&s), 0);
+        // Unanswered, the same.
+        let (s, d) = waiting_click();
+        assert_eq!(close_on(&s, &d, &d, Why::Unanswered, 1), Closed::Hidden);
+        assert_eq!(d.calls(), ["hide", "waiting false"]);
+    }
+
+    /// Clicked into, it is an ordinary open: Esc hands the keyboard back to
+    /// the app it came from.
+    #[test]
+    fn clicked_into_it_is_an_ordinary_open() {
+        let (s, d) = waiting_click();
+        d.fg.set(PROMPT);
+        assert!(activated(&s), "it was waiting");
+        assert!(!s.waiting.load(Ordering::SeqCst) && s.took.load(Ordering::SeqCst));
+        assert!(!activated(&s), "waiting no more");
+        assert_eq!(close_on(&s, &d, &d, Why::Esc, 1), Closed::HandedTo(NOTEPAD));
+        assert_eq!(d.calls(), ["foreground NOTEPAD", "hide", "waiting false"]);
+    }
+
+    /// Once clicked into, or its key took the keyboard, a click elsewhere or
+    /// none in time never closes it.
+    #[test]
+    fn elsewhere_and_unanswered_never_close_a_prompt_in_use() {
+        for why in [Why::Elsewhere, Why::Unanswered] {
+            let (s, d) = waiting_click();
+            activated(&s);
+            assert_eq!(close_on(&s, &d, &d, why, 1), Closed::NotOpen, "{why:?}");
+            assert!(d.calls().is_empty() && s.open.load(Ordering::SeqCst));
+            // Nor an open that never waited.
+            let s = opened(NOTEPAD);
+            let d = fake(PROMPT, &[NOTEPAD]);
+            assert_eq!(close_on(&s, &d, &d, why, 1), Closed::NotOpen, "{why:?}");
+            assert!(d.calls().is_empty());
+        }
+    }
+
+    /// An unanswered close from an earlier wait never closes a later one.
+    #[test]
+    fn an_old_unanswered_close_never_closes_a_later_open() {
+        let (s, d) = waiting_click();
+        assert_eq!(close_on(&s, &d, &d, Why::Elsewhere, 1), Closed::Hidden);
+        assert_eq!(open_on(&s, &d, &d, Opener::Click), Opened::Waiting(place()));
+        assert_eq!(close_on(&s, &d, &d, Why::Unanswered, 1), Closed::NotOpen, "the first wait's timer");
+        assert!(s.open.load(Ordering::SeqCst) && s.waiting.load(Ordering::SeqCst));
+        assert_eq!(close_on(&s, &d, &d, Why::Unanswered, 2), Closed::Hidden);
+    }
+
+    /// Its key on a waiting prompt takes the keyboard into it, counted
+    /// first; nothing closes.
+    #[test]
+    fn the_key_on_a_waiting_prompt_takes_the_keyboard() {
+        let (s, mut d) = waiting_click();
+        d.takeable.push(PROMPT);
+        let s = Rc::new(s);
+        d.watch = Some(Rc::clone(&s));
+        assert_eq!(open_on(&s, &d, &d, Opener::Hotkey), Opened::Taken);
+        assert_eq!(d.calls(), ["foreground PROMPT", "waiting false"]);
+        assert_eq!(*d.seen.borrow(), [(1, 1)], "counted before the take");
+        assert_eq!(*d.woke.borrow(), [false], "the take's own activation is no click into it");
+        assert_eq!(takes(&s), 1);
+        assert!(s.open.load(Ordering::SeqCst) && !s.waiting.load(Ordering::SeqCst) && s.took.load(Ordering::SeqCst));
+        // And now it closes as any open the key took: its key again.
+        assert_eq!(open_on(&s, &d, &d, Opener::Hotkey), Opened::Closed(Closed::HandedTo(NOTEPAD)));
+        assert_eq!(takes(&s), 1, "the owner's open, kept");
+    }
+
+    #[test]
+    fn the_key_on_a_waiting_prompt_refused_leaves_it_waiting() {
+        let (s, d) = waiting_click();
+        d.fg.set(BENEATH);
+        assert_eq!(open_on(&s, &d, &d, Opener::Hotkey), Opened::Refused(Refusal::NotGiven));
+        assert_eq!(d.calls(), ["foreground PROMPT"], "nothing hidden, the page still waits");
+        assert!(s.open.load(Ordering::SeqCst) && s.waiting.load(Ordering::SeqCst));
+        assert_eq!(takes(&s), 0, "the count given back");
+        assert!(!s.counted.load(Ordering::SeqCst));
+        assert_eq!(s.back_to.load(Ordering::SeqCst), NOTEPAD, "its open's save kept");
+    }
+
+    /// The owner moved on during the wait (Alt+Tab, no click): its key's
+    /// take saves who has the keyboard now, and the close hands it back
+    /// there, never to the app they left.
+    #[test]
+    fn the_key_on_a_waiting_prompt_saves_who_has_the_keyboard_now() {
+        let (s, mut d) = waiting_click();
+        d.takeable.push(PROMPT);
+        d.fg.set(BENEATH);
+        assert_eq!(open_on(&s, &d, &d, Opener::Hotkey), Opened::Taken);
+        assert_eq!(s.back_to.load(Ordering::SeqCst), BENEATH);
+        assert!(s.took.load(Ordering::SeqCst), "had, by the take's own word (no activation seen here)");
+        assert_eq!(close_on(&s, &d, &d, Why::Esc, 1), Closed::HandedTo(BENEATH));
+        assert_eq!(takes(&s), 1, "the owner's open, kept");
+    }
+
+    /// Clicked into while its activation went unseen (the watch didn't go
+    /// in), it still reads as waiting; but it has the keyboard, so its close
+    /// hands it back as any open's does.
+    #[test]
+    fn a_waiting_prompt_that_has_the_keyboard_after_all_hands_it_back() {
+        let (s, d) = waiting_click();
+        d.fg.set(PROMPT);
+        assert_eq!(close_on(&s, &d, &d, Why::Esc, 1), Closed::HandedTo(NOTEPAD));
+        assert_eq!(d.calls(), ["foreground NOTEPAD", "hide", "waiting false"]);
+    }
+
+    /// The tray icon's menu open over its hidden window while the prompt
+    /// waits: the wait's close only hides, so the menu keeps the keyboard and
+    /// stays open (a prompt that had the keyboard hands it to the app
+    /// beneath; one still waiting never had it).
+    #[test]
+    fn a_waiting_prompt_closed_under_the_trays_menu_only_hides() {
+        for why in [Why::Unanswered, Why::Elsewhere, Why::Toggle] {
+            let (s, d) = waiting_click();
+            d.fg.set(TRAY);
+            assert_eq!(close_on(&s, &d, &d, why, 1), Closed::Hidden, "{why:?}");
+            assert_eq!(d.calls(), ["hide", "waiting false"], "{why:?}");
+            assert_eq!(d.fg.get(), TRAY, "{why:?}");
+        }
+        // Its key on a pretend wait closes it the same way.
+        let s = ready();
+        let d = fake(NOTEPAD, &[NOTEPAD, BENEATH]);
+        assert_eq!(open_on(&s, &d, &d, Opener::PretendWait), Opened::Waiting(place()));
+        d.fg.set(TRAY);
+        assert_eq!(open_on(&s, &d, &d, Opener::Hotkey), Opened::Closed(Closed::Hidden));
+        assert_eq!(d.fg.get(), TRAY);
+    }
+
+    /// The gesture again on any open prompt closes it, with the hand-back.
+    #[test]
+    fn a_click_while_open_closes_it() {
+        let (s, d) = waiting_click();
+        assert_eq!(open_on(&s, &d, &d, Opener::Click), Opened::Closed(Closed::Hidden));
+        assert!(!s.open.load(Ordering::SeqCst));
+        let s = opened(NOTEPAD);
+        s.ready.store(true, Ordering::SeqCst);
+        let d = fake(PROMPT, &[NOTEPAD, PROMPT]);
+        assert_eq!(open_on(&s, &d, &d, Opener::Click), Opened::Closed(Closed::HandedTo(NOTEPAD)));
+    }
+
+    /// A pretend wait stands off screen, never asks for the keyboard, never
+    /// counts, and waits; its key closes it (never takes); another pretend
+    /// is refused.
+    #[test]
+    fn a_pretend_wait_never_tries_the_take_and_never_counts() {
+        let s = ready();
+        let d = fake(NOTEPAD, &[NOTEPAD, PROMPT]);
+        assert_eq!(open_on(&s, &d, &d, Opener::PretendWait), Opened::Waiting(place()));
+        let at = place().at;
+        let (x, y) = crate::overlay_windows::PARK_AT;
+        let off = Bounds { left: x, top: y, right: x + at.width(), bottom: y + at.height() };
+        assert_eq!(d.calls(), [format!("place {}", rect(off)), "waiting true".into(), "show".into()]);
+        assert!(s.waiting.load(Ordering::SeqCst) && s.pretend.load(Ordering::SeqCst));
+        assert_eq!((s.opens.load(Ordering::SeqCst), takes(&s)), (1, 0));
+        assert_eq!(open_on(&s, &d, &d, Opener::PretendWait), Opened::Refused(Refusal::AlreadyOpen));
+        assert_eq!(open_on(&s, &d, &d, Opener::Pretend), Opened::Refused(Refusal::AlreadyOpen));
+        assert!(matches!(open_on(&s, &d, &d, Opener::Hotkey), Opened::Closed(_)), "its key closes a pretend");
+        assert!(!d.calls().iter().any(|c| c == "foreground PROMPT"));
+    }
+
+    /// A new open that waits is timed, once: the sleeper closes it unanswered
+    /// after `WAIT_FOR_CLICK`, carrying its open's number. And Windows'
+    /// activation of the prompt reaches `activated` from its window
+    /// procedure, which only stores and posts.
+    #[test]
+    fn a_waiting_open_is_timed_and_its_activation_watched() {
+        let all = include_str!("prompt.rs").replace("\r\n", "\n");
+        let src = &all[..all.find("#[cfg(test)]").unwrap()];
+        let at = src.find("pub fn toggle(").unwrap();
+        let toggle = &src[at..at + src[at..].find("\n}\n").unwrap()];
+        assert!(toggle.contains("let waits = matches!(opened, Opened::Waiting(_));"));
+        assert!(toggle.contains("if waits {\n        unanswered_after(app, opens(), WAIT_FOR_CLICK);\n    }"));
+        let at = src.find("fn unanswered_after(").unwrap();
+        let sleeper = &src[at..at + src[at..].find("\n}\n").unwrap()];
+        assert!(sleeper.find("std::thread::sleep(wait);").unwrap() < sleeper.find("close_later(&h, Why::Unanswered, open);").unwrap());
+        assert!(src.contains("windows_ext::watch_activation(hwnd, activation)"));
+        let at = src.find("fn activation(active: bool)").unwrap();
+        let act = &src[at..at + src[at..].find("\n}\n").unwrap()];
+        assert!(
+            act.contains("        if active {\n            if activated(&STATE) {\n                post(app, no_longer_waits);\n            }\n        } else {\n            close_later(app, Why::Blur, opens());\n        }"),
+            "active: stores, then posts; inactive: the posted Blur"
+        );
+        for inline in ["tracing::", "tell(", ".emit", "Live {", ".lock(", "|h|", "try_foreground"] {
+            assert!(!act.contains(inline), "the window procedure does {inline} inline");
+        }
+        let at = src.find("fn no_longer_waits(h: &AppHandle)").unwrap();
+        let posted = &src[at..at + src[at..].find("\n}\n").unwrap()];
+        assert!(posted.contains("tell(&STATE, &Live { app: h, window: &w }, false);"), "the page told it no longer waits");
+    }
+
+    /// Every open starts afresh: a first wait clicked into leaves nothing for
+    /// a second wait that nobody clicks, whose close gives back nothing it
+    /// never counted.
+    #[test]
+    fn two_waits_in_a_row_each_start_afresh() {
+        let (s, d) = waiting_click();
+        d.fg.set(PROMPT);
+        activated(&s);
+        s.counted.store(true, Ordering::SeqCst); // as a click into it is counted
+        s.takes.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(close_on(&s, &d, &d, Why::Esc, 1), Closed::HandedTo(NOTEPAD));
+        assert_eq!(takes(&s), 1, "clicked into: the owner's");
+        assert_eq!(open_on(&s, &d, &d, Opener::Click), Opened::Waiting(place()));
+        assert!(!s.took.load(Ordering::SeqCst), "the first open's took is gone");
+        assert_eq!(close_on(&s, &d, &d, Why::Unanswered, 2), Closed::Hidden);
+        assert_eq!(takes(&s), 1, "the second, never the owner's, never counted");
+        // Counted but never taken in (a click into it that didn't land): the
+        // close gives the count back.
+        assert_eq!(open_on(&s, &d, &d, Opener::Click), Opened::Waiting(place()));
+        s.counted.store(true, Ordering::SeqCst);
+        s.takes.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(close_on(&s, &d, &d, Why::Unanswered, 3), Closed::Hidden);
+        assert_eq!(takes(&s), 1);
+    }
+
+    /// A pretend leaves nothing for a later open: its key takes the keyboard
+    /// into a later real wait, rather than closing it as a pretend.
+    #[test]
+    fn a_pretend_leaves_nothing_for_a_later_open() {
+        let s = ready();
+        let mut d = fake(NOTEPAD, &[NOTEPAD, BENEATH]);
+        assert_eq!(open_on(&s, &d, &d, Opener::PretendWait), Opened::Waiting(place()));
+        assert_eq!(close_on(&s, &d, &d, Why::Unanswered, 1), Closed::Hidden);
+        assert_eq!(open_on(&s, &d, &d, Opener::Click), Opened::Waiting(place()));
+        assert!(!s.pretend.load(Ordering::SeqCst), "the pretend is over");
+        d.takeable.push(PROMPT);
+        assert_eq!(open_on(&s, &d, &d, Opener::Hotkey), Opened::Taken);
     }
 
     /// A close asked during an earlier open never closes a later one.

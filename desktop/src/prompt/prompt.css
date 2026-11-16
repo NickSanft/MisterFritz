@@ -87,6 +87,11 @@ body {
   color: var(--text-hi);
 }
 
+/* The ask for a click, while the prompt waits for one. */
+.prompt-waiting {
+  color: var(--text-hi);
+}
+
 .prompt-local {
   flex: none;
   display: inline-flex;

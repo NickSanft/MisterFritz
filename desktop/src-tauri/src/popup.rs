@@ -694,7 +694,7 @@ mod tests {
     /// tray-icon's own messages and timer (6002-6010).
     #[test]
     fn the_ids_are_distinct() {
-        let ours = [crate::windows_ext::PIN_ID, crate::windows_ext::DEACTIVATE_ID, SUBCLASS_ID, TIMER_ID];
+        let ours = [crate::windows_ext::PIN_ID, crate::windows_ext::ACTIVATION_ID, SUBCLASS_ID, TIMER_ID];
         for (i, a) in ours.iter().enumerate() {
             for b in &ours[i + 1..] {
                 assert_ne!(a, b);

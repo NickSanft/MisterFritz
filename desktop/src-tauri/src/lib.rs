@@ -1037,7 +1037,7 @@ async fn prompt_close(app: AppHandle, webview: tauri::Webview) -> Result<(), Str
 #[tauri::command]
 async fn prompt_ready(app: AppHandle, webview: tauri::Webview) -> Result<(), String> {
     from_the_prompt(webview.label())?;
-    let pretend = prompt::pretend_wanted(cfg!(debug_assertions), std::env::var_os(prompt::PRETEND_ENV));
+    let pretend = prompt::pretend_kind(cfg!(debug_assertions), std::env::var_os(prompt::PRETEND_ENV));
     prompt::page_ready(&app, pretend);
     Ok(())
 }
@@ -1241,9 +1241,11 @@ mod tests {
         assert_eq!(events["companionConfig"], super::COMPANION_CONFIG_EVENT);
         assert_eq!(events["companionSay"], super::COMPANION_SAY_EVENT);
         assert_eq!(events["hookStatus"], crate::hook::STATUS_EVENT);
-        assert_eq!(events.len(), 10, "an event with no Rust half: {events:?}");
+        assert_eq!(events["promptWaiting"], crate::prompt::WAITING_EVENT);
+        assert_eq!(events.len(), 11, "an event with no Rust half: {events:?}");
         assert_eq!(fixture["debug"]["pretendSayEnv"], super::PRETEND_SAY_ENV);
         assert_eq!(fixture["debug"]["pretendPromptEnv"], crate::prompt::PRETEND_ENV);
+        assert_eq!(fixture["debug"]["pretendPromptWait"], crate::prompt::PRETEND_WAIT);
         let say = super::say_payload("good evening", 7);
         let mut keys: Vec<&str> = say.as_object().unwrap().keys().map(String::as_str).collect();
         keys.sort_unstable();
@@ -1894,13 +1896,16 @@ mod tests {
     fn the_pretend_prompt_is_read_only_in_a_debug_build() {
         let all = include_str!("lib.rs").replace("\r\n", "\n");
         let src = &all[..all.find("#[cfg(test)]").unwrap()];
-        let calls: Vec<_> = src.match_indices("prompt::pretend_wanted(").collect();
+        let calls: Vec<_> = src.match_indices("prompt::pretend_kind(").collect();
         assert_eq!(calls.len(), 1, "one caller");
-        assert!(src[calls[0].0..].starts_with("prompt::pretend_wanted(cfg!(debug_assertions), "));
-        assert!(!crate::prompt::pretend_wanted(false, Some("1".into())), "never in a release build");
-        assert!(crate::prompt::pretend_wanted(true, Some("1".into())));
-        assert!(!crate::prompt::pretend_wanted(true, Some("".into())));
-        assert!(!crate::prompt::pretend_wanted(true, None));
+        assert!(src[calls[0].0..].starts_with("prompt::pretend_kind(cfg!(debug_assertions), "));
+        use crate::prompt::{pretend_kind, Opener};
+        assert_eq!(pretend_kind(false, Some("1".into())), None, "never in a release build");
+        assert_eq!(pretend_kind(false, Some("wait".into())), None, "nor a waiting one");
+        assert_eq!(pretend_kind(true, Some("1".into())), Some(Opener::Pretend));
+        assert_eq!(pretend_kind(true, Some("wait".into())), Some(Opener::PretendWait));
+        assert_eq!(pretend_kind(true, Some("".into())), None);
+        assert_eq!(pretend_kind(true, None), None);
     }
 
     /// The prompt's key opens it right there in the hotkey handler, inside

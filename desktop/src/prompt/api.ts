@@ -8,6 +8,14 @@ import { parseStatus, type AvatarStatus } from "../avatar/status";
 import type { LinkStatus } from "../shared/companion";
 import { parseCompanionStatus } from "../shared/link";
 
+/** The shell tells the page whether the prompt waits for a click. */
+export const WAITING_EVENT = "prompt:waiting";
+
+/** `prompt:waiting`'s payload, or null when it isn't one. */
+export function parseWaiting(v: unknown): boolean | null {
+  return typeof v === "boolean" ? v : null;
+}
+
 export const CMD = {
   say: "prompt_say",
   close: "prompt_close",

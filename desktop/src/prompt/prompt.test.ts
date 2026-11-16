@@ -10,7 +10,7 @@ import fixture from "../avatar/wire.fixture.json";
 import { COMBOS, contrast, token } from "../shared/testContrast";
 import { COMPANION_STATUS_EVENT } from "../shared/link";
 import { STATUS_EVENT } from "../avatar/status";
-import { CMD, args } from "./api";
+import { CMD, WAITING_EVENT, args, parseWaiting } from "./api";
 
 const CSS = readFileSync(fileURLToPath(new URL("./prompt.css", import.meta.url)), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
 const PROMPT_TSX = readFileSync(fileURLToPath(new URL("./Prompt.tsx", import.meta.url)), "utf8");
@@ -38,11 +38,23 @@ describe("the prompt's wire", () => {
     expect(listening).toBeGreaterThan(0);
     expect(mounted).toBeGreaterThan(listening);
     expect(ready).toBeGreaterThan(mounted);
+    // The shell's word on waiting among what it listens to first.
+    const waits = MAIN_TSX.indexOf("await listen<unknown>(WAITING_EVENT,");
+    expect(waits).toBeGreaterThan(0);
+    expect(waits).toBeLessThan(mounted);
+    expect(MAIN_TSX).toMatch(/waiting=\{waiting\}/);
   });
 
   it("hears the events every window hears", () => {
     expect(COMPANION_STATUS_EVENT).toBe(fixture.events.companionStatus);
     expect(STATUS_EVENT).toBe(fixture.events.status);
+  });
+
+  it("hears the shell's word on waiting, as the shell says it", () => {
+    expect(WAITING_EVENT).toBe(fixture.events.promptWaiting);
+    expect(parseWaiting(true)).toBe(true);
+    expect(parseWaiting(false)).toBe(false);
+    for (const bad of [null, "true", 1, {}]) expect(parseWaiting(bad)).toBeNull();
   });
 });
 
@@ -69,7 +81,12 @@ describe("the prompt's colours", () => {
    * line itself is a live status. */
   it("carry meaning in words, never the dot's colour alone", () => {
     expect(PROMPT_TSX).toMatch(/class=\{`prompt-dot \$\{props\.status\(\)\.tone\}`\} aria-hidden="true"/);
-    expect(PROMPT_TSX).toMatch(/role="status">\{asking\(\) \? ASKING : props\.status\(\)\.text\}/);
+    expect(PROMPT_TSX).toMatch(/const line = \(\) => lineFor\(props\.status\(\), refusal\(\), asking\(\), face\(\)\);/);
+    expect(PROMPT_TSX).toMatch(/role="status">\s*\{line\(\)\.text\}/);
+  });
+
+  it("show the line asking for a click in the brightest text", () => {
+    expect(CSS).toMatch(/\.prompt-waiting \{\s*color: var\(--text-hi\);/);
   });
 
   it("show where the panel ends, in high contrast too", () => {

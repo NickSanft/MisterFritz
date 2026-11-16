@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
 import { ASKING, Prompt, type PromptProps } from "./Prompt";
-import type { PromptStatus } from "./view";
+import { WAITING_LINE, WAITING_PLACEHOLDER, WINDOW_CLOSED, type PromptStatus } from "./view";
 
 const ONLINE: PromptStatus = { tone: "ok", text: "Connected", rule: true };
 const OFFLINE: PromptStatus = { tone: "bad", text: "Can't reach his brain", rule: false };
@@ -11,6 +11,7 @@ const OFFLINE: PromptStatus = { tone: "bad", text: "Can't reach his brain", rule
  * window focus and blur the test fires. */
 function mount(answers: (string | null)[] = [null], status: PromptStatus = ONLINE) {
   const [st, setSt] = createSignal(status);
+  const [waiting, setWaiting] = createSignal(false);
   const focus: (() => void)[] = [];
   const blur: (() => void)[] = [];
   const say = vi.fn(async (_text: string) => answers.shift() ?? null);
@@ -27,6 +28,7 @@ function mount(answers: (string | null)[] = [null], status: PromptStatus = ONLIN
       blur.push(cb);
       return () => {};
     },
+    waiting,
   };
   const r = render(() => <Prompt {...props} />);
   const field = r.getByRole("textbox", { name: "Ask Fritz" }) as HTMLTextAreaElement;
@@ -36,8 +38,136 @@ function mount(answers: (string | null)[] = [null], status: PromptStatus = ONLIN
     fireEvent.keyUp(field, { key, ...mods });
   };
   const settle = () => new Promise((r) => setTimeout(r, 0));
-  return { ...r, field, type, press, settle, say, close, setSt, focus: () => focus.forEach((f) => f()), blur: () => blur.forEach((f) => f()) };
+  return {
+    ...r, field, type, press, settle, say, close, setSt, setWaiting,
+    focus: () => focus.forEach((f) => f()),
+    blur: () => blur.forEach((f) => f()),
+  };
 }
+
+describe("the prompt waiting for a click", () => {
+  /** Mounted, then shown without the keyboard, as a refused gesture shows it. */
+  function waitingPrompt(status: PromptStatus = ONLINE) {
+    const p = mount([null], status);
+    p.blur();
+    p.setWaiting(true);
+    return p;
+  }
+
+  it("asks for a click, as a status, while it hasn't the keyboard", () => {
+    const p = waitingPrompt();
+    expect(p.field).toHaveAttribute("placeholder", WAITING_PLACEHOLDER);
+    const line = p.getByRole("status");
+    expect(line).toHaveTextContent(WAITING_LINE);
+    expect(line).toHaveClass("prompt-waiting");
+  });
+
+  it("waits from the start, in a page loaded hidden", () => {
+    const hf = vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const p = mount([null]);
+    hf.mockRestore();
+    // No blur: the window never had the keyboard.
+    p.setWaiting(true);
+    expect(p.field).toHaveAttribute("placeholder", WAITING_PLACEHOLDER);
+    expect(p.getByRole("status")).toHaveTextContent(WAITING_LINE);
+  });
+
+  it("is ready to type in a page that mounted with the keyboard", () => {
+    const hf = vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    const p = mount([null]);
+    hf.mockRestore();
+    p.setWaiting(true);
+    expect(p.field).toHaveAttribute("placeholder", "Ask Fritz…");
+    expect(p.getByRole("status")).toHaveTextContent("Connected");
+  });
+
+  it("is the ordinary prompt once clicked into, the draft kept", () => {
+    const p = waitingPrompt();
+    p.type("good evening");
+    p.field.blur();
+    p.focus();
+    expect(p.field).toHaveAttribute("placeholder", "Ask Fritz…");
+    expect(p.getByRole("status")).toHaveTextContent("Connected");
+    expect(p.getByRole("status")).not.toHaveClass("prompt-waiting");
+    expect(document.activeElement).toBe(p.field);
+    expect(p.field.value).toBe("good evening");
+  });
+
+  it("asks again at a later wait, after an open that had the keyboard", () => {
+    const p = mount([null]);
+    p.focus();
+    expect(p.field).toHaveAttribute("placeholder", "Ask Fritz…");
+    // Closed by its blur; the next gesture's take refused: it waits.
+    p.blur();
+    p.setWaiting(true);
+    expect(p.field).toHaveAttribute("placeholder", WAITING_PLACEHOLDER);
+    expect(p.getByRole("status")).toHaveTextContent(WAITING_LINE);
+  });
+
+  it("stops asking when the shell says it no longer waits", () => {
+    const p = waitingPrompt();
+    p.setWaiting(false);
+    expect(p.field).toHaveAttribute("placeholder", "Ask Fritz…");
+    expect(p.getByRole("status")).toHaveTextContent("Connected");
+  });
+
+  it("says why he can't be asked, rather than ask for a click", () => {
+    const p = waitingPrompt({ tone: "bad", text: WINDOW_CLOSED, rule: false });
+    expect(p.getByRole("status")).toHaveTextContent(WINDOW_CLOSED);
+    expect(p.field).toHaveAttribute("placeholder", WAITING_PLACEHOLDER);
+  });
+
+  /** A wait is a new open: what the open before was refused is no part of
+   * it, so the line asks for a click; the draft stays. */
+  it("leaves the open before's refusal out of a wait", async () => {
+    const p = mount(["There's nothing to ask."]);
+    p.type("good evening");
+    p.press("Enter");
+    await p.settle();
+    expect(p.getByRole("alert")).toHaveTextContent("There's nothing to ask.");
+    p.blur();
+    p.setWaiting(true);
+    expect(p.queryByRole("alert")).toBeNull();
+    expect(p.getByRole("status")).toHaveTextContent(WAITING_LINE);
+    expect(p.field.value).toBe("good evening");
+  });
+
+  /** A question still out from the open before is let go at a wait: the
+   * line asks for a click, not "Asking him…", and its late refusal says
+   * nothing here. */
+  it("lets a question from the open before go at a wait", async () => {
+    let answer!: (v: string | null) => void;
+    const p = mount();
+    p.say.mockImplementation(() => new Promise((r) => (answer = r)));
+    p.type("the first");
+    p.press("Enter");
+    p.press("Escape");
+    p.blur();
+    p.setWaiting(true);
+    expect(p.getByRole("status")).toHaveTextContent(WAITING_LINE);
+    answer("His window didn't answer just now: try again.");
+    await p.settle();
+    expect(p.queryByRole("alert")).toBeNull();
+    expect(p.getByRole("status")).toHaveTextContent(WAITING_LINE);
+  });
+
+  /** A gesture given the keyboard: told it waits only after the window's
+   * focus began the open, the question just asked is kept. */
+  it("keeps a question asked in an open begun by the window's focus", async () => {
+    let answer!: (v: string | null) => void;
+    const p = mount();
+    p.say.mockImplementation(() => new Promise((r) => (answer = r)));
+    p.focus();
+    p.type("good evening");
+    p.press("Enter");
+    p.setWaiting(true);
+    p.setWaiting(false);
+    expect(p.getByRole("status")).toHaveTextContent(ASKING);
+    answer("His window didn't answer just now: try again.");
+    await p.settle();
+    expect(p.getByRole("alert")).toHaveTextContent("try again");
+  });
+});
 
 describe("the prompt", () => {
   it("takes the keyboard into its field as it mounts", () => {

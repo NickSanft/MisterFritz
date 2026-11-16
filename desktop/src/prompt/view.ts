@@ -22,6 +22,42 @@ export interface PromptStatus {
 export const WINDOW_CLOSED = "His window is closed: show him first.";
 export const HIDDEN = "He's hidden: his answer waits until he's shown.";
 
+/** What the line says while the shell decides. */
+export const ASKING = "Asking him…";
+
+/** The field's placeholder while the prompt waits for a click: Windows
+ * kept the keyboard where it was after a gesture on him. */
+export const WAITING_PLACEHOLDER = "Click here to type…";
+/** The line while it waits. */
+export const WAITING_LINE = "Click in the box to ask him; anywhere else closes it.";
+
+/** How the prompt looks: asking for a click (it waits and hasn't the
+ * keyboard), or ready to type. */
+export type Face = "waiting" | "typing";
+
+export function face(waiting: boolean, focused: boolean): Face {
+  return waiting && !focused ? "waiting" : "typing";
+}
+
+/** The line under the field. */
+export interface Line {
+  text: string;
+  /** A refusal: read out at once. */
+  alert: boolean;
+  /** The waiting line. */
+  waiting: boolean;
+}
+
+/** What the line says: a refusal first, then the question being asked, then
+ * (waiting for a click) the ask for one, unless he can't be asked anyway,
+ * when the status says why; else the status. */
+export function lineFor(status: PromptStatus, refusal: string | null, asking: boolean, f: Face): Line {
+  if (refusal !== null) return { text: refusal, alert: true, waiting: false };
+  if (asking) return { text: ASKING, alert: false, waiting: false };
+  if (f === "waiting" && status.tone !== "bad") return { text: WAITING_LINE, alert: false, waiting: true };
+  return { text: status.text, alert: false, waiting: false };
+}
+
 export function status(link: LinkStatus | null, avatar: AvatarStatus | null): PromptStatus {
   if (avatar && (!avatar.open || avatar.phase === "closed" || avatar.phase === "closing")) {
     return { tone: "bad", text: WINDOW_CLOSED, rule: false };

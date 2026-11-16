@@ -12,7 +12,8 @@
     "companionStatus": "companion:status",
     "companionConfig": "companion:config",
     "companionSay": "companion:say",
-    "hookStatus": "hook:status"
+    "hookStatus": "hook:status",
+    "promptWaiting": "prompt:waiting"
   },
   "hotkeys": {
     "arrange": "avatar:arrange"
@@ -101,6 +102,7 @@
     "noReadyGlobal": "__FRITZ_AVATAR_NO_READY__",
     "pretendSayEnv": "FRITZ_PRETEND_SAY",
     "pretendPromptEnv": "FRITZ_PRETEND_PROMPT",
+    "pretendPromptWait": "wait",
     "hookWhileHiddenEnv": "FRITZ_HOOK_WHILE_HIDDEN",
     "pretendClickEnv": "FRITZ_PRETEND_CLICK"
   },

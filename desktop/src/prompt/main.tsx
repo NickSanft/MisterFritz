@@ -15,12 +15,14 @@ import { STATUS_EVENT, parseStatus, type AvatarStatus } from "../avatar/status";
 import type { LinkStatus } from "../shared/companion";
 import { COMPANION_STATUS_EVENT, parseCompanionStatus } from "../shared/link";
 import { afterAsking } from "../shared/asking";
-import { avatarStatus, close, companionStatus, ready, say } from "./api";
+import { WAITING_EVENT, avatarStatus, close, companionStatus, parseWaiting, ready, say } from "./api";
 import { Prompt } from "./Prompt";
 import { status } from "./view";
 
 const [link, setLink] = createSignal<LinkStatus | null>(null);
 const [avatar, setAvatar] = createSignal<AvatarStatus | null>(null);
+/** The shell says the prompt waits for a click. */
+const [waiting, setWaiting] = createSignal(false);
 /** Events heard, so a late answer can't undo a newer event. */
 let linkEvents = 0;
 let avatarEvents = 0;
@@ -57,6 +59,10 @@ async function main(): Promise<void> {
     avatarEvents += 1;
     setAvatar(s);
   });
+  await listen<unknown>(WAITING_EVENT, (e) => {
+    const w = parseWaiting(e.payload);
+    if (w !== null) setWaiting(w);
+  });
   window.addEventListener("focus", () => void ask());
   void ask();
   const root = document.getElementById("root");
@@ -69,6 +75,7 @@ async function main(): Promise<void> {
           close={close}
           onWindowFocus={on("focus")}
           onWindowBlur={on("blur")}
+          waiting={waiting}
         />
       ),
       root,

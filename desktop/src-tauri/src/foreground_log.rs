@@ -8,8 +8,9 @@
 //! (tray > Settings) is an ordinary window and takes the keyboard when it is
 //! opened: its lines say SETTINGS, never HIT. The prompt takes it when the
 //! owner opens it with its key: a PROMPT line, but only for an open that
-//! took the keyboard (`prompt::takes`); the prompt in front with no such
-//! open, or the keyboard still with it after it closed, is a HIT.
+//! took the keyboard, or a waiting prompt the owner clicked into or its key
+//! took the keyboard into (`prompt::takes`); the prompt in front with no
+//! such open, or the keyboard still with it after it closed, is a HIT.
 //!
 //! Off unless `settings.diagnostics.foregroundLog` is on (read at start): it
 //! writes other apps' window titles to `diagnostics\foreground.log`, so it is

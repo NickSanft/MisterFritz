@@ -11,11 +11,21 @@
  * (but a question taken leaves the field, if it is still what's there).
  * A click anywhere but the field leaves the keyboard in it, so Enter and Esc
  * always work.
+ *
+ * Shown by a gesture on him that Windows wouldn't give the keyboard to, it
+ * waits for a click: until the window has the keyboard, the field says
+ * "Click here to type…" and the line asks for a click (unless he can't be
+ * asked anyway); any draft stays. Told it waits, it is a new open, as when
+ * the window gets the keyboard: a refusal or question from the open before
+ * is no part of it. The owner's click into it activates the window, and it
+ * is the ordinary prompt again.
  */
 import { createEffect, createMemo, createSignal, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { Sigil } from "../divora/sigils/Sigil";
 import { promptKey, type Armed } from "./keys";
-import type { PromptStatus } from "./view";
+import { ASKING, WAITING_PLACEHOLDER, face as faceOf, lineFor, type PromptStatus } from "./view";
+
+export { ASKING };
 
 export interface PromptProps {
   status: () => PromptStatus;
@@ -26,21 +36,24 @@ export interface PromptProps {
    * unsubscribe. */
   onWindowFocus: (cb: () => void) => () => void;
   onWindowBlur: (cb: () => void) => () => void;
+  /** Whether the shell says the prompt waits for a click. */
+  waiting?: () => boolean;
 }
-
-/** What the line says while the shell decides. */
-export const ASKING = "Asking him…";
 
 export function Prompt(props: PromptProps): JSX.Element {
   let field!: HTMLTextAreaElement;
   const [draft, setDraft] = createSignal("");
   const [refusal, setRefusal] = createSignal<string | null>(null);
   const [asking, setAsking] = createSignal(false);
+  /** The window has the keyboard. */
+  const [focused, setFocused] = createSignal(document.hasFocus());
+  const face = () => faceOf(props.waiting?.() ?? false, focused());
+  const line = () => lineFor(props.status(), refusal(), asking(), face());
   /** The last question taken, for ↑ (this page's memory only). */
   let last: string | null = null;
   let armed: Armed = null;
-  /** Bumped each time the window gets the keyboard: a question's answer
-   * counts only in the open it was asked in. */
+  /** Bumped at each open (the window getting the keyboard, or told it waits
+   * without it): a question's answer counts only in the open it was asked in. */
   let opened = 0;
 
   const put = (text: string) => {
@@ -48,11 +61,16 @@ export function Prompt(props: PromptProps): JSX.Element {
     field.value = text;
     field.setSelectionRange(text.length, text.length);
   };
-  const shown = () => {
+  /** A new open: the open before's question, refusal and armed key are let go. */
+  const fresh = () => {
     opened += 1;
     armed = null;
     setAsking(false);
     setRefusal(null);
+  };
+  const shown = () => {
+    setFocused(true);
+    fresh();
     field.focus();
     field.setSelectionRange(field.value.length, field.value.length);
   };
@@ -92,13 +110,25 @@ export function Prompt(props: PromptProps): JSX.Element {
   // A refusal is of the moment it was given: once what the line would say
   // changes (the link, or his window), it says how things stand now. A
   // memo, so a report that changes nothing the line says changes nothing.
-  const line = createMemo(() => props.status().text);
-  createEffect(on(line, () => setRefusal(null), { defer: true }));
+  const said = createMemo(() => props.status().text);
+  createEffect(on(said, () => setRefusal(null), { defer: true }));
+  // Told it waits, without the keyboard: a new open, which Windows wouldn't
+  // give the keyboard to. (With it, the window's focus has begun the open.)
+  createEffect(
+    on(
+      () => props.waiting?.() ?? false,
+      (w) => {
+        if (w && !focused()) fresh();
+      },
+      { defer: true },
+    ),
+  );
 
   onMount(() => {
     const offFocus = props.onWindowFocus(shown);
     const offBlur = props.onWindowBlur(() => {
       armed = null;
+      setFocused(false);
     });
     document.addEventListener("mousedown", keepKeyboard);
     onCleanup(() => {
@@ -106,7 +136,11 @@ export function Prompt(props: PromptProps): JSX.Element {
       offBlur();
       document.removeEventListener("mousedown", keepKeyboard);
     });
+    // The field takes the caret now, but the window has the keyboard only
+    // if Windows gave it: a page loaded hidden hasn't.
+    const had = document.hasFocus();
     shown();
+    setFocused(had);
   });
 
   return (
@@ -116,7 +150,7 @@ export function Prompt(props: PromptProps): JSX.Element {
         class="prompt-field"
         rows={2}
         aria-label="Ask Fritz"
-        placeholder="Ask Fritz…"
+        placeholder={face() === "waiting" ? WAITING_PLACEHOLDER : "Ask Fritz…"}
         autocomplete="off"
         spellcheck={true}
         value={draft()}
@@ -131,7 +165,11 @@ export function Prompt(props: PromptProps): JSX.Element {
         <span class={`prompt-dot ${props.status().tone}`} aria-hidden="true" />
         <Show
           when={refusal()}
-          fallback={<span class="prompt-line" role="status">{asking() ? ASKING : props.status().text}</span>}
+          fallback={
+            <span class={line().waiting ? "prompt-line prompt-waiting" : "prompt-line"} role="status">
+              {line().text}
+            </span>
+          }
         >
           {(why) => <span class="prompt-line prompt-refusal" role="alert">{why()}</span>}
         </Show>
