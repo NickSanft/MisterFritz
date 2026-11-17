@@ -317,6 +317,36 @@ class TestHandshake(CompanionTest):
         self.assertEqual((call["user_id"], call["thread_id"], call["display_name"]),
                          ("desktop-nick-pc", "discord-1#desktop", None))
 
+    def test_the_connect_line_says_who_the_desk_is_and_why(self):
+        """It is where an operator looks to see whether a link took."""
+        for desk, identity, links, line in (
+                ("desktop-nick-pc", "discord-1", {"desktop-nick-pc": "discord-1"},
+                 "desktop-nick-pc connected as discord-1 (linked by IDENTITY_LINKS)"),
+                ("desktop-venn", "desktop-venn", {}, "desktop-venn connected as itself"),
+                # Links, but no desk's: nothing here could have been meant for it.
+                ("desktop-venn", "desktop-venn", {"web-a": "discord-1"}, "desktop-venn connected as itself"),
+                # Its own id linked to itself is not another desk.
+                ("desktop-venn", "desktop-venn", {"desktop-venn": "desktop-venn"},
+                 "desktop-venn connected as itself"),
+                # An example copied with its desk's id, or this desk's misspelt.
+                ("desktop-venn", "desktop-venn",
+                 {"desktop-nick-pc": "discord-1", "web-a": "discord-1", "Desktop-Venn": "discord-1"},
+                 "desktop-venn connected as itself: IDENTITY_LINKS links Desktop-Venn, desktop-nick-pc, "
+                 "not this desk")):
+            with self.subTest(links=links), patch.object(fritz_utils, "IDENTITY_LINKS", links):
+                self.assertEqual(companion_api._connected_as(desk, identity), line)
+
+    def test_the_handshake_logs_the_connect_line(self):
+        for links, line in (({"desktop-nick-pc": "discord-1"},
+                             "desktop-nick-pc connected as discord-1 (linked by IDENTITY_LINKS)"),
+                            ({"desktop-other": "discord-1"},
+                             "desktop-nick-pc connected as itself: IDENTITY_LINKS links desktop-other, "
+                             "not this desk")):
+            with self.subTest(links=links), patch.dict(fritz_utils.IDENTITY_LINKS, links), \
+                 self.assertLogs("companion_api", level="INFO") as logs:
+                self.desk()
+            self.assertIn(f"INFO:companion_api:companion: {line}", logs.output)
+
     def test_a_wrong_token_is_closed_4401(self):
         for token in ("wrong", TOKEN[:-1], TOKEN + "x", "", "tökén-ünïcode"):
             with self.subTest(token=token):

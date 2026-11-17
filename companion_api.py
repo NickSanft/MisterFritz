@@ -121,6 +121,24 @@ class _Waiting:
     source: MessageSource
 
 
+def _connected_as(canonical_id: str, identity: str) -> str:
+    """The connect line: which desk, and who it is to the brain.
+
+    This is where an operator looks to see whether a link took, and the
+    likeliest mistake there is cannot be seen at startup: IDENTITY_LINKS names
+    a desk (an example's, or one misspelt) that is not the one connecting. So
+    a desk that connects as itself is told which desks are linked.
+    """
+    if identity != canonical_id:
+        return f"{canonical_id} connected as {identity} (linked by IDENTITY_LINKS)"
+    linked = sorted(alias for alias in fritz_utils.IDENTITY_LINKS
+                    if alias != canonical_id and fritz_utils.split_user_id(alias)[0] == "desktop")
+    if linked:
+        return (f"{canonical_id} connected as itself: IDENTITY_LINKS links "
+                f"{', '.join(linked)}, not this desk")
+    return f"{canonical_id} connected as itself"
+
+
 class _Session:
     def __init__(self, ws: WebSocket, hello: Hello):
         self.ws = ws
@@ -254,7 +272,7 @@ async def _handshake(ws: WebSocket) -> _Session | None:
     session.send(Welcome(protocol=PROTOCOL_VERSION, identity=session.identity,
                          display_name=session.display_name, server_caps=SERVER_CAPS,
                          thread_id=session.thread_id))
-    logger.info("companion: %s connected as %s", session.canonical_id, session.identity)
+    logger.info("companion: %s", _connected_as(session.canonical_id, session.identity))
     audit_log("companion_connect", result="ok", user_id=session.identity,
               client=session.canonical_id, peer=peer)
     return session

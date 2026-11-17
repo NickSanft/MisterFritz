@@ -630,23 +630,129 @@ THREADS_PER_CHANNEL: bool = os.environ.get("THREADS_PER_CHANNEL", "false").lower
 ADMIN_LEGACY_NAME_MATCH: bool = os.environ.get("ADMIN_LEGACY_NAME_MATCH", "false").lower() in ("1", "true", "yes")
 
 
-def _parse_identity_links() -> dict[str, str]:
-    """IDENTITY_LINKS=web-alice=discord-123456789,web-bob=discord-987654321"""
-    out: dict[str, str] = {}
-    for pair in os.environ.get("IDENTITY_LINKS", "").split(","):
-        alias, sep, primary = pair.strip().partition("=")
-        if sep and alias.strip() and primary.strip():
-            out[alias.strip()] = primary.strip()
-    return out
+def _quoted(text: str) -> str:
+    """Operator text as a log line may carry it: quoted, so it cannot end the
+    line, and cut short, since what is not a link may be anything at all (the
+    rest of a .env line, say)."""
+    return repr(text if len(text) <= 80 else text[:80] + "…")
 
 
-IDENTITY_LINKS: dict[str, str] = _parse_identity_links()
+def _said(identity: str) -> str:
+    """An identity as a log line may carry it: as it is if it is plain."""
+    return identity if re.fullmatch(r"[A-Za-z0-9_-]{1,80}", identity) else _quoted(identity)
+
+
+def _read_identity_links(raw: str) -> tuple[dict[str, str], list[str]]:
+    """IDENTITY_LINKS=web-alice=discord-123456789,desktop-nick-pc=discord-123456789
+
+    The links, and what is wrong with the text itself, in the operator's
+    words: a pair that is not alias=primary (it links nothing, as ever) and an
+    alias given twice (the last one wins, as ever). What is wrong with a link
+    that did parse is identity_link_problems' to say.
+    """
+    links: dict[str, str] = {}
+    misread: list[str] = []
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        alias, _, primary = pair.partition("=")
+        alias, primary = alias.strip(), primary.strip()
+        if not (alias and primary):    # no "=" leaves the primary empty
+            misread.append(f"{_quoted(pair)} is not alias=primary, so it links nothing")
+            continue
+        if links.get(alias, primary) != primary:
+            misread.append(f"{_said(alias)} is linked twice, to {_said(links[alias])} and then to "
+                           f"{_said(primary)}: the last is the one used")
+        links[alias] = primary
+    return links, misread
+
+
+IDENTITY_LINKS, _IDENTITY_LINKS_MISREAD = _read_identity_links(os.environ.get("IDENTITY_LINKS", ""))
+
+# The protocol's ClientId (companion_protocol.py), restated: fritz_utils sits
+# beneath every module and imports none of them. tests/test_identity.py holds
+# the two equal.
+_DESK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+# Platforms whose people are numbers: every identity a surface makes for them
+# is built from a snowflake, so a name after the dash is nobody.
+_NUMBERED_PLATFORMS: dict[str, str] = {"discord": "Discord", "telegram": "Telegram"}
 
 
 def resolve_identity(user_id: str) -> str:
     """Follow IDENTITY_LINKS one hop. Deliberately not transitive — a chain
     would make the effective identity depend on config ordering."""
     return IDENTITY_LINKS.get(user_id, user_id)
+
+
+def _never_an_identity(value: str) -> str | None:
+    """Why nobody's identity is ever written `value`; None if one could be.
+
+    Stricter than is_canonical_user_id, which forgives the platform's case and
+    never looks at the id: a link is matched character for character, so
+    Desktop-nick-pc and desktop-Nick-PC are both links nothing follows.
+    """
+    plat, sep, ident = value.partition(IDENTITY_SEPARATOR)
+    platform = plat.lower()
+    if not sep or not ident or platform not in KNOWN_PLATFORMS:
+        return "is not <platform>-<id> (the platforms: " + ", ".join(sorted(KNOWN_PLATFORMS)) + ")"
+    odd = "".join(dict.fromkeys(_IDENT_STRIP_RE.findall(ident)))
+    if odd:
+        return (f"has {_quoted(odd[:8])} in it, which no identity has (links are separated by "
+                "commas, all on one line)")
+    if len(ident) > 64:
+        return "is longer than an identity can be (64 characters after the platform)"
+    if platform == "desktop" and not _DESK_ID_RE.fullmatch(ident):
+        return ("is not a desk's identity: that is desktop-, then lower-case letters, digits and "
+                "dashes (32 at most), as the app makes it from the PC's name (NICK_PC is nick-pc)")
+    if platform in _NUMBERED_PLATFORMS and not ident.isdigit():
+        return (f"is not a {_NUMBERED_PLATFORMS[platform]} identity: that is {platform}-, then the "
+                "account's numeric id, never a username")
+    if plat != platform:
+        return f"is written {platform}{IDENTITY_SEPARATOR}{ident}: the platform is lower case"
+    return None
+
+
+def identity_link_problems(links: dict[str, str] | None = None) -> list[str]:
+    """What is wrong with each link, in the operator's words; [] if nothing.
+
+    A link is one dict lookup, character for character, so every mistake is
+    silent: an alias nobody has is never followed, a primary nobody has is
+    followed to an identity with no memories and no rights, and a pair written
+    backwards moves the wrong one. Reads this module's values at call time, so
+    tests can patch them.
+    """
+    links = IDENTITY_LINKS if links is None else links
+    admins = ({ROOT_USER} if ROOT_USER else set()) | set(ADMIN_USERS)
+    problems: list[str] = []
+    for alias, primary in links.items():
+        pair = f"{_said(alias)}={_said(primary)}"
+        if alias == primary:
+            problems.append(f"{pair} links an identity to itself, which does nothing")
+            continue
+        why = _never_an_identity(alias)
+        if why:
+            problems.append(f"{pair} is never followed: {_said(alias)} {why}")
+        why = _never_an_identity(primary)
+        if why:
+            problems.append(f"{pair} makes {_said(alias)} somebody nobody else is: {_said(primary)} {why}")
+        onward = links.get(primary, primary)
+        if onward != primary:
+            # resolve_identity is one hop. The web chat resolves before it
+            # calls ask_stuff, which resolves again: its memories take the
+            # second hop and its thread does not.
+            problems.append(f"{pair} stops at {_said(primary)}, though that is linked on to "
+                            f"{_said(onward)}: links are not chained (only the web chat follows a "
+                            f"second, and only for memories). Link {_said(alias)} to {_said(onward)} itself")
+        if split_user_id(primary)[0] == "desktop" and split_user_id(alias)[0] != "desktop":
+            problems.append(f"{pair} makes {_said(alias)} the desk, not the desk {_said(alias)}: the "
+                            f"desk goes on the left, {_said(primary)}={_said(alias)}")
+        if alias in admins and primary not in admins:
+            role = "ROOT_USER" if alias == ROOT_USER else "one of ADMIN_USERS"
+            problems.append(f"{pair} takes {_said(alias)}, {role}, out of its own identity: in "
+                            f"conversation it is {_said(primary)}, which is not an admin, with "
+                            f"{_said(primary)}'s memories")
+    return problems
 
 
 def thread_id_for(user_id: str, channel_key: str | None = None) -> str:
@@ -936,6 +1042,7 @@ def validate_config(*, require_discord: bool = True) -> None:
         )
 
     _validate_companion_knobs()
+    _validate_identity_links()
 
     legacy = [u for u in ([ROOT_USER] if ROOT_USER else []) + sorted(ADMIN_USERS)
               if not is_canonical_user_id(u)]
@@ -950,6 +1057,27 @@ def validate_config(*, require_discord: bool = True) -> None:
             if ADMIN_LEGACY_NAME_MATCH else
             "OFF — admin commands will NOT work until you set a canonical id",
         )
+
+
+def _validate_identity_links() -> None:
+    """Say what IDENTITY_LINKS was read as, and what is wrong with it.
+
+    Never a refusal. A link that goes nowhere takes memories and rights away
+    and gives none, so no mistake here is a configuration that must not start;
+    and before this said anything, a pair nobody could follow started in
+    silence, which an upgrade must not turn into a brain that will not start.
+    """
+    log = logging.getLogger(__name__)
+    for problem in [*_IDENTITY_LINKS_MISREAD, *identity_link_problems()]:
+        log.warning("IDENTITY_LINKS: %s.", problem)
+    if IDENTITY_LINKS:
+        def whose(primary: str) -> str:
+            if ROOT_USER and primary == ROOT_USER:
+                return " (ROOT_USER)"
+            return " (one of ADMIN_USERS)" if primary in ADMIN_USERS else ""
+        log.info("IDENTITY_LINKS: %s.", "; ".join(
+            f"{_said(alias)} is treated as {_said(primary)}{whose(primary)}"
+            for alias, primary in IDENTITY_LINKS.items()))
 
 
 def _validate_companion_knobs() -> None:

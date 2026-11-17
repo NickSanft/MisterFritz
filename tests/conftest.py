@@ -99,6 +99,10 @@ for _name, _default in (("COMPANION_ENABLED", "false"), ("COMPANION_TOKEN", ""),
                         ("COMPANION_BIND", "127.0.0.1"), ("COMPANION_MAX_CLIENTS", "2"),
                         ("COMPANION_TTS", "local"), ("GOOGLE_MCP_ENABLED", "false")):
     os.environ[_name] = _default
+# IDENTITY_LINKS likewise, and for a second reason: a link is not only words
+# validate_config may warn about. The owner's real one (their desk linked to
+# themselves, say) would make every test's desk somebody else.
+os.environ["IDENTITY_LINKS"] = ""
 
 # ---------------------------------------------------------------------------
 # 2. Heavy-module stubs, hoisted from the per-file preambles that used to be
