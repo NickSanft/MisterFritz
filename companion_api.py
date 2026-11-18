@@ -30,8 +30,10 @@ checks are HTTP middleware, which a WebSocket passes straight through
 front of this route.
 
 Identity: the client's id becomes `desktop-<id>`, which IDENTITY_LINKS may link
-one hop to another identity, the owner's Discord one say, whose memories and
-rights then follow. Linked to ROOT_USER, the token carries the owner's rights.
+one hop to another identity, the owner's Discord one say, whose memories,
+profile and name then follow. No turn here is checked for an admin's rights
+today, but the id is the client's own claim, so whoever holds the token can be
+any desk, and a desk linked to the owner is the owner.
 The desk keeps a thread of its own, `<identity>#desktop`, whatever
 THREADS_PER_CHANNEL says (plan 14, Q7).
 

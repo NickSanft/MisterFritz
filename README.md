@@ -15,9 +15,10 @@ Mister Fritz is an AI-powered Discord bot with a sophisticated, sardonic persona
 | Image Generation | Text-to-image via Stable Diffusion XL (GPU-accelerated, long-prompt capable) |
 | Voice Synthesis | Text-to-speech via Coqui XTTS v2 (plays in voice channel or uploads as file) |
 | Vision Analysis | Analyze user-attached images via LLaVA |
-| File Operations | Sandboxed file read/write/edit/search/execute for the configured root user |
+| File Operations | Sandboxed file read/write/edit/search in a workspace of your own (`/workspace enable`); running programs is for admins only |
 | Scheduled tasks | Recurring prompts and one-shot reminders via `/schedule`, delivered in the channel they were set in |
 | Direct-message relay | `/tell @user` carries your exact words to another member by DM, attributed to you; they can reply through Fritz, or refuse with `/relay block`. Off by default — see [Direct-message relay](#direct-message-relay) |
+| Desktop companion | Fritz as a figure on your Windows desktop, asked from a prompt and answering in a bubble, talking to this brain over `/companion` — see [Desktop companion](#desktop-companion) |
 | Card Game | Built-in deck system with success/failure mechanics for tabletop-style play |
 | Observability | Prometheus metrics on `:8000/metrics`, health on `:8000/health`, pre-built Grafana dashboard |
 | Canary deployment | Argo Rollouts canary steps with Prometheus-based promotion gates |
@@ -222,8 +223,8 @@ python main_discord.py
 ```
 
 **Or run the web surfaces without Discord.** `main_local.py` serves the admin
-panel and the web chat (and, with `COMPANION_ENABLED`, the desktop companion)
-with no Discord login.
+panel and the web chat (and, with `COMPANION_ENABLED`, the [desktop
+companion](#desktop-companion)) with no Discord login.
 It needs `ADMIN_PANEL_PASSWORD` and `ROOT_USER` (plus `CHAT_PASSWORD` for the web
 chat's sign-in), not `DISCORD_BOT_TOKEN`. Run it *instead of* `main_discord.py`,
 never beside it: the two share ports, the conversation database and the memory
@@ -292,22 +293,22 @@ All settings can be set as environment variables or in a `.env` file. `.env.exam
 | Variable | Default | Description |
 |---|---|---|
 | `DISCORD_BOT_TOKEN` | — | **Required** for `main_discord.py`. Your Discord bot token. `main_local.py` runs without it. |
-| `ROOT_USER` | — | **Required.** Canonical identity with admin privileges (`/workspace set`, `/schedule add/remove`). Use `discord-<your numeric id>`, not your username — see [Identity](#identity). |
+| `ROOT_USER` | — | **Required.** Canonical identity with admin privileges (`/workspace set`, `/schedule list_all`, and `execute_command` while `EXEC_REQUIRE_ADMIN` is on). Use `discord-<your numeric id>`, not your username — see [Identity](#identity). |
 | `ADMIN_USERS` | — | Comma-separated additional admin identities, same canonical form. Anyone listed gets the same powers as `ROOT_USER`. |
 | `THREADS_PER_CHANNEL` | `false` | One conversation thread per channel instead of one per person. Turning it on branches every existing conversation — see [Identity](#identity). |
 | `ADMIN_LEGACY_NAME_MATCH` | `false` | Also match `ROOT_USER`/`ADMIN_USERS` against display names. Compatibility shim only; with it on, taking your username takes your admin rights. |
-| `IDENTITY_LINKS` | — | `web-alice=discord-123,…` — treat one identity as another, so memories and conversation follow you across surfaces. |
+| `IDENTITY_LINKS` | — | `web-alice=discord-123,desktop-nick-pc=discord-123` — treat one identity as another, so what Fritz remembers of you follows you across surfaces (the web chat shares the conversation too while `THREADS_PER_CHANNEL` is off; a desk keeps its own). All on one line. Checked at startup, which says what it read — see [Desktop companion](#desktop-companion). |
 | `ADMIN_PANEL_PASSWORD` | — | Set to enable the web admin panel. Leave unset to disable. |
 | `ADMIN_PANEL_PORT` | `8001` | Port for the admin panel. Bound to `127.0.0.1` only — use SSH port forwarding for remote access. |
 
 ### Desktop companion and Google
 
-For the desktop app of [plan 14](plans/14-desktop-companion.md). The first three are live; the rest are **reserved**: declared ahead of the code that reads them, they do nothing yet, and Fritz warns at startup if you set one. Three rules are enforced whatever is built: a wildcard `COMPANION_BIND`, `COMPANION_ENABLED` without `COMPANION_TOKEN`, and an unknown `COMPANION_TTS` each refuse to start.
+For the desktop app of [plan 14](plans/14-desktop-companion.md); [Desktop companion](#desktop-companion) says how to set it up. The first three are live; the rest are **reserved**: declared ahead of the code that reads them, they do nothing yet, and Fritz warns at startup if you set one. Three rules are enforced whatever is built: a wildcard `COMPANION_BIND`, `COMPANION_ENABLED` without `COMPANION_TOKEN`, and an unknown `COMPANION_TTS` each refuse to start.
 
 | Variable | Default | Description |
 |---|---|---|
 | `COMPANION_ENABLED` | `false` | Serves the `/companion` WebSocket the desktop app talks to, at `ws://127.0.0.1:ADMIN_PANEL_PORT/companion`. It runs in the admin panel's web server, so it needs `ADMIN_PANEL_PASSWORD` set as well. |
-| `COMPANION_TOKEN` | — | The only gate on `/companion`: the panel's Basic auth and same-origin checks do not apply to a WebSocket. Deliberately separate from `CHAT_PASSWORD` and `ADMIN_PANEL_PASSWORD`. If `IDENTITY_LINKS` links the desk to `ROOT_USER`, the token carries the owner's rights too. Required when `COMPANION_ENABLED` is true; use at least 32 random characters. |
+| `COMPANION_TOKEN` | — | The only gate on `/companion`: the panel's Basic auth and same-origin checks do not apply to a WebSocket. Deliberately separate from `CHAT_PASSWORD` and `ADMIN_PANEL_PASSWORD`. Whoever holds it can be any desk, and a desk `IDENTITY_LINKS` links to you is you: your memories, your name, your desk conversation. Required when `COMPANION_ENABLED` is true; use at least 32 random characters. |
 | `COMPANION_MAX_CLIENTS` | `2` | Desktop clients connected at once. One more is turned away (close code 4409). |
 | `COMPANION_BIND` | `127.0.0.1` | Reserved (plan 14, Phase 5). Where `/companion` will listen for a second device; until then it is served with the panel on `127.0.0.1`. Never a wildcard: any address meaning "every interface" (`0.0.0.0`, `::` and their other spellings) or an empty value is refused. |
 | `COMPANION_TTS` | `local` | Reserved (plan 14, PR 9). Who speaks the desk's replies: `local`, `xtts` or `off`. |
@@ -436,7 +437,7 @@ The web chat has its own settings, documented under [Chat UI](#chat-ui).
 Every store — memories, conversation threads, schedules, workspaces, the admin gate — is keyed off a **canonical identity**:
 
 ```
-<platform>-<immutable id>      discord-123456789   telegram-987654321   web-alice
+<platform>-<immutable id>      discord-123456789   telegram-987654321   web-alice   desktop-nick-pc
 ```
 
 A dash, never a colon: a colon is illegal in a Windows filename and silently creates an NTFS alternate data stream on write, and identities reach filenames in several places.
@@ -448,6 +449,8 @@ The id half is the platform's *immutable* id wherever one exists — a Discord o
 - `/forget memories` actually deletes. It used to delete the namespace for the raw name while the write path used a stripped one, so for any username containing punctuation it reported success and removed nothing.
 
 Fritz still addresses you by name — a `user_aliases` table carries the display name alongside the id, and it's what the scheduler uses when a cron job fires hours later with no live user object.
+
+A desk has no account behind it, so its id is the one the desktop app makes from the PC's name; [Desktop companion](#desktop-companion) says how to make a desk yours with `IDENTITY_LINKS`.
 
 ### Migrating an existing install
 
@@ -513,7 +516,7 @@ mister_fritz.py   ──  LangGraph state machine: START → executor → (summa
     │   ├─ search_memories   →  chroma_store     →  Chroma KV
     │   ├─ generate_image    →  image_generator  →  SDXL
     │   ├─ analyze_image     →  Ollama LLaVA
-    │   └─ file tools (admin only) →  file_tools.py
+    │   └─ file tools (with a workspace; execute_command admin only) →  file_tools.py
     └─ SUMMARIZE  ──  trims at 30+ messages; the summary itself is written to
                       Chroma on a background thread, off the critical path
 ```
@@ -650,7 +653,7 @@ To deliberately join them, link the identities:
 IDENTITY_LINKS=web-alice=discord-123456789
 ```
 
-That folds the *whole* identity — memories, schedules, workspace and conversation — not just the thread, so a topic you start in Discord can genuinely be continued in the browser.
+That links the whole identity, not just the thread: the browser shares your memories, and with `THREADS_PER_CHANNEL` off (the default) your Discord conversation too, so a topic you start in Discord can genuinely be continued there. Schedules and a workspace are Discord's alone; the web chat has neither.
 
 > **Trust model.** `CHAT_PASSWORD` is the perimeter ("may you be here at all"); the username is only namespacing ("whose memories and conversation"). Anyone holding the password can still claim any name and read that person's chat history — set `CHAT_ALLOWED_USERS` to narrow it. It's meant for "you and your friends on a port-forwarded local network," not the public internet. If you need real per-user auth, keep the port bound to localhost (the default) and tunnel over SSH.
 
@@ -693,6 +696,56 @@ Bound to `127.0.0.1` like the admin panel. To reach it from another machine, SSH
 ssh -L 8001:127.0.0.1:8001 you@your-bot-host
 # then open http://127.0.0.1:8001/chat locally
 ```
+
+## Desktop companion
+
+Fritz has a body for the Windows desktop: a small figure who stands on your screen, is asked from a prompt (Ctrl+Alt+F, a double-click on him, or *Ask Fritz…* in his menu) and answers in a bubble over his head. It is an app of its own, in [`desktop/`](desktop/README.md), which talks to this brain over one WebSocket, `/companion`. [Plan 14](plans/14-desktop-companion.md) is the design. Typed questions work today; voice, the wallpaper and the widgets are still to come.
+
+### Turning it on
+
+`/companion` is served by the admin panel's web server, so the panel must be on as well:
+
+```dotenv
+ADMIN_PANEL_PASSWORD=...
+COMPANION_ENABLED=true
+# python -c "import secrets; print(secrets.token_urlsafe(32))"
+COMPANION_TOKEN=...
+```
+
+Run the brain natively, as `python main_local.py` (no Discord) or `python main_discord.py`, then build the app ([desktop/README.md](desktop/README.md)), paste the token into its Settings › Brain and press *Connect*. The app looks for the brain at `ws://127.0.0.1:8001/companion`; if you have changed `ADMIN_PANEL_PORT`, change *Where his brain is*, just above the token, to match.
+
+Two ways of running the brain cannot serve the desk today: `main_telegram.py` never starts the web server, and the Docker Compose bot (Option B) publishes no port for it and listens on its container's own loopback. `COMPANION_BIND` is reserved for reaching the brain from another machine and does nothing yet.
+
+### Who the desk is
+
+A desk is an identity of its own, `desktop-<its id>`. The app makes the id from the PC's name as Windows gives it to programs (`%COMPUTERNAME%`, which Windows cuts to 15 characters): lower case, only the letters a-z and the digits kept, each run of anything else one dash, none at either end (`desk` if nothing is left). So a PC called `NICK_PC` is `desktop-nick-pc`, and one called `DESKTOP-7G2K9QF` (the kind of name Windows gives) is `desktop-desktop-7g2k9qf`. While he is connected, Settings › Brain shows the whole identity first under *Who he is to it*: copy it from there rather than working it out. Until you say otherwise, that is all Fritz knows of the desk: what he learns there he keeps under that identity, and he calls you by the PC's name.
+
+To be yourself at the desk, link it to your own identity in `.env`, then restart the brain:
+
+```dotenv
+IDENTITY_LINKS=desktop-nick-pc=discord-123456789012345678
+```
+
+The desk goes on the left, copied as Settings › Brain shows it; your identity goes on the right (if you are the owner, what `ROOT_USER` is). Every link goes on the one line, separated by commas: a second `IDENTITY_LINKS` line replaces the first. As it starts, the brain says what it read, and warns about a link that can never work (a wrong case, a PC's name pasted as Windows shows it, a username where a Discord id belongs, a pair written backwards). When the desk connects, it logs which identity the desk is:
+
+```
+IDENTITY_LINKS: read as desktop-nick-pc=discord-123456789012345678 (ROOT_USER).
+companion: desktop-nick-pc connected as discord-123456789012345678 (linked by IDENTITY_LINKS)
+```
+
+Settings › Brain then shows your identity in place of the desk's. When a desk connects as itself while other desks are linked, its line in the log names them, which is how a link copied from an example shows itself.
+
+What the link does, and what it does not:
+
+- **What he remembers of you follows you.** What Fritz remembers from Discord he knows at the desk, and what he learns at the desk he knows on Discord: the facts he keeps, summaries of past conversations, and what he knows of you as a person (your interests and dislikes, how you like to be spoken to). He calls you by the name last recorded for that identity, normally your Discord name; any other account linked to you that has a name of its own (a web login, a Telegram account, a second Discord account) can put its name there in its place, and the desk never does. With no name recorded (on a brain that has only ever run `main_local.py`, say, or after `/forget all`), he uses what follows the dash in your identity: for a Discord one, its number.
+- **The conversation does not.** The desk always has a thread of its own (`<identity>#desktop`), whatever `THREADS_PER_CHANNEL` says. What was said on one surface reaches the other only as what he remembered of it. Two desks linked to one identity share one desk conversation.
+- **No files, commands or reminders at the desk.** A desk turn has the tools every conversation has (the time, the web, the document store, his memories, pictures, dice, and any skills installed) and no others: no workspace, no `execute_command`, no schedules, whoever the desk is linked to.
+- **`/forget` covers it.** `/forget conversation` and `/forget all` from Discord, and *Forget everything about …* on your page in the admin panel, clear the desk's conversation with the rest. The desk has no way to forget or export by itself.
+- **What an unlinked desk learned stays behind.** A link changes where the desk reads and writes; it moves nothing. Memories and conversation from before the link stay under `desktop-<id>`, unread, and nothing reaches them while the link stands. If you mean to link a desk, link it before you use it.
+
+In the admin panel the desk keeps a row of its own on *Users*, under the PC's name, marked *treated as* the identity it is linked to. Its memories are counted on that identity's row, and nothing can be forgotten from its own page.
+
+> **What the token is worth.** `COMPANION_TOKEN` is the only gate on `/companion`, and a desk's id is whatever the app says it is, so whoever holds the token can be any desk. A desk linked to you is you: your memories and profile (read and written through Fritz), your name, your desk conversation. Nothing admin-only is reachable from a desk today, but anything of that kind added later would follow the link. Keep the token as you would a password. `/companion` is served on `127.0.0.1` only.
 
 ---
 
