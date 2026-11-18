@@ -6,10 +6,125 @@
 {% block body %}
 <p><a href="/users">← back to users</a></p>
 
+{% if linked_to %}
+{# IDENTITY_LINKS treats this identity as another. Every read and every delete
+   through privacy follows the link, so nothing here is read or forgotten that
+   way: its memories and conversations are the other one's. #}
 <div class="card">
     <h2>{{ who }}</h2>
     <table>
         <tr><th>Identity</th><td><code>{{ user_id }}</code></td></tr>
+        <tr><th>Treated as</th><td>
+            {% if linked_to_page %}<a href="/users/{{ linked_to | urlencode }}"><code>{{ linked_to }}</code></a>{% else %}<code>{{ linked_to }}</code>{% endif %}
+            <span class="muted">(IDENTITY_LINKS)</span>
+        </td></tr>
+        {% if linked_from %}
+        <tr><th>Also</th><td>
+            {% for a in linked_from %}{% if "/" in a.user_id %}<code>{{ a.user_id }}</code>{% else %}<a href="/users/{{ a.user_id | urlencode }}"><code>{{ a.user_id }}</code></a>{% endif %}{% if a.display_name %} ({{ a.display_name }}){% endif %}{% if not loop.last %}, {% endif %}{% endfor %}
+            <span class="muted">treated as this identity in turn: links are not chained, so what is said and remembered there is kept under <code>{{ user_id }}</code>, where no page here shows it, except that a web name's memories, and a reminder booked in a Discord conversation when it fires, go one link further, to <code>{{ linked_to }}</code>.</span>
+        </td></tr>
+        {% endif %}
+    </table>
+    {% if ring %}
+    <p class="muted">
+        These links go round in a loop
+        ({% for x in ring %}<code>{{ x }}</code>{% if not loop.last %} to {% endif %}{% endfor %}),
+        and links are not chained: what <code>{{ user_id }}</code> says is kept under
+        <code>{{ linked_to }}</code>{% if memory_home != linked_to %}, and as a web name its memories
+        under <code>{{ memory_home }}</code>{% endif %}, and no page here shows or forgets it. Choose
+        the one identity the others are, link each of the others straight to it, and take that
+        one's own link out of IDENTITY_LINKS.
+    </p>
+    {% elif linked_on %}
+    <p class="muted">
+        <code>{{ linked_to }}</code> is itself linked on to <code>{{ linked_on }}</code>, and links are
+        not chained:
+        {% if memory_home == linked_to %}
+        what <code>{{ user_id }}</code> says and remembers is kept under <code>{{ linked_to }}</code>,
+        where no page here shows or forgets it while that link stays.
+        {% else %}
+        its conversation is kept under <code>{{ linked_to }}</code>, where no page here shows or
+        forgets it while that link stays, and as a web name its memories go one link further, to
+        <code>{{ memory_home }}</code>{% if memory_home_page %}: they are on
+        <a href="/users/{{ memory_home | urlencode }}">that page</a>, and its Forget removes them.{% else %},
+        which no page here shows.{% endif %}
+        {% endif %}
+        {% if "/" in chain_end %}
+        The links end at <code>{{ chain_end }}</code>, which no identity is (no identity has a
+        <code>/</code> in it): correct that link in IDENTITY_LINKS, then link
+        <code>{{ user_id }}</code> straight to what it points to.
+        {% else %}
+        Link <code>{{ user_id }}</code> to <code>{{ chain_end }}</code> itself in IDENTITY_LINKS
+        (the brain's startup log says the same).
+        {% endif %}
+    </p>
+    {% elif not linked_to_page %}
+    <p class="muted">
+        What <code>{{ user_id }}</code> says and remembers is kept under <code>{{ linked_to }}</code>,
+        which has no page here: no identity has a <code>/</code> in it. Correct the link in
+        IDENTITY_LINKS (the brain's startup log names the mistake).
+    </p>
+    {% else %}
+    <p class="muted">
+        What <code>{{ user_id }}</code> says and remembers is <code>{{ linked_to }}</code>'s: its
+        memories and conversations are on <a href="/users/{{ linked_to | urlencode }}">that page</a>,
+        and so is Forget. Nothing can be forgotten from here. Whatever <code>{{ user_id }}</code>
+        said before it was linked is kept, unread, for as long as the link stays.
+    </p>
+    {% endif %}
+</div>
+{% if own_schedules is none or own_schedules or own_workspace %}
+<div class="card">
+    <h2>Kept under <code>{{ user_id }}</code> itself</h2>
+    {% if own_schedules is none %}
+    <p class="muted">The schedules kept under <code>{{ user_id }}</code> could not be read (the log says why).</p>
+    {% endif %}
+    <p class="muted">
+        Discord's /schedule add and /workspace enable keep what they make under the id that ran
+        them, not the one it is treated as, so these are not on <code>{{ linked_to }}</code>'s page
+        and its Forget does not remove them. A schedule here still runs, as
+        <code>{{ linked_to }}</code>, and a workspace here is still used when this account talks to
+        Fritz on Discord.
+    </p>
+    {% if own_workspace %}
+    <table>
+        <tr><th>Workspace</th><td><code>{{ own_workspace }}</code>
+            <span class="muted">(this page cannot disable it while the link stays: take the link out, then disable it here)</span></td></tr>
+    </table>
+    {% endif %}
+    {% if own_schedules %}
+    <table>
+        <thead><tr><th>ID</th><th>Every</th><th>Prompt</th><th></th></tr></thead>
+        <tbody>
+            {% for s in own_schedules %}
+            <tr>
+                <td><code>{{ s.id }}</code></td>
+                <td><code>{{ s.schedule }}</code></td>
+                <td>{{ s.prompt }}</td>
+                <td>
+                    <form class="inline" method="post" action="/schedules/{{ s.id | urlencode }}/cancel"
+                          data-confirm="Cancel schedule {{ s.id }} for {{ user_id }}?">
+                        <button type="submit" class="danger">Cancel</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>
+{% endif %}
+{% else %}
+<div class="card">
+    <h2>{{ who }}</h2>
+    <table>
+        <tr><th>Identity</th><td><code>{{ user_id }}</code></td></tr>
+        {% if linked_from %}
+        <tr><th>Also</th><td>
+            {% for a in linked_from %}{% if "/" in a.user_id %}<code>{{ a.user_id }}</code>{% else %}<a href="/users/{{ a.user_id | urlencode }}"><code>{{ a.user_id }}</code></a>{% endif %}{% if a.display_name %} ({{ a.display_name }}){% endif %}{% if not loop.last %}, {% endif %}{% endfor %}
+            <span class="muted">treated as this identity by IDENTITY_LINKS: their memories and conversations are here.</span>
+        </td></tr>
+        {% endif %}
         <tr><th>Workspace</th><td>
             {% if data.workspace_path %}
             <code>{{ data.workspace_path }}</code>
@@ -68,4 +183,5 @@
     <p class="muted">No memories stored.</p>
     {% endif %}
 </div>
+{% endif %}
 {% endblock %}

@@ -26,6 +26,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 import queue
 import uvicorn
@@ -260,6 +261,11 @@ def _collect_users(schedule_manager) -> list[str]:
     Acceptable for v1. user_aliases is the widest of the three — it gets a row
     on the first message — so most people now show up here even before they
     create anything.
+
+    Whoever IDENTITY_LINKS treats a listed identity as is listed too: a linked
+    identity's memories are counted on that one's row (see _linked_to), which
+    may have no row of its own otherwise (a desk's owner, on a brain Discord
+    has never written a name to).
     """
     seen: set[str] = set()
     if schedule_manager is not None:
@@ -278,7 +284,103 @@ def _collect_users(schedule_manager) -> list[str]:
             seen.add(a["user_id"])
     except Exception as e:
         logger.debug("collecting users from aliases failed: %s", e)
+    seen |= {resolve_identity(user_id) for user_id in seen}
     return sorted(seen)
+
+
+def _linked_to(user_id: str) -> str | None:
+    """Who IDENTITY_LINKS treats `user_id` as, if not as itself.
+
+    Every privacy function follows the link before it reads or deletes, so
+    whatever is asked for a linked identity is answered for the other one. A
+    desk has a row of its own here (its handshake records the PC's name), and
+    linked to its owner that row was the owner's memories and schedules under
+    the PC's name, with a Forget button that forgot the owner. So a linked
+    identity is shown as what it is, a name for somebody else: nothing on its
+    page is read or forgotten through the link, and its memories and
+    conversations are on the other one's page. What is kept under its own id
+    is shown as its own (see _kept_under_its_own_id).
+    """
+    primary = resolve_identity(user_id)
+    return primary if primary != user_id else None
+
+
+def _linked_from(user_id: str) -> list[str]:
+    """The identities IDENTITY_LINKS treats as `user_id`."""
+    return sorted(alias for alias, primary in fritz_utils.IDENTITY_LINKS.items()
+                  if primary == user_id and alias != user_id)
+
+
+def _recorded_name(user_id: str) -> str:
+    """The name recorded for `user_id`, or "" if it says nothing the id does not.
+
+    identity_store.display_name never returns "" for an id: with no name it
+    falls back to the id's bare part, which, beside the id, is noise.
+    """
+    name = identity_store.display_name(user_id, default="")
+    return "" if name in (user_id, split_user_id(user_id)[1]) else name
+
+
+def _kept_under_its_own_id(user_id: str, schedule_manager) -> tuple[list[dict] | None, str | None]:
+    """The schedules and workspace stored under `user_id` itself, never followed.
+
+    Discord's /schedule add and /workspace enable store under the id that ran
+    them, and privacy reads through the link, so for an identity that is
+    linked these are on no other page. Read only. Schedules that cannot be
+    read are None, not [], as a cell that cannot be counted says "?".
+    """
+    schedules: list[dict] | None = []
+    workspace = None
+    if schedule_manager is not None:
+        try:
+            schedules = schedule_manager.list_schedules(user_id)
+        except Exception as e:
+            logger.warning("schedules kept under %r could not be read: %s", user_id, e)
+            schedules = None
+    try:
+        workspace = workspace_store.get(user_id)
+    except Exception as e:
+        logger.warning("the workspace kept under %r could not be read: %s", user_id, e)
+    return schedules, workspace
+
+
+def _has_a_page(user_id: str) -> bool:
+    """Whether a page here shows and forgets what is kept under `user_id`:
+    not if it is linked on (its page reads through the link), nor if it has a
+    "/" in it (the detail route takes one path segment; no identity has one)."""
+    return _linked_to(user_id) is None and "/" not in user_id
+
+
+def _linked_context(user_id: str, linked_to: str, schedule_manager) -> dict:
+    """What a linked identity's row and page say about where its data is.
+
+    Links are not chained: what this one stores is kept under linked_to, so
+    if that is linked on, its page reads one hop further and no page holds
+    it. Except a web name's memories: the web chat resolves its identity
+    before ask_stuff resolves it again, so they go one link further than its
+    conversation. Walked to the end, the links either stop (a chain) or come
+    round again (a loop, which has no end to link anything to).
+    """
+    schedules, workspace = _kept_under_its_own_id(user_id, schedule_manager)
+    path, onward = [user_id], linked_to
+    while onward is not None and onward not in path:
+        path.append(onward)
+        onward = _linked_to(onward)
+    linked_on = _linked_to(linked_to)
+    memory_home = linked_on if split_user_id(user_id)[0] == "web" and linked_on is not None else linked_to
+    return {
+        "linked_to": linked_to,
+        "linked_on": linked_on,
+        "ring": path[path.index(onward):] + [onward] if onward is not None else None,
+        "chain_end": path[-1],
+        "memory_home": memory_home,
+        "memory_home_page": _has_a_page(memory_home),
+        # Not _has_a_page: a linked one has a page here, a linked one's. Only
+        # an id with "/" in it has none.
+        "linked_to_page": "/" not in linked_to,
+        "own_schedules": schedules,
+        "own_workspace": workspace,
+    }
 
 
 def _schedule_manager_from_request(request: Request):
@@ -303,6 +405,23 @@ async def users_list(request: Request) -> HTMLResponse:
     user_ids = _collect_users(schedule_manager)
     rows = []
     for uid in user_ids:
+        linked_to = _linked_to(uid)
+        if linked_to is not None:
+            # Its memories are counted on the row of the identity it is
+            # treated as: counted here as well, one person's would be listed
+            # twice, the second time under a PC's name. Its schedules and
+            # workspace, read as they are stored, are its own.
+            linked = _linked_context(uid, linked_to, schedule_manager)
+            rows.append({
+                "user_id": uid,
+                "display_name": identity_store.display_name(uid, default=""),
+                "platform": split_user_id(uid)[0] or "legacy",
+                **linked,
+                "schedule_count": "?" if linked["own_schedules"] is None else len(linked["own_schedules"]),
+                "workspace": linked["own_workspace"],
+            })
+            continue
+
         # These raise now when a store refuses, rather than returning an empty
         # list that reads as "this person has nothing". One unreadable store
         # must not take down the whole listing, and a cell that cannot be
@@ -330,6 +449,7 @@ async def users_list(request: Request) -> HTMLResponse:
             "memory_count": memory_count,
             "schedule_count": schedule_count,
             "workspace": workspace,
+            "linked_to": None,
         })
     return templates.TemplateResponse(request, "users.html", {"users": rows})
 
@@ -337,11 +457,26 @@ async def users_list(request: Request) -> HTMLResponse:
 async def user_detail(request: Request) -> HTMLResponse:
     user_id = request.path_params["user_id"]
     schedule_manager = _schedule_manager_from_request(request)
+    linked_from = [{"user_id": alias, "display_name": _recorded_name(alias)}
+                   for alias in _linked_from(user_id)]
+    linked_to = _linked_to(user_id)
+    if linked_to is not None:
+        # Not export_user_data: it follows the link, and would lay the other
+        # identity's memories out under this one's name.
+        return templates.TemplateResponse(request, "user_detail.html", {
+            "data": None,
+            "user_id": user_id,
+            "display_name": identity_store.display_name(user_id, default=""),
+            "linked_from": linked_from,
+            **_linked_context(user_id, linked_to, schedule_manager),
+        })
     data = privacy.export_user_data(user_id, schedule_manager)
     return templates.TemplateResponse(request, "user_detail.html", {
         "data": data,
         "user_id": user_id,
         "display_name": identity_store.display_name(user_id, default=""),
+        "linked_to": None,
+        "linked_from": linked_from,
     })
 
 
@@ -394,8 +529,24 @@ def _admin(request: Request) -> str:
     return getattr(request.state, "admin_username", "(unknown)")
 
 
+def _refused_as_linked(request: Request, event: str, user_id: str, linked_to: str) -> Response:
+    """An action on a linked identity does nothing, and the audit log says so.
+
+    Its page offers none. This is for a page loaded before the link was made,
+    and for a request made by hand: either would have reached what is kept
+    under the identity it is linked to, by a name that is not that one's.
+    """
+    logger.warning("%s refused for %r: it is linked to %r, whose data it would have reached",
+                   event, user_id, linked_to)
+    audit_log(event, admin=_admin(request), target_user=user_id, refused="linked", linked_to=linked_to)
+    return RedirectResponse(url=f"/users/{quote(user_id, safe='')}", status_code=303)
+
+
 async def forget_user_action(request: Request) -> Response:
     user_id = request.path_params["user_id"]
+    linked_to = _linked_to(user_id)
+    if linked_to is not None:
+        return _refused_as_linked(request, "admin_forget_all", user_id, linked_to)
     schedule_manager = _schedule_manager_from_request(request)
     # Off the event loop. It always blocked (SQLite and Chroma deletes), and
     # now forget_conversation also waits for a turn in flight to commit: on the
@@ -412,6 +563,9 @@ async def forget_user_action(request: Request) -> Response:
 
 async def disable_workspace_action(request: Request) -> Response:
     user_id = request.path_params["user_id"]
+    linked_to = _linked_to(user_id)
+    if linked_to is not None:
+        return _refused_as_linked(request, "admin_disable_workspace", user_id, linked_to)
     try:
         removed = privacy.forget_workspace(user_id)
     except privacy.PrivacyOperationFailed as e:

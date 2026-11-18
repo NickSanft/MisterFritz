@@ -19,13 +19,34 @@
                 {# The id is opaque (discord-1234…); the name is what makes the
                    row recognisable. urlencode because a legacy id can still
                    carry punctuation that would break the path. #}
+                {# An id with "/" in it has no page: the route takes one segment. #}
                 <td>
-                    <a href="/users/{{ u.user_id | urlencode }}">
+                    {% if "/" not in u.user_id %}<a href="/users/{{ u.user_id | urlencode }}">{% endif %}
                         {% if u.display_name %}{{ u.display_name }}{% else %}<span class="muted">unknown</span>{% endif %}
-                    </a>
+                    {% if "/" not in u.user_id %}</a>{% endif %}
                 </td>
+                {% if u.linked_to %}
+                {# IDENTITY_LINKS treats it as another identity, on whose row its
+                   memories are counted. Its schedules and workspace are the ones
+                   stored under its own id. #}
+                <td>
+                    <code>{{ u.user_id }}</code>
+                    <span class="muted">treated as</span>
+                    {% if u.linked_to_page %}<a href="/users/{{ u.linked_to | urlencode }}"><code>{{ u.linked_to }}</code></a>{% else %}<code>{{ u.linked_to }}</code>{% endif %}
+                </td>
+                {% if u.ring %}
+                <td class="muted">kept under <code>{{ u.linked_to }}</code>{% if u.memory_home != u.linked_to %} (memories under <code>{{ u.memory_home }}</code>){% endif %}, counted nowhere: these links go round in a loop</td>
+                {% elif u.linked_on and u.memory_home != u.linked_to %}
+                <td class="muted">conversation kept under <code>{{ u.linked_to }}</code>, counted nowhere; memories {% if u.memory_home_page %}counted with <code>{{ u.memory_home }}</code>{% else %}kept under <code>{{ u.memory_home }}</code>, which no page here shows{% endif %}</td>
+                {% elif u.linked_on %}
+                <td class="muted">kept under <code>{{ u.linked_to }}</code>, counted nowhere: links are not chained</td>
+                {% else %}
+                <td class="muted">counted with <code>{{ u.linked_to }}</code> (IDENTITY_LINKS)</td>
+                {% endif %}
+                {% else %}
                 <td><code>{{ u.user_id }}</code></td>
                 <td>{{ u.memory_count }}</td>
+                {% endif %}
                 <td>{{ u.schedule_count }}</td>
                 <td>
                     {% if u.workspace %}

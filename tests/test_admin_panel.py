@@ -5,6 +5,7 @@ We use Starlette's TestClient against the app built by create_app() so we
 exercise routing, templating, and auth without spinning up uvicorn.
 """
 import base64
+import contextlib
 import datetime
 import importlib
 import os
@@ -303,6 +304,467 @@ class TestUserDetailPage(unittest.TestCase):
         self.assertIn("alice", r.text)
         self.assertIn("morning", r.text)  # schedule description rendered
         self.assertIn("7", r.text)         # checkpoint count rendered
+
+
+class TestALinkedIdentityIsNotItsOwnPerson(unittest.TestCase):
+    """IDENTITY_LINKS treats the desk as its owner, and every privacy function
+    follows the link before it reads or deletes. The desk still has a row of
+    its own (its handshake records the PC's name), and that row used to be the
+    owner's data under the PC's name, with a Forget button that forgot the
+    owner."""
+
+    DESK, OWNER = "desktop-nick-pc", "discord-1"
+
+    def setUp(self):
+        import identity_store
+        self.identity_store = identity_store
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        names = stack.enter_context(tempfile.TemporaryDirectory(ignore_cleanup_errors=True))
+        for name, value in (("SCHEDULE_DB", os.path.join(names, "names.db")),
+                            ("_INITIALISED", False), ("_NAME_CACHE", {})):
+            stack.enter_context(patch.object(identity_store, name, value))
+        # Nobody else's rows: other tests leave workspaces in the shared store.
+        stack.enter_context(patch.object(workspace_store, "list_all", return_value=[]))
+        self.workspaces = {}
+        stack.enter_context(patch.object(workspace_store, "get", side_effect=self.workspaces.get))
+        # The desk's handshake wrote this; nothing ever wrote the owner's.
+        identity_store.record(self.DESK, "Nick's PC", "desktop")
+        self.stack = stack
+        self.manager = MagicMock()
+        self.manager.list_all_schedules.return_value = []
+        self.schedules = {}
+        self.manager.list_schedules.side_effect = lambda uid: self.schedules.get(uid, [])
+        self.client = _build_client(schedule_manager=self.manager)
+
+    def linked(self, links=None):
+        return patch.dict(fritz_utils.IDENTITY_LINKS, links or {self.DESK: self.OWNER})
+
+    def get(self, path):
+        r = self.client.get(path, headers=_auth_header())
+        self.assertEqual(r.status_code, 200, r.text[:300])
+        return r.text
+
+    def post(self, path):
+        return self.client.post(path, headers=_auth_header(), follow_redirects=False)
+
+    @staticmethod
+    def row_of(page: str, user_id: str) -> str:
+        """The <tr> of /users whose first link is to `user_id`, whitespace squashed."""
+        for row in page.split("<tr>")[1:]:
+            if f'<a href="/users/{user_id}">' in row.split("</td>")[0]:
+                return " ".join(row.split("</tr>")[0].split())
+        raise AssertionError(f"no row for {user_id}")
+
+    @staticmethod
+    def squashed(page: str) -> str:
+        return " ".join(page.split())
+
+    def counted(self, memories=3):
+        """privacy's readers, mocked: each identity has `memories` memories."""
+        stack = contextlib.ExitStack()
+        reads = [stack.enter_context(patch.object(privacy, name, return_value=value))
+                 for name, value in (("export_memories", [1] * memories), ("export_schedules", []),
+                                     ("get_workspace_for_export", None))]
+        return stack, reads
+
+    def test_who_it_is_linked_to(self):
+        with self.linked({"web-b": self.OWNER, "web-a": "web-a", self.DESK: self.OWNER, "telegram-7": "web-c"}):
+            self.assertEqual(admin_panel._linked_to(self.DESK), self.OWNER)
+            self.assertEqual(admin_panel._linked_to("web-b"), self.OWNER)          # not only a desk
+            self.assertEqual(admin_panel._linked_to("telegram-7"), "web-c")        # not only to Discord
+            self.assertIsNone(admin_panel._linked_to(self.OWNER))
+            self.assertIsNone(admin_panel._linked_to("web-a"))        # to itself: not linked
+            self.assertIsNone(admin_panel._linked_to("web-nobody"))
+            self.assertEqual(admin_panel._linked_from(self.OWNER), [self.DESK, "web-b"])
+            self.assertEqual(admin_panel._linked_from("web-a"), [])
+        self.assertIsNone(admin_panel._linked_to(self.DESK))
+
+    def test_the_list_counts_its_memories_with_who_it_is_linked_to(self):
+        stack, reads = self.counted()
+        with self.linked(), stack:
+            page = self.get("/users")
+        desk = self.row_of(page, self.DESK)
+        self.assertIn("Nick&#39;s PC", desk)
+        self.assertIn(f'<td> <code>{self.DESK}</code> <span class="muted">treated as</span> '
+                      f'<a href="/users/{self.OWNER}"><code>{self.OWNER}</code></a> </td>', desk)
+        self.assertIn(f'<td class="muted">counted with <code>{self.OWNER}</code> (IDENTITY_LINKS)</td> <td>0</td>',
+                      desk)
+        self.assertNotIn("<td>3</td>", desk)
+        # Nothing was read for the desk through the link: each read would have been the owner's.
+        for read in reads:
+            asked = [call.args[0] for call in read.call_args_list]
+            self.assertNotIn(self.DESK, asked)
+            self.assertIn(self.OWNER, asked)
+        # The owner is listed, though no store has a row for them, and counted once.
+        owner = self.row_of(page, self.OWNER)
+        self.assertIn("<td>3</td>", owner)
+        self.assertNotIn("treated as", owner)
+        self.assertEqual(page.count("<td>3</td>"), 1)
+
+    def test_whoever_it_is_linked_to_is_listed_whichever_store_listed_it(self):
+        """Not only a desk, and not only from the alias table: /chat/login
+        records web-alice unresolved, and /schedule add and /workspace enable
+        store under the id they are given."""
+        self.identity_store.record("web-alice", "alice", "web")
+        self.manager.list_all_schedules.return_value = [{"user_id": "telegram-99"}]
+        links = {self.DESK: self.OWNER, "web-alice": "discord-2", "telegram-99": "discord-3", "discord-40": "discord-4"}
+        stack, _reads = self.counted()
+        with self.linked(links), stack, \
+             patch.object(workspace_store, "list_all", return_value=[{"user_id": "discord-40"}]):
+            self.assertEqual(admin_panel._collect_users(self.manager), sorted([*links, *links.values()]))
+            page = self.get("/users")
+        for alias, primary in links.items():
+            self.assertIn(f"counted with <code>{primary}</code>", self.row_of(page, alias))
+            self.assertIn("<td>3</td>", self.row_of(page, primary))
+        self.assertEqual(page.count("<td>3</td>"), len(links))
+
+    def test_unlinked_it_is_counted_as_anyone_is(self):
+        stack, reads = self.counted()
+        with stack:
+            page = self.get("/users")
+        desk = self.row_of(page, self.DESK)
+        self.assertIn("<td>3</td>", desk)
+        self.assertNotIn("treated as", desk)
+        self.assertIn(self.DESK, [call.args[0] for call in reads[0].call_args_list])
+        self.assertNotIn(f'<a href="/users/{self.OWNER}">', page)
+
+    def test_its_page_shows_nothing_of_the_owners_and_offers_no_action(self):
+        with self.linked(), patch.object(privacy, "export_user_data") as export:
+            page = self.get(f"/users/{self.DESK}")
+        export.assert_not_called()
+        card = self.squashed(page)
+        self.assertIn("<h2>Nick&#39;s PC</h2>", card)
+        self.assertIn(f"<th>Identity</th><td><code>{self.DESK}</code></td>", card)
+        self.assertIn(f'<th>Treated as</th><td> <a href="/users/{self.OWNER}"><code>{self.OWNER}</code></a>', card)
+        self.assertIn(f"What <code>{self.DESK}</code> says and remembers is <code>{self.OWNER}</code>'s: its "
+                      f'memories and conversations are on <a href="/users/{self.OWNER}">that page</a>, and so is '
+                      "Forget. Nothing can be forgotten from here.", card)
+        self.assertIn(f"Whatever <code>{self.DESK}</code> said before it was linked is kept, unread, for as long "
+                      "as the link stays.", card)
+        for gone in ("<form", 'data-confirm="', "/forget", "workspace/disable", "<h2>Memories",
+                     "<h2>Schedules", "Conversation checkpoints", "Kept under", "<th>Also</th>"):
+            self.assertNotIn(gone, page)
+
+    def test_what_a_discord_alias_keeps_under_its_own_id_is_shown_as_its_own(self):
+        """/schedule add and /workspace enable store under the id that ran them,
+        which the link does not move: not the owner's, and not forgotten with them."""
+        alt = "discord-77"
+        self.identity_store.record(alt, "nick_alt", "discord")
+        self.schedules[alt] = [{"id": "s77", "schedule": "0 9 * * *", "prompt": "the weather"}]
+        self.workspaces[alt] = "/w/alt"
+        stack, reads = self.counted()
+        with self.linked({alt: self.OWNER}), stack, patch.object(privacy, "export_user_data") as export:
+            row = self.row_of(self.get("/users"), alt)
+            page = self.get(f"/users/{alt}")
+        self.assertIn(f"counted with <code>{self.OWNER}</code> (IDENTITY_LINKS)</td> <td>1</td> <td> <code>/w/alt</code>",
+                      row)
+        card = self.squashed(page)
+        self.assertIn(f"<h2>Kept under <code>{alt}</code> itself</h2>", card)
+        self.assertIn(f"so these are not on <code>{self.OWNER}</code>'s page and its Forget does not remove them. "
+                      f"A schedule here still runs, as <code>{self.OWNER}</code>", card)
+        self.assertIn('<th>Workspace</th><td><code>/w/alt</code> <span class="muted">(this page cannot disable '
+                      'it while the link stays: take the link out, then disable it here)</span>', card)
+        self.assertIn("<td><code>s77</code></td> <td><code>0 9 * * *</code></td> <td>the weather</td>", card)
+        self.assertIn('<form class="inline" method="post" action="/schedules/s77/cancel" '
+                      'data-confirm="Cancel schedule s77 for discord-77?">', card)
+        self.assertEqual(page.count("<form"), 1)
+        self.assertNotIn("could not be read", page)
+        self.assertNotIn(f"/users/{alt}/", page)
+        export.assert_not_called()
+        for read in reads:
+            self.assertNotIn(alt, [call.args[0] for call in read.call_args_list])
+        self.assertIn(alt, [call.args[0] for call in self.manager.list_schedules.call_args_list])
+        # A workspace alone is shown as well, with nothing to cancel.
+        self.workspaces["discord-78"] = "/w/alt2"
+        with self.linked({"discord-78": self.OWNER}):
+            page = self.squashed(self.get("/users/discord-78"))
+        self.assertIn("<h2>Kept under <code>discord-78</code> itself</h2>", page)
+        self.assertIn("<th>Workspace</th><td><code>/w/alt2</code>", page)
+        self.assertNotIn("<form", page)
+        self.assertNotIn("<th>ID</th>", page)
+        self.assertNotIn("could not be read", page)
+        # And schedules alone, with no workspace to speak of.
+        self.schedules["discord-79"] = [{"id": "s79", "schedule": "0 8 * * *", "prompt": "the news"}]
+        with self.linked({"discord-79": self.OWNER}):
+            page = self.squashed(self.get("/users/discord-79"))
+        self.assertIn("<h2>Kept under <code>discord-79</code> itself</h2>", page)
+        self.assertIn("<td><code>s79</code></td>", page)
+        self.assertNotIn("<th>Workspace</th>", page)
+
+    def test_schedules_that_cannot_be_read_are_not_none(self):
+        """A cell that cannot be counted says so: "?" is not 0."""
+        alt = "discord-77"
+        self.identity_store.record(alt, "nick_alt", "discord")
+        self.workspaces[alt] = "/w/alt"
+        self.manager.list_schedules.side_effect = RuntimeError("database is locked")
+        stack, _reads = self.counted()
+        with self.linked({alt: self.OWNER}), stack, self.assertLogs("admin_panel", level="WARNING") as logs:
+            row = self.row_of(self.get("/users"), alt)
+            page = self.squashed(self.get(f"/users/{alt}"))
+        self.assertIn("(IDENTITY_LINKS)</td> <td>?</td> <td> <code>/w/alt</code>", row)
+        self.assertIn(f"The schedules kept under <code>{alt}</code> could not be read (the log says why).", page)
+        self.assertIn("database is locked", "; ".join(logs.output))
+        self.schedules.clear()
+        with self.linked({"discord-78": self.OWNER}), self.assertLogs("admin_panel", level="WARNING"):
+            page = self.squashed(self.get("/users/discord-78"))
+        self.assertIn("<h2>Kept under <code>discord-78</code> itself</h2>", page)
+        # A workspace that cannot be read takes nothing down either.
+        self.manager.list_schedules.side_effect = lambda uid: self.schedules.get(uid, [])
+        stack, _reads = self.counted()
+        with self.linked({alt: self.OWNER}), stack, \
+             patch.object(workspace_store, "get", side_effect=RuntimeError("workspace db locked")), \
+             self.assertLogs("admin_panel", level="WARNING") as logs:
+            row = self.row_of(self.get("/users"), alt)
+            self.get(f"/users/{alt}")
+        self.assertIn('(IDENTITY_LINKS)</td> <td>0</td> <td> <span class="muted">—</span>', row)
+        self.assertIn("workspace db locked", "; ".join(logs.output))
+
+    def test_a_chain_says_no_page_holds_it_and_names_its_end(self):
+        """Links are not chained: what desktop-x says is kept under web-b, whose
+        own page reads one hop further."""
+        self.identity_store.record("desktop-x", "X PC", "desktop")
+        stack, _reads = self.counted()
+        with self.linked({"desktop-x": "web-b", "web-b": "web-c", "jean luc?": "web-b"}), stack, \
+             patch.object(privacy, "forget_all") as forget, patch.object(admin_panel, "audit_log"), \
+             self.assertLogs("admin_panel", level="WARNING"):
+            first = self.squashed(self.get("/users/desktop-x"))
+            middle = self.squashed(self.get("/users/web-b"))
+            legacy = self.squashed(self.get("/users/jean%20luc%3F"))
+            self.assertEqual(self.post("/users/desktop-x/forget").status_code, 303)
+            self.assertEqual(self.post("/users/web-b/forget").status_code, 303)
+        forget.assert_not_called()
+        self.assertIn("<code>web-b</code> is itself linked on to <code>web-c</code>, and links are not chained: "
+                      "what <code>desktop-x</code> says and remembers is kept under <code>web-b</code>, where no page "
+                      "here shows or forgets it while that link stays. Link <code>desktop-x</code> to "
+                      "<code>web-c</code> itself in IDENTITY_LINKS", first)
+        self.assertNotIn("that page", first)
+        self.assertIn('<th>Treated as</th><td> <a href="/users/web-b"><code>web-b</code></a>', first)
+        self.assertIn('that page</a>', middle)
+        self.assertIn('<th>Also</th><td> <a href="/users/desktop-x"><code>desktop-x</code></a> (X PC), '
+                      '<a href="/users/jean%20luc%3F"><code>jean luc?</code></a> <span class="muted">treated as this '
+                      "identity in turn: links are not chained, so what is said and remembered there is kept under "
+                      "<code>web-b</code>, where no page here shows it, except that a web name's memories, and a "
+                      "reminder booked in a Discord conversation when it fires, go one link further, to "
+                      "<code>web-c</code>.</span>", middle)
+        self.assertNotIn("<form", first + middle)
+        # Only a web name's memories take the second hop: not a legacy name's.
+        self.assertIn("what <code>jean luc?</code> says and remembers is kept under <code>web-b</code>", legacy)
+        self.assertNotIn("one link further", legacy)
+        # A chain of three is mended in one edit: the remedy names its end, as the startup log does.
+        links = {"desktop-x": "web-b", "web-b": "web-c", "web-c": "discord-9"}
+        with self.linked(links):
+            self.assertIn("Link <code>desktop-x</code> to <code>discord-9</code> itself in IDENTITY_LINKS (the brain's "
+                          "startup log says the same)", self.squashed(self.get("/users/desktop-x")))
+            self.assertTrue(any(said.endswith("Link desktop-x to discord-9 itself")
+                                for said in fritz_utils.identity_link_problems()))
+            # The middle one's own next link, not the chain's end.
+            self.assertIn("go one link further, to <code>web-c</code>.</span>", self.squashed(self.get("/users/web-b")))
+        # A chain that ends at an id with "/" in it has no end to link to, however long.
+        for links in ({"desktop-x": "web-b", "web-b": "discord-1/2"},
+                      {"desktop-x": "web-b", "web-b": "web-c", "web-c": "discord-1/2"}):
+            with self.subTest(links=links), self.linked(links):
+                page = self.squashed(self.get("/users/desktop-x"))
+            self.assertIn("The links end at <code>discord-1/2</code>, which no identity is (no identity has a <code>/</code> "
+                          "in it): correct that link in IDENTITY_LINKS, then link <code>desktop-x</code> straight to what "
+                          "it points to.", page)
+            self.assertNotIn("to <code>discord-1/2</code> itself", page)
+
+    def test_a_chained_web_names_memories_go_one_link_further(self):
+        """The web chat resolves its name before ask_stuff resolves it again."""
+        with self.linked({"web-a": "web-b", "web-b": "web-c"}):
+            page = self.squashed(self.get("/users/web-a"))
+        self.assertIn("its conversation is kept under <code>web-b</code>, where no page here shows or forgets it "
+                      "while that link stays, and as a web name its memories go one link further, to "
+                      '<code>web-c</code>: they are on <a href="/users/web-c">that page</a>, and its Forget removes '
+                      "them.", page)
+        self.assertNotIn("says and remembers is kept under", page)
+        with self.linked({"web-a": "web-b", "web-b": "web-c", "web-c": "discord-9"}):
+            page = self.squashed(self.get("/users/web-a"))
+        self.assertIn("its memories go one link further, to <code>web-c</code>, which no page here shows.", page)
+        with self.linked({"web-a": "web-b", "web-b": "discord-1/2"}):
+            page = self.squashed(self.get("/users/web-a"))
+        self.assertIn("its memories go one link further, to <code>discord-1/2</code>, which no page here shows.", page)
+
+    def test_links_that_go_round_in_a_loop_have_no_end_to_link_to(self):
+        for links, loop, kept in (
+                ({"web-a": "web-b", "web-b": "web-a"}, "<code>web-a</code> to <code>web-b</code> to <code>web-a</code>",
+                 "what <code>web-a</code> says is kept under <code>web-b</code>, and as a web name its memories "
+                 "under <code>web-a</code>, and no page here shows or forgets it."),
+                ({"web-a": "desktop-y", "desktop-y": "web-c", "web-c": "web-a"},
+                 "<code>web-a</code> to <code>desktop-y</code> to <code>web-c</code> to <code>web-a</code>",
+                 "what <code>web-a</code> says is kept under <code>desktop-y</code>, and as a web name its "
+                 "memories under <code>web-c</code>, and no page here shows or forgets it."),
+                ({"desktop-x": "web-b", "web-b": "desktop-x"},
+                 "<code>desktop-x</code> to <code>web-b</code> to <code>desktop-x</code>",
+                 "what <code>desktop-x</code> says is kept under <code>web-b</code>, and no page here shows or forgets it."),
+                # Into a loop from outside it: the loop named is the one it runs into.
+                ({"desktop-t": "web-a", "web-a": "web-b", "web-b": "web-a"},
+                 "<code>web-a</code> to <code>web-b</code> to <code>web-a</code>",
+                 "what <code>desktop-t</code> says is kept under <code>web-a</code>, and no page here shows or forgets it.")):
+            alias = next(iter(links))
+            with self.subTest(links=links), self.linked(links):
+                page = self.squashed(self.get(f"/users/{alias}"))
+            self.assertIn(f"These links go round in a loop ({loop}), and links are not chained: {kept} Choose the one "
+                          "identity the others are, link each of the others straight to it, and take that one's own "
+                          "link out of IDENTITY_LINKS.", page)
+            self.assertNotIn(" itself in IDENTITY_LINKS", page)
+            self.assertNotIn("that page", page)
+
+    def test_the_list_says_a_chained_one_is_counted_nowhere(self):
+        for name in ("web-a", "web-b", "desktop-x", "discord-77"):
+            self.identity_store.record(name, name, "web")
+        stack, _reads = self.counted()
+        with self.linked({"web-a": "web-b", "web-b": "web-c", "desktop-x": "web-b", "discord-77": "web-b"}), stack:
+            page = self.get("/users")
+        self.assertIn("conversation kept under <code>web-b</code>, counted nowhere; memories counted with "
+                      "<code>web-c</code>", self.row_of(page, "web-a"))
+        self.assertIn("kept under <code>web-b</code>, counted nowhere: links are not chained", self.row_of(page, "desktop-x"))
+        self.assertIn('treated as</span> <a href="/users/web-b"><code>web-b</code></a>', self.row_of(page, "desktop-x"))
+        self.assertNotIn("memories counted with", self.row_of(page, "discord-77"))
+        self.assertIn("counted with <code>web-c</code> (IDENTITY_LINKS)", self.row_of(page, "web-b"))
+        # A web name's memories with no page to be counted on.
+        for links, home in (({"web-a": "web-b", "web-b": "web-c", "web-c": "discord-9"}, "web-c"),
+                            ({"web-a": "web-b", "web-b": "discord-1/2"}, "discord-1/2")):
+            stack, _reads = self.counted()
+            with self.subTest(links=links), self.linked(links), stack:
+                row = self.row_of(self.get("/users"), "web-a")
+            self.assertIn(f"conversation kept under <code>web-b</code>, counted nowhere; memories kept under "
+                          f"<code>{home}</code>, which no page here shows", row)
+            self.assertNotIn("memories counted with", row)
+        stack, _reads = self.counted()
+        with self.linked({"web-a": "web-b", "web-b": "web-a"}), stack:
+            row = self.row_of(self.get("/users"), "web-a")
+        self.assertIn("kept under <code>web-b</code> (memories under <code>web-a</code>), counted nowhere: these links go "
+                      "round in a loop", row)
+
+    def test_one_linked_to_an_id_with_a_slash_says_it_has_no_page(self):
+        """The detail route takes one path segment, so such a link would 404."""
+        stack, _reads = self.counted()
+        with self.linked({self.DESK: "discord-1/2"}), stack:
+            page = self.get(f"/users/{self.DESK}")
+            listing = self.get("/users")
+        row = self.row_of(listing, self.DESK)
+        for html in (page, listing):
+            self.assertNotIn('href="/users/discord-1/2"', html)
+        # Its own row is still listed, with its count: only the link is left out.
+        self.assertIn("<td><code>discord-1/2</code></td> <td>3</td>", self.squashed(listing))
+        data = {"user_id": self.OWNER, "memories": [], "schedules": [],
+                "conversation_checkpoint_count": 0, "workspace_path": None}
+        with self.linked({"discord-1/2": self.OWNER}), patch.object(privacy, "export_user_data", return_value=data):
+            owner = self.get(f"/users/{self.OWNER}")
+        self.assertNotIn('href="/users/discord-1/2"', owner)
+        self.assertIn("<th>Also</th><td> <code>discord-1/2</code>", self.squashed(owner))
+        with self.linked({"discord-1/2": "web-b", "web-b": "web-c"}):
+            middle = self.squashed(self.get("/users/web-b"))
+        self.assertNotIn('href="/users/discord-1/2"', middle)
+        self.assertIn('<th>Also</th><td> <code>discord-1/2</code> <span class="muted">treated as this identity in turn',
+                      middle)
+        card = self.squashed(page)
+        self.assertIn(f'<td> <code>{self.DESK}</code> <span class="muted">treated as</span> <code>discord-1/2</code> </td>',
+                      row)
+        self.assertIn('<th>Treated as</th><td> <code>discord-1/2</code> <span class="muted">(IDENTITY_LINKS)</span>', card)
+        self.assertIn(f"What <code>{self.DESK}</code> says and remembers is kept under <code>discord-1/2</code>, which "
+                      "has no page here: no identity has a <code>/</code> in it. Correct the link in IDENTITY_LINKS",
+                      card)
+        self.assertNotIn("that page", page)
+
+    def test_ids_that_need_quoting_are_quoted_in_every_new_link(self):
+        """A legacy id may carry anything; ? # and % would misroute unquoted."""
+        stack, _reads = self.counted()
+        with self.linked({self.DESK: "jean luc?"}), stack:
+            row = self.row_of(self.get("/users"), self.DESK)
+            page = self.get(f"/users/{self.DESK}")
+        self.assertIn('<a href="/users/jean%20luc%3F"><code>jean luc?</code></a>', row)
+        self.assertEqual(page.count('<a href="/users/jean%20luc%3F">'), 2)
+        data = {"user_id": self.OWNER, "memories": [], "schedules": [],
+                "conversation_checkpoint_count": 0, "workspace_path": None}
+        with self.linked({"jean luc?": self.OWNER, "a&b <c>": self.OWNER}), \
+             patch.object(privacy, "export_user_data", return_value=data):
+            owner = self.get(f"/users/{self.OWNER}")
+            alias = self.get("/users/jean%20luc%3F")
+        self.assertIn('<a href="/users/jean%20luc%3F"><code>jean luc?</code></a>', owner)
+        self.assertIn("<code>a&amp;b &lt;c&gt;</code>", owner)
+        self.assertIn("<th>Treated as</th>", alias)
+        self.assertNotIn("<form", alias)
+        with self.linked({"web-a": "web-b", "web-b": "jean luc?"}):
+            self.assertIn('<a href="/users/jean%20luc%3F">that page</a>', self.get("/users/web-a"))
+
+    def test_the_owners_page_names_them_and_keeps_its_actions(self):
+        data = {"user_id": self.OWNER, "memories": [], "schedules": [],
+                "conversation_checkpoint_count": 4, "workspace_path": "/w/owner"}
+        # A web name is its login, the id's own tail: no name worth repeating.
+        self.identity_store.record("web-zed", "zed", "web")
+        with self.linked({"web-b": self.OWNER, self.DESK: self.OWNER, "web-zed": self.OWNER}), \
+             patch.object(privacy, "export_user_data", return_value=data) as export:
+            page = self.get(f"/users/{self.OWNER}")
+        export.assert_called_once_with(self.OWNER, self.manager)
+        self.assertIn(f'<th>Also</th><td> <a href="/users/{self.DESK}"><code>{self.DESK}</code></a> (Nick&#39;s PC), '
+                      '<a href="/users/web-b"><code>web-b</code></a>, <a href="/users/web-zed"><code>web-zed</code></a> '
+                      '<span class="muted">treated as this identity by IDENTITY_LINKS: their memories and '
+                      "conversations are here.</span>", self.squashed(page))
+        self.assertIn(f'action="/users/{self.OWNER}/forget"', page)
+        self.assertIn(f'action="/users/{self.OWNER}/workspace/disable"', page)
+        self.assertNotIn("<th>Treated as</th>", page)
+
+    def test_a_page_nobody_is_linked_to_says_nothing_of_links(self):
+        data = {"user_id": self.DESK, "memories": [], "schedules": [],
+                "conversation_checkpoint_count": 0, "workspace_path": None}
+        with patch.object(privacy, "export_user_data", return_value=data) as export:
+            page = self.get(f"/users/{self.DESK}")
+        export.assert_called_once_with(self.DESK, self.manager)
+        self.assertNotIn("<th>Also</th>", page)
+        self.assertNotIn("<th>Treated as</th>", page)
+        self.assertIn(f'action="/users/{self.DESK}/forget"', page)
+
+    def test_forgetting_it_forgets_nobody(self):
+        """A page loaded before the link was made, or a request made by hand."""
+        for alias in (self.DESK, "web-alice"):
+            with self.subTest(alias=alias), self.linked({alias: self.OWNER}), \
+                 patch.object(privacy, "forget_all") as forget, \
+                 patch.object(admin_panel, "audit_log") as audit, \
+                 self.assertLogs("admin_panel", level="WARNING") as logs:
+                r = self.post(f"/users/{alias}/forget")
+            forget.assert_not_called()
+            self.assertEqual((r.status_code, r.headers["location"]), (303, f"/users/{alias}"))
+            audit.assert_called_once_with("admin_forget_all", admin="admin", target_user=alias,
+                                          refused="linked", linked_to=self.OWNER)
+            self.assertIn(f"admin_forget_all refused for '{alias}': it is linked to '{self.OWNER}', whose data "
+                          "it would have reached", logs.output[0])
+
+    def test_disabling_its_workspace_disables_nobodys(self):
+        with self.linked(), patch.object(privacy, "forget_workspace") as forget, \
+             patch.object(admin_panel, "audit_log") as audit, \
+             self.assertLogs("admin_panel", level="WARNING"):
+            r = self.post(f"/users/{self.DESK}/workspace/disable")
+        forget.assert_not_called()
+        self.assertEqual((r.status_code, r.headers["location"]), (303, f"/users/{self.DESK}"))
+        audit.assert_called_once_with("admin_disable_workspace", admin="admin", target_user=self.DESK,
+                                      refused="linked", linked_to=self.OWNER)
+
+    def test_the_owner_is_still_forgotten_from_their_own_page(self):
+        with self.linked(), patch.object(privacy, "forget_all", return_value={}) as forget, \
+             patch.object(privacy, "forget_workspace", return_value=True) as workspace, \
+             patch.object(admin_panel, "audit_log"):
+            self.assertEqual(self.post(f"/users/{self.OWNER}/forget").status_code, 303)
+            self.assertEqual(self.post(f"/users/{self.OWNER}/workspace/disable").status_code, 303)
+        forget.assert_called_once_with(self.OWNER, self.manager)
+        workspace.assert_called_once_with(self.OWNER)
+
+    def test_unlinked_it_is_forgotten_as_anyone_is(self):
+        with patch.object(privacy, "forget_all", return_value={}) as forget, \
+             patch.object(admin_panel, "audit_log"):
+            r = self.post(f"/users/{self.DESK}/forget")
+        forget.assert_called_once_with(self.DESK, self.manager)
+        self.assertEqual(r.headers["location"], "/users")
+
+    def test_a_refusal_goes_back_to_a_page_that_exists(self):
+        """A legacy id may carry anything; the address it is sent back to is quoted."""
+        with self.linked({"jean luc?": self.OWNER}), patch.object(privacy, "forget_all") as forget, \
+             patch.object(admin_panel, "audit_log"), self.assertLogs("admin_panel", level="WARNING"):
+            r = self.post("/users/jean%20luc%3F/forget")
+        forget.assert_not_called()
+        self.assertEqual(r.headers["location"], "/users/jean%20luc%3F")
 
 
 class TestSchedulesPage(unittest.TestCase):
