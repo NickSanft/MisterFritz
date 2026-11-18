@@ -127,16 +127,25 @@ def _connected_as(canonical_id: str, identity: str) -> str:
     This is where an operator looks to see whether a link took, and the
     likeliest mistake there is cannot be seen at startup: IDENTITY_LINKS names
     a desk (an example's, or one misspelt) that is not the one connecting. So
-    a desk that connects as itself is told which desks are linked.
+    a desk that connects as itself is told which other desks are linked, and
+    to it, which are linked to it. What IDENTITY_LINKS gave is said as
+    fritz_utils says it at startup; the desk's own id is held to the
+    protocol's pattern before it gets here.
     """
+    said = fritz_utils.said_identity
     if identity != canonical_id:
-        return f"{canonical_id} connected as {identity} (linked by IDENTITY_LINKS)"
-    linked = sorted(alias for alias in fritz_utils.IDENTITY_LINKS
-                    if alias != canonical_id and fritz_utils.split_user_id(alias)[0] == "desktop")
-    if linked:
-        return (f"{canonical_id} connected as itself: IDENTITY_LINKS links "
-                f"{', '.join(linked)}, not this desk")
-    return f"{canonical_id} connected as itself"
+        return f"{canonical_id} connected as {said(identity)} (linked by IDENTITY_LINKS)"
+    links = fritz_utils.IDENTITY_LINKS
+    desks = sorted(alias for alias in links
+                   if alias != canonical_id and fritz_utils.split_user_id(alias)[0] == "desktop")
+    here = [alias for alias in desks if links[alias] == canonical_id]
+    elsewhere = [alias for alias in desks if links[alias] != canonical_id]
+    line = f"{canonical_id} connected as itself"
+    if here:
+        line += f" ({', '.join(map(said, here))} {'is' if len(here) == 1 else 'are'} linked to it)"
+    if elsewhere:
+        line += f": IDENTITY_LINKS links {', '.join(map(said, elsewhere))}, not this desk"
+    return line
 
 
 class _Session:

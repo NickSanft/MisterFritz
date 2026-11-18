@@ -632,14 +632,89 @@ ADMIN_LEGACY_NAME_MATCH: bool = os.environ.get("ADMIN_LEGACY_NAME_MATCH", "false
 
 def _quoted(text: str) -> str:
     """Operator text as a log line may carry it: quoted, so it cannot end the
-    line, and cut short, since what is not a link may be anything at all (the
-    rest of a .env line, say)."""
+    line, and at most 80 characters of it."""
     return repr(text if len(text) <= 80 else text[:80] + "…")
 
 
-def _said(identity: str) -> str:
-    """An identity as a log line may carry it: as it is if it is plain."""
-    return identity if re.fullmatch(r"[A-Za-z0-9_-]{1,80}", identity) else _quoted(identity)
+def said_identity(identity: str) -> str:
+    """An identity, or what was given as one, as a log line may carry it.
+
+    A plain one (letters, digits, "_" and "-", as every identity is) is said as
+    it is. Anything else is quoted, so it cannot end the line, and only as far
+    as its first space or "=" (40 characters at most), with how much was left
+    out: what follows may be the rest of another setting's line, a password
+    say, run on by a lost newline.
+    """
+    if re.fullmatch(r"[A-Za-z0-9_-]{1,80}", identity):
+        return identity
+    shown = re.split(r"[\s=]", identity, maxsplit=1)[0][:40] or identity[:1]
+    hidden = len(identity) - len(shown)
+    if not hidden:
+        return repr(shown)
+    return f"{shown + '…'!r} ({hidden} more character{'' if hidden == 1 else 's'} not shown)"
+
+
+# What another setting's name looks like (CHAT_PASSWORD, COMPANION_TOKEN).
+# Found in IDENTITY_LINKS, it is a setting whose line ran into this one (see
+# _another_setting), and its value may be a secret, so it is never repeated.
+_SETTING_NAME_RE = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+")
+_SETTING_ENDS_RE = re.compile(_SETTING_NAME_RE.pattern + "$")
+_SETTING_GIVEN_RE = re.compile(_SETTING_NAME_RE.pattern + r"\s*=")    # dotenv allows NAME = value
+
+
+def _another_setting(alias: str, primary: str) -> str | None:
+    """The name of another setting, if alias=primary is its line run into this one.
+
+    CHAT_PASSWORD=hunter2: the alias is a setting's name, and the primary is
+    no identity (NICK_PC=discord-1 is a PC's name linked, or a name from
+    before migrate_identity.py, never a setting). desktop-nick-pc discord-1
+    CHAT_PASSWORD=hunter2: a pair typed without its "=" (a space or ":" in its
+    place, which no identity has), then the next line, so the setting's own
+    "=" ends the alias and its value is the primary. desktop-NICK_PC, with no
+    such character, is a desk's id mistyped, not a setting. Either way the
+    primary is no identity: a run-on's is its value.
+    """
+    if not _never_an_identity(primary):
+        return None
+    if _SETTING_NAME_RE.fullmatch(alias):
+        return alias
+    ends = _SETTING_ENDS_RE.search(alias)
+    if ends and _IDENT_STRIP_RE.search(alias[:ends.start()]):    # a whole name was fullmatched
+        return ends.group()
+    return None
+
+
+def _said_primary(alias: str, primary: str) -> str:
+    """A link's primary as a log line may carry it, or "…" if it may be a secret.
+
+    Hidden for another setting run in (NICK_PC=discord-nick too), and wherever
+    the alias is no identity and the primary has no platform:
+    chat_password=hunter2, a setting's name in lower case, looks like nothing
+    else. Otherwise a primary with a platform (discord-nick) is shown: it is a
+    mistake to see, not a value.
+    """
+    if _another_setting(alias, primary) or (_never_an_identity(alias) and not is_canonical_user_id(primary)):
+        return "…"
+    return said_identity(primary)
+
+
+def _shown_link(alias: str, primary: str) -> str:
+    """alias=primary as a log line may carry it."""
+    return f"{said_identity(alias)}={_said_primary(alias, primary)}"
+
+
+def _a_link_of_its_own(piece: str) -> bool:
+    """Whether a piece of IDENTITY_LINKS is alias=primary with a platform on the
+    left or an identity on the right, which a password's tail never has."""
+    alias, sep, primary = piece.partition("=")
+    alias, primary = alias.strip(), primary.strip()
+    return bool(sep and alias and primary) and (is_canonical_user_id(alias) or not _never_an_identity(primary))
+
+
+def _platform_lowered(value: str) -> str:
+    """Local-nick as local-nick: the case a platform's name is always written in."""
+    plat, sep, ident = value.partition(IDENTITY_SEPARATOR)
+    return plat.lower() + sep + ident
 
 
 def _read_identity_links(raw: str) -> tuple[dict[str, str], list[str]]:
@@ -652,23 +727,34 @@ def _read_identity_links(raw: str) -> tuple[dict[str, str], list[str]]:
     """
     links: dict[str, str] = {}
     misread: list[str] = []
-    for pair in raw.split(","):
-        pair = pair.strip()
+    after_hidden = ""    # the link before, if its primary was not shown whole
+    pieces = raw.split(",")
+    while pieces:
+        pair = pieces.pop(0).strip()
         if not pair:
             continue
         alias, _, primary = pair.partition("=")
         alias, primary = alias.strip(), primary.strip()
+        if primary and (_another_setting(alias, primary) or _SETTING_GIVEN_RE.search(primary)):
+            # Another setting's line run onto this one: what follows is that
+            # setting's value (a password may hold a comma), up to the first
+            # piece that is a link of its own (see _a_link_of_its_own).
+            taken = 0
+            while taken < len(pieces) and not _a_link_of_its_own(pieces[taken]):
+                taken += 1
+            primary, pieces = ",".join([primary, *pieces[:taken]]), pieces[taken:]
         if not (alias and primary):    # no "=" leaves the primary empty
-            misread.append(f"{_quoted(pair)} is not alias=primary, so it links nothing")
+            # After a primary not shown whole, a piece with no "=" may be the
+            # rest of its value: a password's, past a comma.
+            misread.append(f"a piece after {after_hidden} is not alias=primary, so it links nothing"
+                           if after_hidden else f"{_quoted(pair)} is not alias=primary, so it links nothing")
             continue
         if links.get(alias, primary) != primary:
-            misread.append(f"{_said(alias)} is linked twice, to {_said(links[alias])} and then to "
-                           f"{_said(primary)}: the last is the one used")
+            misread.append(f"{said_identity(alias)} is linked twice, to {said_identity(links[alias])} and "
+                           f"then to {said_identity(primary)}: the last is the one used")
         links[alias] = primary
+        after_hidden = _shown_link(alias, primary) if _said_primary(alias, primary) != primary else ""
     return links, misread
-
-
-IDENTITY_LINKS, _IDENTITY_LINKS_MISREAD = _read_identity_links(os.environ.get("IDENTITY_LINKS", ""))
 
 # The protocol's ClientId (companion_protocol.py), restated: fritz_utils sits
 # beneath every module and imports none of them. tests/test_identity.py holds
@@ -677,6 +763,12 @@ _DESK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 # Platforms whose people are numbers: every identity a surface makes for them
 # is built from a snowflake, so a name after the dash is nobody.
 _NUMBERED_PLATFORMS: dict[str, str] = {"discord": "Discord", "telegram": "Telegram"}
+# The platforms a surface makes identities for. KNOWN_PLATFORMS also has
+# "local", canonical_user_id's default, which no surface passes: nothing
+# connects as local-<id> (the web chat main_local.py serves is web-<name>).
+# tests/test_identity.py holds every canonical_user_id call to these.
+_SURFACE_PLATFORMS: frozenset[str] = KNOWN_PLATFORMS - {"local"}
+_LOCAL_IS_NOBODY = "is local-<id>, a platform no surface uses (the web chat is web-<name>)"
 
 
 def resolve_identity(user_id: str) -> str:
@@ -695,63 +787,160 @@ def _never_an_identity(value: str) -> str | None:
     plat, sep, ident = value.partition(IDENTITY_SEPARATOR)
     platform = plat.lower()
     if not sep or not ident or platform not in KNOWN_PLATFORMS:
-        return "is not <platform>-<id> (the platforms: " + ", ".join(sorted(KNOWN_PLATFORMS)) + ")"
-    odd = "".join(dict.fromkeys(_IDENT_STRIP_RE.findall(ident)))
+        return "is not <platform>-<id> (the platforms: " + ", ".join(sorted(_SURFACE_PLATFORMS)) + ")"
+    # Only as far as the first space or "=", which said_identity shows too:
+    # past it may be another setting's value, run on by a lost newline.
+    cut = re.search(r"[\s=]", ident)
+    odd = "".join(dict.fromkeys(_IDENT_STRIP_RE.findall(ident[:cut.end()] if cut else ident)))
     if odd:
         return (f"has {_quoted(odd[:8])} in it, which no identity has (links are separated by "
                 "commas, all on one line)")
-    if len(ident) > 64:
-        return "is longer than an identity can be (64 characters after the platform)"
     if platform == "desktop" and not _DESK_ID_RE.fullmatch(ident):
         return ("is not a desk's identity: that is desktop-, then lower-case letters, digits and "
-                "dashes (32 at most), as the app makes it from the PC's name (NICK_PC is nick-pc)")
+                "dashes (32 at most), as the app makes it from the PC's name (NICK_PC is nick-pc)"
+                + _as_a_whole_pc_name(plat, value))
+    if len(ident) > 64:
+        return "is longer than an identity can be (64 characters after the platform)"
     if platform in _NUMBERED_PLATFORMS and not ident.isdigit():
         return (f"is not a {_NUMBERED_PLATFORMS[platform]} identity: that is {platform}-, then the "
                 "account's numeric id, never a username")
     if plat != platform:
-        return f"is written {platform}{IDENTITY_SEPARATOR}{ident}: the platform is lower case"
+        return (f"is written {platform}{IDENTITY_SEPARATOR}{ident}: the platform is lower case"
+                + _as_a_whole_pc_name(plat, value))
     return None
+
+
+def _as_a_whole_pc_name(plat: str, value: str) -> str:
+    """For DESKTOP-7G2K9QF, the name Windows gives a PC: the desk it would be.
+
+    Only when "desktop" was not typed in lower case, which is how a PC's name
+    looks pasted as Windows shows it. The app makes a desk's id from the PC's
+    name (client_id_from in desktop/src-tauri/src/settings.rs, restated here:
+    lower case, each run of anything else one dash, 32 at most), so the desk
+    of a PC named DESKTOP-7G2K9QF is desktop-desktop-7g2k9qf. "If", because
+    the id can also be set by hand (brain.clientId).
+    """
+    if plat == "desktop" or plat.lower() != "desktop":
+        return ""
+    client_id = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")[:32].rstrip("-") or "desk"
+    return f"; if {said_identity(value)} is the PC's whole name, its desk is desktop-{client_id}"
+
+
+# Read here, below what reading uses.
+IDENTITY_LINKS, _IDENTITY_LINKS_MISREAD = _read_identity_links(os.environ.get("IDENTITY_LINKS", ""))
 
 
 def identity_link_problems(links: dict[str, str] | None = None) -> list[str]:
     """What is wrong with each link, in the operator's words; [] if nothing.
 
     A link is one dict lookup, character for character, so every mistake is
-    silent: an alias nobody has is never followed, a primary nobody has is
-    followed to an identity with no memories and no rights, and a pair written
-    backwards moves the wrong one. Reads this module's values at call time, so
-    tests can patch them.
+    silent: an alias no surface makes is never followed (only what was stored
+    under a bare name before migrate_identity.py carries one: a restored
+    schedule follows the link, and so does the admin panel's row for that
+    name), a primary
+    no surface makes is an identity of its own, and a pair written backwards
+    moves the wrong one. Such a primary has no memories and no rights as a
+    rule; it has an admin's rights only if it is, character for character,
+    ROOT_USER or one of ADMIN_USERS (a name still written there from before
+    migrate_identity.py can be), which the INFO line marks. Reads this
+    module's values at call time, so tests can patch them.
     """
     links = IDENTITY_LINKS if links is None else links
     admins = ({ROOT_USER} if ROOT_USER else set()) | set(ADMIN_USERS)
     problems: list[str] = []
+    rings: set[frozenset[str]] = set()
     for alias, primary in links.items():
-        pair = f"{_said(alias)}={_said(primary)}"
+        pair = _shown_link(alias, primary)
+        setting = _another_setting(alias, primary)
+        if setting == alias:
+            problems.append(f"{pair} looks like another setting, not a link: it is never followed, "
+                            "and its value is not shown. Each setting goes on a line of its own")
+            continue
+        if setting:
+            problems.append(f"{pair} ends in {setting}, another setting whose line ran into this one "
+                            "after a pair with no \"=\" of its own: it is never followed, and its value is "
+                            "not shown. Each setting goes on a line of its own, and each link is alias=primary")
+            continue
         if alias == primary:
             problems.append(f"{pair} links an identity to itself, which does nothing")
             continue
-        why = _never_an_identity(alias)
-        if why:
-            problems.append(f"{pair} is never followed: {_said(alias)} {why}")
+        alias_why = _never_an_identity(alias)
+        # local- before the platform's case: written in lower case, it is still nobody.
+        if split_user_id(alias)[0] == "local" and not _never_an_identity(_platform_lowered(alias)):
+            alias_why = _LOCAL_IS_NOBODY
+        # A pair nobody's id can match moves nobody: nothing below is so for it.
+        moves_nobody = bool(alias_why) and is_canonical_user_id(alias)
+        if moves_nobody:
+            problems.append(f"{pair} is never followed: {said_identity(alias)} {alias_why}")
+        elif alias_why:
+            # Not <platform>-<id> at all: a typo as a rule, but a store not
+            # yet migrated is keyed by such names, and a schedule restored
+            # from one does follow the link.
+            problems.append(f"{pair} is followed for nobody who talks to Fritz now: "
+                            f"{said_identity(alias)} {alias_why}; only what was stored by name "
+                            "before migrate_identity.py is keyed like that")
         why = _never_an_identity(primary)
+        folded = _platform_lowered(primary)
+        if (split_user_id(primary)[0] == "local" and not _never_an_identity(folded)
+                and folded not in admins and primary not in admins
+                and [_platform_lowered(p) for p in links.values()].count(folded) == 1):
+            why = _LOCAL_IS_NOBODY    # shared, or an admin's, it is somebody: a hub
         if why:
-            problems.append(f"{pair} makes {_said(alias)} somebody nobody else is: {_said(primary)} {why}")
+            problems.append(f"{pair} links {said_identity(alias)} to an identity no surface makes: "
+                            f"{_said_primary(alias, primary)} {why}")
         onward = links.get(primary, primary)
-        if onward != primary:
-            # resolve_identity is one hop. The web chat resolves before it
-            # calls ask_stuff, which resolves again: its memories take the
-            # second hop and its thread does not.
-            problems.append(f"{pair} stops at {_said(primary)}, though that is linked on to "
-                            f"{_said(onward)}: links are not chained (only the web chat follows a "
-                            f"second, and only for memories). Link {_said(alias)} to {_said(onward)} itself")
-        if split_user_id(primary)[0] == "desktop" and split_user_id(alias)[0] != "desktop":
-            problems.append(f"{pair} makes {_said(alias)} the desk, not the desk {_said(alias)}: the "
-                            f"desk goes on the left, {_said(primary)}={_said(alias)}")
-        if alias in admins and primary not in admins:
+        if onward != primary and not moves_nobody:
+            # resolve_identity is one hop, but two places take a second: the
+            # web chat resolves before it calls ask_stuff, which resolves
+            # again (all but its thread go on), and a reminder booked in
+            # conversation is stored under the resolved id, which ask_stuff
+            # resolves again when it fires (all of it goes on).
+            seen, end = {alias, primary}, onward
+            while end not in seen and links.get(end, end) != end:
+                seen.add(end)
+                end = links[end]
+            # The way back moves nobody either if nothing can match its
+            # alias: one move, said above for that pair.
+            back_moves_nobody = is_canonical_user_id(primary) and bool(
+                _never_an_identity(primary) or split_user_id(primary)[0] == "local")
+            if onward == alias:
+                if not back_moves_nobody and frozenset((alias, primary)) not in rings:
+                    rings.add(frozenset((alias, primary)))
+                    problems.append(f"{pair} and {_shown_link(primary, alias)} link the two to each "
+                                    "other, which swaps them in most places rather than making them "
+                                    "one: keep one of the two")
+            elif end in seen:
+                problems.append(f"{pair} stops at {_said_primary(alias, primary)}, though that is linked on "
+                                f"to {said_identity(onward)}, and from there the links go round in a "
+                                f"ring, so there is no end to link {said_identity(alias)} to: take out "
+                                "the link that closes the ring")
+            else:
+                a, p, o = said_identity(alias), _said_primary(alias, primary), said_identity(onward)
+                platform = split_user_id(alias)[0]
+                if platform == "web":
+                    became = f"{a} ends up as two identities ({o} for all its web chat does but the "
+                    became += f"conversation itself, {p} for that)"
+                elif platform == "discord":
+                    became = f"{a} ends up as two identities ({p} in conversation, {o} for a reminder "
+                    became += "booked in conversation, when it fires)"
+                else:
+                    became = f"{a} is {p}, not {o}"
+                problems.append(f"{pair} stops at {p}, though that is linked on to {o}: links are not "
+                                f"chained, so {became}. Link {a} to {said_identity(end)} itself")
+        # Not when the desk is an admin and the person is not: written the
+        # other way, the admin would be the one moved (the next check's).
+        if (split_user_id(primary)[0] == "desktop" and split_user_id(alias)[0] != "desktop"
+                and not moves_nobody and not (primary in admins and alias not in admins)):
+            problems.append(f"{pair} makes {said_identity(alias)} the desk, not the desk "
+                            f"{said_identity(alias)}: the desk goes on the left, "
+                            f"{_shown_link(primary, alias)}")
+        # Not for an alias no surface makes: no one is moved. An admin
+        # still written by name has validate_config's own warning.
+        if alias in admins and primary not in admins and not alias_why:
             role = "ROOT_USER" if alias == ROOT_USER else "one of ADMIN_USERS"
-            problems.append(f"{pair} takes {_said(alias)}, {role}, out of its own identity: in "
-                            f"conversation it is {_said(primary)}, which is not an admin, with "
-                            f"{_said(primary)}'s memories")
+            problems.append(f"{pair} takes {said_identity(alias)}, {role}, out of its own identity: in "
+                            f"conversation it is {said_identity(primary)}, which is not an admin, with "
+                            f"{said_identity(primary)}'s memories")
     return problems
 
 
@@ -1062,21 +1251,27 @@ def validate_config(*, require_discord: bool = True) -> None:
 def _validate_identity_links() -> None:
     """Say what IDENTITY_LINKS was read as, and what is wrong with it.
 
-    Never a refusal. A link that goes nowhere takes memories and rights away
-    and gives none, so no mistake here is a configuration that must not start;
-    and before this said anything, a pair nobody could follow started in
-    silence, which an upgrade must not turn into a brain that will not start.
+    Never a refusal. A mistaken link takes memories and rights away; it gives
+    an admin's rights only by naming ROOT_USER or one of ADMIN_USERS exactly,
+    which is what the operator wrote and what the INFO line marks. And before
+    this said anything, a pair nobody could follow started in silence, which
+    an upgrade must not turn into a brain that will not start.
+
+    The INFO line is what was read, not what it does: a link the warnings say
+    is never followed is still read, and still listed.
     """
     log = logging.getLogger(__name__)
     for problem in [*_IDENTITY_LINKS_MISREAD, *identity_link_problems()]:
         log.warning("IDENTITY_LINKS: %s.", problem)
     if IDENTITY_LINKS:
-        def whose(primary: str) -> str:
+        def whose(alias: str, primary: str) -> str:
+            if _another_setting(alias, primary):    # a mark would say what its value is
+                return ""
             if ROOT_USER and primary == ROOT_USER:
                 return " (ROOT_USER)"
             return " (one of ADMIN_USERS)" if primary in ADMIN_USERS else ""
-        log.info("IDENTITY_LINKS: %s.", "; ".join(
-            f"{_said(alias)} is treated as {_said(primary)}{whose(primary)}"
+        log.info("IDENTITY_LINKS: read as %s.", "; ".join(
+            f"{_shown_link(alias, primary)}{whose(alias, primary)}"
             for alias, primary in IDENTITY_LINKS.items()))
 
 

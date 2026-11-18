@@ -332,7 +332,28 @@ class TestHandshake(CompanionTest):
                 ("desktop-venn", "desktop-venn",
                  {"desktop-nick-pc": "discord-1", "web-a": "discord-1", "Desktop-Venn": "discord-1"},
                  "desktop-venn connected as itself: IDENTITY_LINKS links Desktop-Venn, desktop-nick-pc, "
-                 "not this desk")):
+                 "not this desk"),
+                # Another desk linked TO this one: this is the desk the link names.
+                ("desktop-a", "desktop-a", {"desktop-b": "desktop-a"},
+                 "desktop-a connected as itself (desktop-b is linked to it)"),
+                ("desktop-a", "desktop-a", {"desktop-c": "desktop-a", "desktop-b": "desktop-a"},
+                 "desktop-a connected as itself (desktop-b, desktop-c are linked to it)"),
+                ("desktop-a", "desktop-a", {"desktop-a b": "desktop-a"},
+                 "desktop-a connected as itself ('desktop-a…' (2 more characters not shown) is linked to it)"),
+                ("desktop-a", "desktop-a", {"desktop-b": "desktop-a", "desktop-c": "discord-1"},
+                 "desktop-a connected as itself (desktop-b is linked to it): IDENTITY_LINKS links "
+                 "desktop-c, not this desk"),
+                # What IDENTITY_LINKS gave is said as startup says it.
+                ("desktop-venn", "desktop-venn",
+                 {"desktop-Nick PC": "discord-1", "desktop-a\nb": "discord-1", "desktop-" + "x" * 100: "discord-1",
+                  "desktop-venn\u200b": "discord-1"},
+                 "desktop-venn connected as itself: IDENTITY_LINKS links 'desktop-Nick…' (3 more characters "
+                 "not shown), 'desktop-a…' (2 more characters not shown), 'desktop-venn\\u200b', "
+                 "'desktop-" + "x" * 32 + "…' (68 more characters not shown), not this desk"),
+                ("desktop-nick-pc", "discord-1\ndesktop-laptop=discord-1",
+                 {"desktop-nick-pc": "discord-1\ndesktop-laptop=discord-1"},
+                 "desktop-nick-pc connected as 'discord-1…' (25 more characters not shown) (linked by "
+                 "IDENTITY_LINKS)")):
             with self.subTest(links=links), patch.object(fritz_utils, "IDENTITY_LINKS", links):
                 self.assertEqual(companion_api._connected_as(desk, identity), line)
 
