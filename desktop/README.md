@@ -4,11 +4,13 @@ Fritz's body on the Windows desktop: a Tauri 2 app that talks to the brain
 over the `/companion` WebSocket ([plan 14](../plans/14-desktop-companion.md),
 [build plan](../plans/14-desktop-companion-build.md)). Windows only.
 
-Today it is one persistent, transparent, click-through, never-focused avatar
-window with a WebGL VRM in it, a control window (tray > Settings…), a tray,
-three hotkeys, and the prompt (*Ask Fritz*), Ctrl+Alt+F. PR 5 of the build
-plan (clicking him) is under way. Spike 0 proved the window ([docs/SPIKE0.md](docs/SPIKE0.md)), and
-its table is PR 2's acceptance.
+Today it is one persistent, transparent, never-focused avatar window with a
+WebGL VRM in it, a control window (tray > Settings…), a tray, three hotkeys,
+the prompt (*Ask Fritz*: Ctrl+Alt+F, a double-click on him, or his menu),
+and a mouse hook that makes his body his to click. That is Phase 1 of the
+build plan up to PR 6; its CI job (PR 7) is next, and voice (Phase 2), the
+wallpaper and the widgets come after. Spike 0 proved the window
+([docs/SPIKE0.md](docs/SPIKE0.md)), and its table is PR 2's acceptance.
 
 ## What it keeps, and where
 
@@ -118,6 +120,43 @@ fixtures) is generated from the brain's `companion_protocol.py` by
 `python scripts/gen_protocol_ts.py` at the repository's root; the brain's
 pytest fails while they differ.
 
+### Who he is to the brain
+
+His hello names the desk with `brain.clientId` and `brain.clientName`, and
+the brain calls the desk `desktop-<brain.clientId>`. Both are made from the
+PC's name (`%COMPUTERNAME%`) when `settings.json` is first written, and
+kept: the id in lower case, only a-z and the digits kept, each run of
+anything else one dash, none at either end (`desk` if nothing is left), so
+`NICK_PC` is `desktop-nick-pc`; the name as Windows has it (`this PC` if it
+has none). Renaming the PC later changes neither, as long as `settings.json`
+keeps them. The default, though, is made from the PC's name as it is at
+each start: an id edited into `settings.json` that isn't one (lower-case
+letters, digits and dashes, starting with a letter or digit, at most 32) is
+put back to it at the next start and saved, and the log says so, and a
+`settings.json` deleted or set aside starts from it too. On a renamed PC,
+either gives the desk the id of its new name: a new desk to the brain.
+
+While he is connected, Settings › Brain's *Who he is to it* says who he is
+to the brain, whom he is talking with, and in which thread, for example
+`desktop-nick-pc, talking with NICK_PC, in the thread desktop-nick-pc#desktop.`
+Unlinked, the desk is a person of its own to him, called by the PC's name.
+To be yourself at the desk, copy the identity from that row into the brain's
+`IDENTITY_LINKS` (`desktop-nick-pc=discord-<your id>`) and restart the
+brain: the row then names your identity. The root README's
+[Desktop companion](../README.md#desktop-companion) section says what a link
+carries and what it doesn't (his memories of you do; the conversation, files
+and reminders don't), and what an unlinked desk leaves behind, so link the
+desk before you talk to him there.
+
+A new `brain.clientId` is a new desk to the brain, and an unlinked one.
+What an unlinked desk learned stays under its old id. What a linked one
+learned is under your identity: put the new id on the desk's side of its
+`IDENTITY_LINKS` link and restart the brain, and the new desk has it all
+again, the desk thread too. Until then he is talking with a stranger, and
+the brain's log says so as the desk connects (`desktop-<new id> connected
+as itself: IDENTITY_LINKS links desktop-<old id>, not this desk`). Or quit
+Fritz and write the old id back into `brain.clientId`.
+
 ## His speech bubble
 
 His replies show in a bubble over his head, on its own panel in the mood's
@@ -186,10 +225,27 @@ The app is `src-tauri/target/release/mister-fritz-desktop.exe`.
 - **The pages are embedded in the exe at compile time**: after any change to
   a page (`avatar.html`, `control.html`) or under `src/` or `public/`, run
   `pnpm build` *and* the cargo build again.
+- **Quit Fritz before you build.** Windows won't let cargo replace an exe
+  that is running, so a build while he is up ends with `error: failed to
+  remove file` naming `mister-fritz-desktop.exe`, then `Access is denied.
+  (os error 5)`. Quit him from the tray (*Quit Mister Fritz*) and build
+  again.
 - **Smart App Control** (Windows 11) blocks the Tauri CLI's unsigned native
   module on some machines, so `pnpm tauri build` fails with "An Application
   Control policy has blocked this file". The two commands above are what it
   runs, minus the installer, and need no CLI.
+- **Microsoft Defender may take a fresh build for malware.** The exe is
+  unsigned, and Defender's machine-learning detection (a name ending in
+  `!ml`) can quarantine one. If a build vanishes, or won't start, look in
+  Windows Security › Virus & threat protection › *Protection history*.
+  *Restore* puts the exe back, but Defender may find it again; *Allow on
+  device*, on the detection it then raises, is what keeps it. It can also
+  be submitted to Microsoft as a false positive, through Microsoft's file
+  submission page (microsoft.com/wdsi/filesubmission). A submission
+  Microsoft clears covers that one file, by its SHA-256 (`Get-FileHash`
+  shows it), so every rebuild is a new file to Defender and may be flagged
+  again. Signing the exe might help, though Microsoft doesn't promise it
+  ends this; plan 14's risk table leaves it to consider in Phase 5.
 
 `pnpm build` refuses an avatar page that could animate outside its paced
 loop. `scripts/check-paced.mjs` reads our own modules `avatar.html` reaches

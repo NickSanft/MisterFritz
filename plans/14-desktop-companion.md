@@ -142,7 +142,7 @@ Shared schema: `companion_protocol.py` (pydantic models) is the source of truth;
 
 ### Identity
 
-`desktop` joins `KNOWN_PLATFORMS`. The owner links `desktop-<machine>` to their Discord root identity through the existing `IDENTITY_LINKS` so memories and `ROOT_USER` privileges follow them (one hop is already supported, `fritz_utils.py:549-565`). Threads: `THREADS_PER_CHANNEL` defaults to **false** (`fritz_utils.py:537`), and when it is off `thread_id_for` ignores `channel_key` and returns the bare identity (`:575-576`) — so once `IDENTITY_LINKS` maps the desk to the Discord root, the desk would silently share the owner's Discord DM thread. `companion_api` therefore passes an explicit `thread_id=f"{identity}#desktop"` to `ask_stuff` (the keyword-only override that already exists for the web chat), which works regardless of the flag. Q7 asks whether that separation is wanted.
+`desktop` joins `KNOWN_PLATFORMS`. The owner links `desktop-<machine>` to their Discord root identity through the existing `IDENTITY_LINKS` so memories and `ROOT_USER` privileges follow them (*as built, PR 6*: the memories, the profile and the name do; no admin-gated path is reachable from a desk turn, see the build plan's PR 6) (one hop is already supported, `fritz_utils.py:549-565`). Threads: `THREADS_PER_CHANNEL` defaults to **false** (`fritz_utils.py:537`), and when it is off `thread_id_for` ignores `channel_key` and returns the bare identity (`:575-576`) — so once `IDENTITY_LINKS` maps the desk to the Discord root, the desk would silently share the owner's Discord DM thread. `companion_api` therefore passes an explicit `thread_id=f"{identity}#desktop"` to `ask_stuff` (the keyword-only override that already exists for the web chat), which works regardless of the flag. Q7 asks whether that separation is wanted.
 
 ### Avatar state machine (body side)
 
@@ -260,7 +260,7 @@ Effort tags follow the README's scale — **M = half day, L = 1–3 days, XL = >
 
 **PR 7 (CI, S) — `desktop-ci` job** on `windows-latest`: `pnpm install --frozen-lockfile`, `pnpm test`, `cargo check --features custom-protocol`, `scripts/gen_protocol_ts.py --check`. No WorkerW/overlay tests run headless; those stay manual with the Spike 0 table as the checklist.
 
-**Phase 1 definition of done.** Ctrl+Alt+F from any app, type "good evening", Enter — the prompt vanishes, the avatar looks up, the bubble streams Fritz's reply, the foreground app never lost focus, and the exchange appears under the desk thread in the admin panel's user page. Idle for an hour: avatar breathing, GPU presents at the cap, no foreground steals logged. Switching mood (ink ↔ dusk ↔ midnight), accent or light/dark from the tray recolours bubble, prompt and control window without a restart; `--motion: 0` leaves only blink and breathing moving.
+**Phase 1 definition of done.** Ctrl+Alt+F from any app, type "good evening", Enter — the prompt vanishes, the avatar looks up, the bubble streams Fritz's reply, the foreground app never lost focus, and the exchange appears under the desk thread in the admin panel's user page (*as built, PR 6*: the page shows no transcript, only a count of conversation checkpoints, and the turn is a `companion_turn` line in the audit log). Idle for an hour: avatar breathing, GPU presents at the cap, no foreground steals logged. Switching mood (ink ↔ dusk ↔ midnight), accent or light/dark from the tray recolours bubble, prompt and control window without a restart; `--motion: 0` leaves only blink and breathing moving.
 
 ### Phase 2 — voice: push-to-talk in, spoken reply out
 
@@ -298,7 +298,7 @@ Effort tags follow the README's scale — **M = half day, L = 1–3 days, XL = >
 
 - **Autostart** via Lorraine's Startup-folder `.lnk` (`autostart.rs`; the HKCU Run key silently failed there). **NSIS** per-user installer (MSI can't do per-user). Defender false-positive note in `desktop/README.md`.
 - **Remote reach**: `COMPANION_BIND` may be set to the Tailscale interface; token auth is already required; TLS is Tailscale's. Never bind `0.0.0.0`.
-- **Second Windows PC**: the same installer, a different `client.id`, the same `IDENTITY_LINKS` target. Settings stay per device (window positions are hardware-specific); memory and threads are the brain's.
+- **Second Windows PC**: the same installer, a different `client.id`, the same `IDENTITY_LINKS` target. Settings stay per device (window positions are hardware-specific); memory and threads are the brain's (*as built, PR 6*: two desks linked to one identity share its one desk thread, `<identity>#desktop`).
 - **Android spike (S)**: Tauri 2 mobile builds the same TypeScript frontend into an Android WebView; the avatar + prompt + companion client are platform-neutral, and Rust plumbing is `cfg(windows)`. Treat as a spike, not a promise — mobile Tauri is younger than desktop.
 - **Proactive mode (decision-gated)**: with `DeliverySink` and the widget feed in place, "meeting in 10 minutes" is a scheduler job plus quiet-hours rules; it is deliberately not in Phases 1–4 because the interview chose reactive + ambient.
 
