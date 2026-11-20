@@ -101,6 +101,71 @@ jobs:
           # parses a real .docx, so no corpus is needed.
           AUTO_DOWNLOAD_NLTK: "false"
 
+  desktop:
+    name: the desktop app (Windows)
+    # The body of plan 14 (desktop/): its pages' tests and build gates, and the
+    # Rust shell's check and tests, on Windows, which is all it builds for.
+    # Nothing here runs the overlay, the hook or WorkerW: those need a real
+    # desktop, and desktop/docs/SPIKE0.md is their checklist. The protocol's
+    # generated TypeScript is held to companion_protocol.py by the core job
+    # (tests/test_gen_protocol_ts.py), and type-checked here by `pnpm build`.
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: desktop
+    env:
+      # The MSRV, desktop/src-tauri/Cargo.toml's rust-version: what the README
+      # promises it builds with (tests/test_workflows.py holds the two equal).
+      RUSTUP_TOOLCHAIN: "1.89"
+    steps:
+      # Windows images check out with core.autocrlf=true, which would hand the
+      # tests CRLF copies of files committed, and tested, as LF.
+      - name: Check out as committed
+        working-directory: .
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "26"
+          # pnpm's own store is cached by the next step; npm's is not used.
+          package-manager-cache: false
+
+      # The version is desktop/package.json's packageManager, read there.
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115  # v6.1.1
+        with:
+          package_json_file: desktop/package.json
+          cache: true
+          cache_dependency_path: desktop/pnpm-lock.yaml
+
+      - name: Install the Rust toolchain
+        run: rustup toolchain install "$env:RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+        with:
+          workspaces: desktop/src-tauri -> target
+
+      - name: Install the pages' dependencies, exactly as locked
+        run: pnpm install --frozen-lockfile
+
+      - name: Test the pages
+        run: pnpm test:run
+
+      # The paced-loop and CSS-motion gates, tsc, and the bundle in dist/,
+      # which the custom-protocol build below embeds.
+      - name: Build the pages
+        run: pnpm build
+
+      - name: Check the shell's dev build
+        run: cargo check --locked --manifest-path src-tauri/Cargo.toml
+
+      # With custom-protocol, as every build that ships (desktop/README.md):
+      # without it the shell is a dev build that loads a dev server.
+      - name: Test the shell
+        run: cargo test --locked --features custom-protocol --lib --bins --manifest-path src-tauri/Cargo.toml
+
   build-image:
     name: the image builds, and its entrypoint boots
     # Nothing in this repository has ever built the real Dockerfile. ci.yml had

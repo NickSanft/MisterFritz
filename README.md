@@ -557,13 +557,14 @@ lists), on every pull request,
 on a nightly `schedule`, and on `workflow_dispatch` — not on every push to
 every branch, which is what this said before.
 
-Three jobs, and which dependency set each installs is the point:
+Four jobs. For the three Python ones, which dependency set each installs is the point:
 
 | Job | Installs | Runs on |
 |---|---|---|
-| `core + dev` | `pip install -c requirements.txt -e ".[dev]"` — pyproject's floors constrained to the lock, so the job tests the versions the image ships | pushes, pull requests |
+| `core + dev` | `pip install -c requirements.txt -e ".[dev]"` — pyproject's floors constrained to the lock, so the job tests the versions the image ships | pushes, pull requests, nightly, manual |
 | `all extras (CPU wheels)` | `-e ".[all]"` UNCONSTRAINED, so the declared floors resolve freely | nightly, manual |
 | `the image builds, and its entrypoint boots` | the Dockerfile, then `docker run <image> --preflight` | nightly, manual |
+| `the desktop app (Windows)` | `desktop/`'s locked pnpm packages and Rust 1.89, its MSRV: the pages' tests and build, then the shell's check and tests ([desktop/README.md](desktop/README.md#test)) | pushes, pull requests, nightly, manual |
 
 The split is deliberate. Resolving the floors freely is how you find out that a
 bare floor has drifted to a package you do not ship — which is exactly what

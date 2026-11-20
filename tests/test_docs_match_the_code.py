@@ -261,6 +261,13 @@ class TestTheRelayIsDiscoverable(unittest.TestCase):
         self.assertNotIn("have not landed yet", env)
 
 
+# What the README's jobs table calls each event `on:` can declare. A new
+# event raises KeyError in the test below, so whoever adds it names it here.
+_EVENT_WORDS = {"push": "pushes", "pull_request": "pull requests",
+                "schedule": "nightly", "workflow_dispatch": "manual"}
+_EVENT_CLAUSE = re.compile(r"github\.event_name == '(\w+)'")
+
+
 class TestTheReadmeDescribesThePipelineThatExists(unittest.TestCase):
     """It described one that has never run.
 
@@ -306,6 +313,37 @@ class TestTheReadmeDescribesThePipelineThatExists(unittest.TestCase):
         for job in self.ci["jobs"].values():
             with self.subTest(job=job["name"]):
                 self.assertIn(job["name"], self.readme)
+
+    def test_each_jobs_runs_on_cell_is_the_events_it_runs_on(self):
+        """core + dev's row said "pushes, pull requests" while the job, with
+        no `if:`, also ran nightly and on every manual run, and nothing here
+        noticed. A job with no `if:` runs on every `on:` event; one with an
+        `if:` runs on the events its `github.event_name == '...'` clauses
+        name. Any other condition is refused rather than guessed at."""
+        lines = self.readme.splitlines()
+        start = lines.index("| Job | Installs | Runs on |") + 2
+        rows = {}
+        for line in lines[start:]:
+            if not line.startswith("|"):
+                break
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            rows[cells[0].strip("`")] = cells[-1]
+        triggers = self.ci.get("on") or self.ci.get(True)
+        for job in self.ci["jobs"].values():
+            with self.subTest(job=job["name"]):
+                self.assertIn(job["name"], rows, "no row in the jobs table")
+                condition = job.get("if")
+                if condition is None:
+                    events = list(triggers)
+                else:
+                    clauses = [clause.strip() for clause in condition.split("||")]
+                    events = [match.group(1) for clause in clauses
+                              for match in [_EVENT_CLAUSE.fullmatch(clause)] if match]
+                    self.assertEqual(len(events), len(clauses),
+                                     f"cannot read this `if:`: {condition!r}")
+                    self.assertLessEqual(set(events), set(triggers), condition)
+                said = {part.strip() for part in rows[job["name"]].split(",")}
+                self.assertEqual(said, {_EVENT_WORDS[event] for event in events})
 
     def test_it_says_which_dependency_set_each_job_installs(self):
         """The distinction that cost four days of red: one job resolves the

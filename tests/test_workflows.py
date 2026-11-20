@@ -11,7 +11,9 @@ Every action was also on a moving tag. `v4` is a pointer: whoever controls the
 action's repository can re-point it, and the next run would execute whatever it
 pointed at — with the token, and in the release workflow alongside a kubeconfig.
 """
+import json
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -496,6 +498,226 @@ class TestTheImageIsBuiltAndBootedSomewhere(unittest.TestCase):
     def test_the_dockerfile_still_has_the_entrypoint_this_all_assumes(self):
         dockerfile = (REPO / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn('ENTRYPOINT ["python", "main_discord.py"]', dockerfile)
+
+
+# Node ranges as package.json and pnpm-lock.yaml write them: `>=` and `^`
+# clauses (`>= 0.4`, `>=v12.22.7` too) joined by `||`, which is every form the
+# desktop lock holds. Anything else is refused rather than guessed at.
+_CLAUSE = re.compile(r"(\^|>=)v?(\d+)(?:\.(\d+))?(?:\.(\d+))?")
+
+
+def _version(text: str) -> tuple:
+    return tuple(int(part) for part in (text.split(".") + ["0", "0"])[:3])
+
+
+def _branches(spec: str) -> list:
+    return [re.sub(r"(>=|\^)\s+", r"\1", branch.strip()) for branch in spec.split("||")]
+
+
+def _floor(clause: str) -> tuple:
+    match = _CLAUSE.fullmatch(clause)
+    if not match:
+        raise AssertionError(f"cannot read the Node range clause {clause!r}")
+    return match.group(1), tuple(int(part or 0) for part in match.groups()[1:])
+
+
+def _admits(spec: str, version: tuple) -> bool:
+    for branch in _branches(spec):
+        op, floor = _floor(branch)
+        if version >= floor and (op == ">=" or version[0] == floor[0]):
+            return True
+    return False
+
+
+def _edges(spec: str) -> set:
+    """Where a range's stretches of Node begin (its floors) and where its `^`
+    branches stop (the next major)."""
+    edges = set()
+    for branch in _branches(spec):
+        op, floor = _floor(branch)
+        edges.add(floor)
+        if op == "^":
+            edges.add((floor[0] + 1, 0, 0))
+    return edges
+
+
+def _promised_beyond(engines: str, locked: set) -> list:
+    """Every (Node, locked range) where `engines` admits a Node the range does
+    not. Each range is a union of stretches that begin at a floor and end at a
+    `^` branch's next major, so the first Node of any gap is one of these
+    edges: checking them checks every version."""
+    edges = _edges(engines).union(*(_edges(spec) for spec in locked))
+    return [(edge, spec) for edge in sorted(edges) if _admits(engines, edge)
+            for spec in sorted(locked) if not _admits(spec, edge)]
+
+
+def _locked_node_ranges(lock: Path) -> set:
+    """pnpm writes each engines map on one line with its keys sorted, so bun,
+    deno or iojs can come before node: node is read wherever it falls. The
+    field is read at pnpm's package-field indent, four spaces; dependency
+    names sit at six, so a package called `check-engines` is not one."""
+    text = lock.read_text(encoding="utf-8")
+    entries = re.findall(r"^    engines:", text, re.M)
+    one_line = re.findall(r"^    engines: \{.*\}$", text, re.M)
+    if len(entries) != len(one_line):
+        raise AssertionError("an engines entry in the lock is not on one line")
+    return set(re.findall(r"^    engines: \{(?:[^}]*?, )?node: '?([^',}]+?)'?[,}]",
+                          text, re.M))
+
+
+class TestTheDesktopJobBuildsWhatTheReadmeSays(unittest.TestCase):
+    """desktop/README.md says how the shell is built and tested, and its
+    Cargo.toml which Rust it builds with. The job is only worth its minutes if
+    it does those things, so the parts that could drift apart are held
+    together here: the toolchain against rust-version, every compiled build
+    against custom-protocol (without which the shell is a dev build that loads
+    a dev server), and the pages built before the Rust that embeds them.
+    """
+
+    CI = REPO / ".github/workflows/ci.yml"
+    DESKTOP = REPO / "desktop"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.job = _jobs(cls.CI)["desktop"]
+        cls.steps = cls.job["steps"]
+        cls.runs = [str(step.get("run", "")) for step in cls.steps]
+
+    def _first(self, needle: str) -> int:
+        found = [index for index, run in enumerate(self.runs) if needle in run]
+        self.assertTrue(found, f"no step runs {needle!r}")
+        return found[0]
+
+    def test_it_runs_on_windows_from_the_app_folder(self):
+        self.assertTrue(self.job["runs-on"].startswith("windows-"))
+        self.assertEqual(self.job["defaults"]["run"]["working-directory"], "desktop")
+
+    def test_it_builds_with_the_rust_the_crate_declares(self):
+        manifest = (self.DESKTOP / "src-tauri/Cargo.toml").read_text(encoding="utf-8")
+        [declared] = re.findall(r'^rust-version\s*=\s*"([^"]+)"', manifest, re.M)
+        self.assertEqual(self.job["env"]["RUSTUP_TOOLCHAIN"], declared,
+                         "the job builds with another Rust than Cargo.toml's "
+                         "rust-version, so the MSRV it promises goes untested")
+        install = self.runs[self._first("rustup toolchain install")]
+        self.assertIn("RUSTUP_TOOLCHAIN", install)
+
+    def test_pnpm_is_the_version_the_app_pins(self):
+        """Read from packageManager rather than restated, so the two cannot
+        disagree."""
+        [setup] = [step for step in self.steps
+                   if "pnpm/action-setup" in str(step.get("uses", ""))]
+        self.assertNotIn("version", setup.get("with") or {})
+        self.assertEqual(setup["with"]["package_json_file"], "desktop/package.json")
+        package = json.loads((self.DESKTOP / "package.json").read_text(encoding="utf-8"))
+        self.assertTrue(package["packageManager"].startswith("pnpm@"))
+
+    def test_node_is_one_every_locked_package_runs_on(self):
+        """Against the lockfile, not only the app's own `engines`: that said
+        >=20.19 while the vitest it locks runs on ^22.12 || ^24 || >=26, so a
+        job on Node 20 would have held to it and run vitest on a Node it
+        excludes. node-version "26" is read as 26.0.0, the lowest it can
+        resolve to."""
+        [setup] = [step for step in self.steps
+                   if "actions/setup-node" in str(step.get("uses", ""))]
+        wanted = str(setup["with"]["node-version"])
+        self.assertRegex(wanted, r"^\d+(\.\d+){0,2}$")
+        lowest = _version(wanted)
+        locked = _locked_node_ranges(self.DESKTOP / "pnpm-lock.yaml")
+        self.assertIn("^22.12.0 || ^24.0.0 || >=26.0.0", locked,
+                      "vitest 5's range is gone from the lock: is the parse right?")
+        engines = json.loads((self.DESKTOP / "package.json")
+                             .read_text(encoding="utf-8"))["engines"]["node"]
+        for spec in sorted(locked | {engines}):
+            with self.subTest(range=spec):
+                self.assertTrue(_admits(spec, lowest),
+                                f"Node {wanted} is outside {spec}")
+
+    def test_the_apps_engines_promise_only_what_the_lock_runs_on(self):
+        """desktop/README.md repeats `engines`, so any Node it admits that a
+        locked package excludes (a floor too low, or 23 and 25 inside
+        `>=22.12`) is a promise the app cannot keep. Every Node it admits is
+        checked, not only its floors."""
+        engines = json.loads((self.DESKTOP / "package.json")
+                             .read_text(encoding="utf-8"))["engines"]["node"]
+        locked = _locked_node_ranges(self.DESKTOP / "pnpm-lock.yaml")
+        self.assertEqual(_promised_beyond(engines, locked), [],
+                         f"engines {engines!r} admits a Node a locked package excludes")
+
+    def test_the_range_reader_reads_ranges(self):
+        """So the two tests above cannot pass on a reader that admits
+        everything."""
+        self.assertTrue(_admits("^22.12.0 || ^24.0.0 || >=26.0.0", (24, 1, 0)))
+        self.assertTrue(_admits(">= 0.4", (26, 0, 0)))
+        self.assertTrue(_admits(">=v12.22.7", (12, 22, 7)))
+        for outside in ((20, 19, 0), (22, 11, 9), (23, 0, 0), (25, 9, 0)):
+            with self.subTest(version=outside):
+                self.assertFalse(_admits("^22.12.0 || ^24.0.0 || >=26.0.0", outside))
+        with self.assertRaises(AssertionError):
+            _admits("<26", (24, 0, 0))
+        vitest = {"^22.12.0 || ^24.0.0 || >=26.0.0"}
+        self.assertEqual(_promised_beyond("^22.12.0 || ^24.0.0 || >=26.0.0", vitest), [])
+        for over in (">=22.12.0", "^22.12.0 || >=24.0.0", ">=20.19"):
+            with self.subTest(engines=over):
+                self.assertTrue(_promised_beyond(over, vitest))
+
+    def test_the_lock_reader_finds_node_wherever_pnpm_sorts_it(self):
+        lock = "\n".join([
+            "  a@1:",
+            "    engines: {bun: '>=1', node: '>=18'}",
+            "  b@1:",
+            "    engines: {node: ^20.19.0 || >=22.12.0}",
+            "  c@1:",
+            "    engines: {node: '>=14', npm: '>=6', yarn: '>=1'}",
+            "  d@1:",
+            "    engines: {bun: '>=1'}",
+            "    dependencies:",
+            "      check-engines: 1.0.0",
+        ])
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "pnpm-lock.yaml"
+            path.write_text(lock, encoding="utf-8")
+            self.assertEqual(_locked_node_ranges(path),
+                             {">=18", "^20.19.0 || >=22.12.0", ">=14"})
+            path.write_text(lock + "\n    engines:\n      node: '>=8'\n", encoding="utf-8")
+            with self.assertRaises(AssertionError):
+                _locked_node_ranges(path)
+
+    def test_the_lockfile_is_installed_as_it_is(self):
+        self._first("pnpm install --frozen-lockfile")
+
+    def test_every_cargo_run_keeps_to_the_lock(self):
+        cargo = [run for run in self.runs if "cargo " in run]
+        self.assertTrue(cargo)
+        for run in cargo:
+            with self.subTest(run=run):
+                self.assertIn("--locked", run)
+
+    def test_every_compiled_build_is_the_shipped_one(self):
+        """`cargo check` only type-checks, and the README calls it safe without
+        the feature; anything that compiles does not."""
+        compiled = [run for run in self.runs
+                    if re.search(r"\bcargo (build|test|run)\b", run)]
+        self.assertTrue(compiled, "nothing compiles or tests the shell")
+        for run in compiled:
+            with self.subTest(run=run):
+                self.assertIn("--features custom-protocol", run)
+
+    def test_the_pages_are_tested_and_built_before_the_shell_embeds_them(self):
+        tested = self._first("pnpm test:run")
+        built = self._first("pnpm build")
+        shell = self._first("cargo test")
+        self.assertLess(tested, shell)
+        self.assertLess(built, shell,
+                        "the custom-protocol build embeds dist/, so the pages "
+                        "must be built first")
+
+    def test_it_checks_out_the_files_as_committed(self):
+        """Windows images default to core.autocrlf=true, which would test CRLF
+        copies of files committed, and tested, as LF."""
+        autocrlf = self._first("core.autocrlf false")
+        [checkout] = [index for index, step in enumerate(self.steps)
+                      if "actions/checkout" in str(step.get("uses", ""))]
+        self.assertLess(autocrlf, checkout)
 
 
 

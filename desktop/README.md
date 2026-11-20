@@ -8,7 +8,7 @@ Today it is one persistent, transparent, never-focused avatar window with a
 WebGL VRM in it, a control window (tray > Settings…), a tray, three hotkeys,
 the prompt (*Ask Fritz*: Ctrl+Alt+F, a double-click on him, or his menu),
 and a mouse hook that makes his body his to click. That is Phase 1 of the
-build plan up to PR 6; its CI job (PR 7) is next, and voice (Phase 2), the
+build plan, its CI job (PR 7) included; voice (Phase 2) is next, and the
 wallpaper and the widgets come after. Spike 0 proved the window
 ([docs/SPIKE0.md](docs/SPIKE0.md)), and its table is PR 2's acceptance.
 
@@ -203,7 +203,8 @@ that read well on its panel in every mood.
 
 ## Build
 
-Node ≥ 20.19, pnpm, Rust stable (MSRV 1.89, MSVC toolchain) and the Visual
+Node 22.12+, 24 or 26+ (what the locked vitest runs on), pnpm (the version
+in `package.json`'s `packageManager`), Rust stable (MSRV 1.89, MSVC toolchain) and the Visual
 Studio C++ Build Tools. From `desktop/`:
 
 ```powershell
@@ -266,6 +267,12 @@ takes another commit's tokens and pins it).
 pnpm test:run                                                        # the pages ("node" and "dom" projects)
 cargo test --locked --features custom-protocol --lib --manifest-path src-tauri/Cargo.toml   # the shell
 ```
+
+CI's `desktop` job (`.github/workflows/ci.yml`, on `windows-latest`) runs
+both on every push to `master`, every pull request and nightly, with `pnpm install --frozen-lockfile`,
+`pnpm build` and `cargo check` besides, under Rust 1.89, the MSRV. Nothing
+in CI runs the overlay, the hook or WorkerW: [docs/SPIKE0.md](docs/SPIKE0.md)
+is their checklist.
 
 `FRITZ_SHOW_SETTINGS` set to anything shows the control window at start, for
 a run nobody clicks; set to a section (`brain`, `hotkeys`, `appearance`,
