@@ -10,6 +10,7 @@
 //! `avatar\fritz.vrm`, or wherever `avatar.vrmPath` says, replaces the
 //! committed placeholder.
 
+mod audio_in;
 mod avatar_state;
 mod companion;
 mod cover;
@@ -155,6 +156,8 @@ pub(crate) fn show_avatar(app: &AppHandle) {
 /// off, and go.
 pub(crate) fn quit(app: &AppHandle) {
     hook::stop();
+    // The microphone closes with the key, and the key goes with Fritz.
+    audio_in::release();
     avatar_state::save_now(app);
     logs::startup("quit from the tray");
     overlay_windows::before_exit(app);
@@ -175,6 +178,8 @@ fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutEvent) {
             if prompt::hotkey_request(id, pressed) {
                 prompt::toggle(app, prompt::Opener::Hotkey);
             }
+        } else if id == hotkeys::PTT {
+            push_to_talk(pressed);
         } else if id == hotkeys::PARK {
             if pressed {
                 let status = overlay_windows::status(app);
@@ -188,6 +193,36 @@ fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutEvent) {
             overlay_windows::hotkey(app, id, pressed);
         }
     });
+}
+
+/// Push-to-talk, pressed or let go, from `on_shortcut`: a press on the main
+/// thread inside WM_HOTKEY, a release on the poller thread global-hotkey
+/// spawns for it (the microphone is opened on a thread of its own). Nothing yet carries a clip
+/// to the brain, which doesn't hear yet either (its welcome offers only
+/// text), so the microphone stays closed, unless a debug build was given
+/// `FRITZ_SAVE_CLIPS`, which saves each clip there for a live check.
+fn push_to_talk(pressed: bool) {
+    let save_to = audio_in::save_clips_dir(cfg!(debug_assertions), std::env::var_os(audio_in::SAVE_CLIPS_ENV));
+    let dir = match audio_in::on_edge(pressed, save_to) {
+        audio_in::Edge::LetGo => {
+            audio_in::release();
+            return;
+        }
+        audio_in::Edge::StayClosed => {
+            tracing::info!("push-to-talk: nothing carries what he hears to his brain yet, so the microphone stays closed");
+            return;
+        }
+        audio_in::Edge::Listen(dir) => dir,
+    };
+    let device = settings::get().audio.input_device;
+    match audio_in::press(device, |_| {}, move |clip| audio_in::save_clip(&dir, clip)) {
+        audio_in::Pressed::Started => tracing::info!("push-to-talk: pressed"),
+        audio_in::Pressed::AlreadyHeld => tracing::debug!("push-to-talk: pressed again while held"),
+        audio_in::Pressed::StartedAfterALostRelease => {
+            tracing::warn!("push-to-talk: pressed, though it was never let go; listening anew");
+        }
+        audio_in::Pressed::Failed(e) => tracing::warn!("push-to-talk: {e}"),
+    }
 }
 
 fn init_logging() {
@@ -1847,6 +1882,48 @@ mod tests {
         assert_eq!(calls.len(), 1, "one caller");
         let call = &src[calls[0].0..];
         assert!(call.starts_with("companion::pretend_say_text(cfg!(debug_assertions), "), "{}", &call[..80]);
+    }
+
+    /// FRITZ_SAVE_CLIPS writes what the microphone heard to disk, so only a
+    /// debug build reads it; and push-to-talk opens the microphone only
+    /// after it was read (nothing else carries a clip yet).
+    #[test]
+    fn clips_are_saved_only_by_a_debug_build_and_the_microphone_opens_only_for_that() {
+        let all = include_str!("lib.rs").replace("\r\n", "\n");
+        let src = &all[..all.find("#[cfg(test)]").unwrap()];
+        let calls: Vec<_> = src.match_indices("audio_in::save_clips_dir(").collect();
+        assert_eq!(calls.len(), 1, "one caller");
+        let call = &src[calls[0].0..];
+        assert!(call.starts_with("audio_in::save_clips_dir(cfg!(debug_assertions), "), "{}", &call[..80]);
+        let presses: Vec<_> = src.match_indices("audio_in::press(").collect();
+        assert_eq!(presses.len(), 1, "one place opens the microphone");
+        assert!(calls[0].0 < presses[0].0, "after the switch is read");
+        let between = &src[calls[0].0..presses[0].0];
+        assert!(between.contains("audio_in::on_edge(pressed, save_to)"), "and as on_edge says");
+        assert!(between.contains("audio_in::Edge::Listen(dir) => dir,"), "only to listen");
+        assert_eq!(between.matches("return;").count(), 2, "every other edge returns first");
+    }
+
+    /// Push-to-talk's key goes to push_to_talk, presses and releases alike.
+    #[test]
+    fn push_to_talks_key_is_handled_on_both_edges() {
+        let all = include_str!("lib.rs").replace("\r\n", "\n");
+        let handler = &all[all.find("fn on_shortcut(").unwrap()..];
+        let handler = &handler[..handler.find("\n}\n").unwrap()];
+        assert!(handler.contains("} else if id == hotkeys::PTT {\n            push_to_talk(pressed);"), "{handler}");
+        let ptt = handler.find("hotkeys::PTT").unwrap();
+        assert!(!handler[..ptt].contains("if pressed"), "not only on a press");
+    }
+
+    /// Push-to-talk is let go when Fritz quits, so the microphone is never
+    /// left open behind him.
+    #[test]
+    fn quitting_lets_go_of_push_to_talk() {
+        let all = include_str!("lib.rs").replace("\r\n", "\n");
+        let quit = &all[all.find("pub(crate) fn quit(").unwrap()..];
+        let quit = &quit[..quit.find("\n}\n").unwrap()];
+        assert!(quit.contains("audio_in::release();"), "{quit}");
+        assert!(quit.find("audio_in::release();") < quit.find("app.exit(0)"));
     }
 
     /// A shape is kept only for his window as it stands: open, and not on

@@ -45,7 +45,30 @@ pub const FILE: &str = "settings.json";
 /// settings file yet.
 pub const SPIKE_STATE: &str = "avatar-state.json";
 
-pub const VERSION: u32 = 1;
+/// 2 (PR 8): push-to-talk's default moved from Ctrl+Alt+Space to Ctrl+Alt+V
+/// (`migrate`).
+pub const VERSION: u32 = 2;
+
+/// Push-to-talk's first default: another app on the owner's PC holds it.
+const OLD_PTT: &str = "Ctrl+Alt+Space";
+
+/// Bring a file an older Fritz wrote up to `VERSION`, one line for the log
+/// per change. Every save writes every field, so a version 1 file holds
+/// push-to-talk's first default whether or not anyone chose it (nothing but
+/// a hand edit could set it): it moves to the new one, once. A version 2
+/// file keeps whatever it says, Ctrl+Alt+Space included.
+pub fn migrate(s: &mut Settings) -> Vec<String> {
+    let mut changed = Vec::new();
+    if s.version < 2 {
+        let old = crate::hotkeys::parse(OLD_PTT).ok();
+        if old.is_some() && crate::hotkeys::parse(&s.hotkeys.ptt).ok() == old {
+            changed.push(format!("hotkeys.ptt {:?} is push-to-talk's old default", s.hotkeys.ptt));
+            s.hotkeys.ptt = Hotkeys::default().ptt;
+        }
+        s.version = 2;
+    }
+    changed
+}
 
 /// Paths a window may not set: the shell owns where Fritz stands and whether
 /// he is hidden (it saves them as they change), and the version is the
@@ -217,7 +240,7 @@ impl Default for Hotkeys {
     fn default() -> Self {
         Self {
             prompt: "Ctrl+Alt+F".to_owned(),
-            ptt: "Ctrl+Alt+Space".to_owned(),
+            ptt: "Ctrl+Alt+V".to_owned(),
             arrange: "Ctrl+Alt+A".to_owned(),
             park: "Ctrl+Alt+H".to_owned(),
         }
@@ -598,7 +621,10 @@ pub fn load_from(dir: &Path) -> (Loaded, Vec<String>) {
             loaded = Loaded::Imported;
         }
     }
-    let repaired = repair(&mut settings);
+    let was = settings.version;
+    let mut repaired = migrate(&mut settings);
+    repaired.extend(repair(&mut settings));
+    let migrated = settings.version != was;
     let writable = !matches!(loaded, Loaded::Unreadable(_));
     {
         let mut s = lock();
@@ -614,7 +640,7 @@ pub fn load_from(dir: &Path) -> (Loaded, Vec<String>) {
         if save_current() {
             let _ = fs::rename(dir.join(SPIKE_STATE), dir.join("avatar-state.imported.json"));
         }
-    } else if !repaired.is_empty() && writable {
+    } else if (migrated || !repaired.is_empty()) && writable {
         save_current();
     }
     (loaded, repaired)
@@ -822,6 +848,40 @@ mod tests {
     }
 
     #[test]
+    fn a_version_1_file_gets_push_to_talks_new_key_once() {
+        let _one = serial();
+        let d = dir("migrate");
+        fs::write(d.join(FILE), r#"{"version":1,"hotkeys":{"ptt":"Ctrl+Alt+Space","park":"Ctrl+Alt+P"}}"#).unwrap();
+        let (_, changed) = load_from(&d);
+        assert!(changed.iter().any(|c| c.contains("hotkeys.ptt")), "{changed:?}");
+        let s = get();
+        assert_eq!((s.version, s.hotkeys.ptt.as_str(), s.hotkeys.park.as_str()), (2, "Ctrl+Alt+V", "Ctrl+Alt+P"));
+        assert_eq!(read(&d.join(FILE)).0, s, "saved");
+        // However it was spelled.
+        fs::write(d.join(FILE), r#"{"version":1,"hotkeys":{"ptt":"alt+ctrl+space"}}"#).unwrap();
+        load_from(&d);
+        assert_eq!(get().hotkeys.ptt, "Ctrl+Alt+V");
+        // A version 2 file's choice is kept, the old key included.
+        fs::write(d.join(FILE), r#"{"version":2,"hotkeys":{"ptt":"Ctrl+Alt+Space"}}"#).unwrap();
+        let (_, changed) = load_from(&d);
+        assert!(changed.is_empty(), "{changed:?}");
+        assert_eq!(get().hotkeys.ptt, "Ctrl+Alt+Space");
+        // Only the old default moves; the version is bumped and saved anyway.
+        fs::write(d.join(FILE), r#"{"version":1,"hotkeys":{"ptt":"Ctrl+Alt+P"}}"#).unwrap();
+        let (_, changed) = load_from(&d);
+        assert!(changed.is_empty(), "{changed:?}");
+        assert_eq!((get().version, get().hotkeys.ptt.as_str()), (2, "Ctrl+Alt+P"));
+        assert_eq!(read(&d.join(FILE)).0.version, 2, "the bump is saved");
+        // No file at all starts at version 2: nothing to move.
+        let empty = dir("migrate-none");
+        let (_, changed) = load_from(&empty);
+        assert!(changed.is_empty(), "{changed:?}");
+        assert_eq!((get().version, get().hotkeys.ptt.as_str()), (2, "Ctrl+Alt+V"));
+        let _ = fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&empty);
+    }
+
+    #[test]
     fn the_folder_is_the_apps_identifier() {
         let conf: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         assert_eq!(conf["identifier"], APP_DIR);
@@ -830,11 +890,11 @@ mod tests {
     #[test]
     fn the_defaults_are_the_plans() {
         let s = Settings::default();
-        assert_eq!(s.version, 1);
+        assert_eq!(s.version, 2);
         assert_eq!(s.brain.url, "ws://127.0.0.1:8001/companion");
         assert_eq!(
             (s.hotkeys.prompt.as_str(), s.hotkeys.ptt.as_str(), s.hotkeys.arrange.as_str(), s.hotkeys.park.as_str()),
-            ("Ctrl+Alt+F", "Ctrl+Alt+Space", "Ctrl+Alt+A", "Ctrl+Alt+H")
+            ("Ctrl+Alt+F", "Ctrl+Alt+V", "Ctrl+Alt+A", "Ctrl+Alt+H")
         );
         assert_eq!(
             (s.theme.theme.as_str(), s.theme.mood.as_str(), s.theme.accent.as_str()),

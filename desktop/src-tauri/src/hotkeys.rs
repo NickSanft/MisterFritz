@@ -1,7 +1,8 @@
-//! The global hotkeys, from `settings.hotkeys`: Arrange, Hide/Show and the
-//! prompt (push-to-talk arrives with PR 8). Registered at start; a key set
-//! with `set_hotkey` is bound the moment it is saved, and one edited into
-//! settings.json by hand takes effect on the next start.
+//! The global hotkeys, from `settings.hotkeys`: Arrange, Hide/Show, the
+//! prompt and push-to-talk. Registered at start; a key set with
+//! `set_hotkey` is bound the moment it is saved, and one edited into
+//! settings.json by hand takes effect on the next start. Push-to-talk's is
+//! set only by hand for now: its Settings row comes later in PR 8.
 //!
 //! At start, a binding that doesn't parse, or that another of ours already
 //! has, falls back to its default (and says so) rather than leaving the
@@ -28,6 +29,11 @@ use crate::settings::{Hotkeys, Settings};
 pub const PARK: &str = "avatar:park";
 /// The id the prompt's hotkey is handled under.
 pub const PROMPT: &str = "prompt:toggle";
+/// The id push-to-talk is handled under: held, not pressed (its release
+/// matters as much as its press).
+pub const PTT: &str = "ptt:hold";
+/// What push-to-talk does, for a refusal naming it.
+const PTT_DOES: &str = "talk to him";
 
 /// The actions a key may be set for: the setting's name, the id its press
 /// is handled under, and what it does (for a refusal naming it).
@@ -72,6 +78,9 @@ pub fn id_for(action: &str) -> Option<&'static str> {
 
 /// What the action an id belongs to does.
 fn does(id: &str) -> &'static str {
+    if id == PTT {
+        return PTT_DOES;
+    }
     ACTIONS.iter().find(|(_, i, _)| *i == id).map_or("do something else", |(_, _, d)| *d)
 }
 
@@ -126,11 +135,12 @@ pub fn check(h: &Hotkeys, action: &str, accel: &str, bound: &[Entry]) -> Result<
             return Err(format!("{accel} is already Fritz's key to {other_does}."));
         }
     }
-    if let Some((_, other_id, _)) = bound.iter().find(|(b, i, _)| *i != id && *b == s) {
-        return Err(format!("{accel} is already Fritz's key to {}.", does(other_id)));
-    }
+    // Before the bound keys, which hold push-to-talk's too: its own words.
     if parse(&h.ptt).ok() == Some(s) {
         return Err(format!("{accel} is kept for push-to-talk."));
+    }
+    if let Some((_, other_id, _)) = bound.iter().find(|(b, i, _)| *i != id && *b == s) {
+        return Err(format!("{accel} is already Fritz's key to {}.", does(other_id)));
     }
     Ok(s)
 }
@@ -176,6 +186,7 @@ pub fn bindings(h: &Hotkeys) -> Vec<Entry> {
         (HOTKEY_ARRANGE, h.arrange.as_str(), defaults.arrange.clone()),
         (PARK, h.park.as_str(), defaults.park.clone()),
         (PROMPT, h.prompt.as_str(), defaults.prompt.clone()),
+        (PTT, h.ptt.as_str(), defaults.ptt.clone()),
     ];
     let mut out: Vec<Entry> = Vec::new();
     for (id, accel, fallback) in wanted {
@@ -321,7 +332,7 @@ mod tests {
 
     use super::{
         bindings, bound_in, check, chord_problem, id_in, parse, rebind_with, refusal, register_with, Entry, Keys,
-        ACTIONS, APPS_OWN_KEYS, NEEDS_A_MODIFIER, PARK, PROMPT,
+        ACTIONS, APPS_OWN_KEYS, NEEDS_A_MODIFIER, PARK, PROMPT, PTT,
     };
     use crate::overlay_machine::HOTKEY_ARRANGE;
     use crate::settings::{Hotkeys, Settings};
@@ -347,6 +358,7 @@ mod tests {
                 (HOTKEY_ARRANGE, "Ctrl+Alt+A".to_owned()),
                 (PARK, "Ctrl+Alt+H".to_owned()),
                 (PROMPT, "Ctrl+Alt+F".to_owned()),
+                (PTT, "Ctrl+Alt+V".to_owned()),
             ]
         );
     }
@@ -365,6 +377,7 @@ mod tests {
                 (HOTKEY_ARRANGE, "Ctrl+Shift+F9".to_owned()),
                 (PARK, "Alt+F10".to_owned()),
                 (PROMPT, "Ctrl+Alt+Shift+F13".to_owned()),
+                (PTT, "Ctrl+Alt+V".to_owned()),
             ]
         );
         assert_eq!(bindings(&h)[0].0, parse("Ctrl+Shift+F9").unwrap());
@@ -400,13 +413,18 @@ mod tests {
                 (HOTKEY_ARRANGE, "Ctrl+Alt+A".to_owned()),
                 (PARK, "Ctrl+Alt+H".to_owned()),
                 (PROMPT, "Ctrl+Alt+F".to_owned()),
+                (PTT, "Ctrl+Alt+V".to_owned()),
             ]
         );
         // And if the default is the one taken, the action goes without.
         let h = Hotkeys { arrange: "Ctrl+Alt+H".into(), park: "Ctrl+Alt+H".into(), ..Hotkeys::default() };
         assert_eq!(
             ids(&h),
-            vec![(HOTKEY_ARRANGE, "Ctrl+Alt+H".to_owned()), (PROMPT, "Ctrl+Alt+F".to_owned())]
+            vec![
+                (HOTKEY_ARRANGE, "Ctrl+Alt+H".to_owned()),
+                (PROMPT, "Ctrl+Alt+F".to_owned()),
+                (PTT, "Ctrl+Alt+V".to_owned()),
+            ]
         );
     }
 
@@ -421,11 +439,45 @@ mod tests {
                 (HOTKEY_ARRANGE, "Ctrl+Alt+A".to_owned()),
                 (PARK, "Ctrl+Alt+H".to_owned()),
                 (PROMPT, "Ctrl+Alt+F".to_owned()),
+                (PTT, "Ctrl+Alt+V".to_owned()),
             ]
         );
         // Arrange set to the prompt's default: the prompt goes without.
         let h = Hotkeys { arrange: "Ctrl+Alt+F".into(), ..Hotkeys::default() };
-        assert_eq!(ids(&h), vec![(HOTKEY_ARRANGE, "Ctrl+Alt+F".to_owned()), (PARK, "Ctrl+Alt+H".to_owned())]);
+        assert_eq!(
+            ids(&h),
+            vec![
+                (HOTKEY_ARRANGE, "Ctrl+Alt+F".to_owned()),
+                (PARK, "Ctrl+Alt+H".to_owned()),
+                (PTT, "Ctrl+Alt+V".to_owned()),
+            ]
+        );
+    }
+
+    /// Push-to-talk came last of all, so it never takes another's key: set
+    /// to the prompt's, it gets its own default; a key that doesn't parse
+    /// does the same; and with its default taken too, it goes without.
+    #[test]
+    fn push_to_talk_never_takes_another_actions_key() {
+        let h = Hotkeys { ptt: "Ctrl+Alt+F".into(), ..Hotkeys::default() };
+        assert_eq!(ids(&h)[3], (PTT, "Ctrl+Alt+V".to_owned()));
+        assert_eq!(ids(&h)[2], (PROMPT, "Ctrl+Alt+F".to_owned()));
+        let h = Hotkeys { ptt: "Ctrl+Alt+Nope".into(), ..Hotkeys::default() };
+        assert_eq!(ids(&h)[3], (PTT, "Ctrl+Alt+V".to_owned()));
+        let h = Hotkeys { ptt: "Ctrl+Alt+A".into(), park: "Ctrl+Alt+V".into(), ..Hotkeys::default() };
+        assert!(ids(&h).iter().all(|(id, _)| *id != PTT), "{:?}", ids(&h));
+    }
+
+    /// Push-to-talk's key, bound under its default because its setting
+    /// doesn't parse, is still named as push-to-talk's to a rebind.
+    #[test]
+    fn a_rebind_onto_push_to_talks_bound_key_names_it() {
+        let h = Hotkeys { ptt: "Ctrl+Alt+Nope".into(), ..Hotkeys::default() };
+        let bound = bindings(&h);
+        assert_eq!(
+            check(&h, "prompt", "Ctrl+Alt+V", &bound),
+            Err("Ctrl+Alt+V is already Fritz's key to talk to him.".to_owned())
+        );
     }
 
     /// A chord Fritz may hold: Ctrl and Alt together, or Win, or F13 to F24
@@ -484,7 +536,7 @@ mod tests {
             ("prompt", "Ctrl+Alt+A", "Ctrl+Alt+A is already Fritz's key to arrange him."),
             ("arrange", "Ctrl+Alt+H", "Ctrl+Alt+H is already Fritz's key to hide or show him."),
             ("park", " Ctrl+Alt+F ", "Ctrl+Alt+F is already Fritz's key to ask him something."),
-            ("prompt", "Ctrl+Alt+Space", "Ctrl+Alt+Space is kept for push-to-talk."),
+            ("prompt", "Ctrl+Alt+V", "Ctrl+Alt+V is kept for push-to-talk."),
             ("prompt", "F", NEEDS_A_MODIFIER),
             ("prompt", "Shift+F", NEEDS_A_MODIFIER),
             ("prompt", "Ctrl+S", APPS_OWN_KEYS),
@@ -563,7 +615,7 @@ mod tests {
         }
 
         fn name(s: Shortcut) -> String {
-            for accel in ["Ctrl+Alt+A", "Ctrl+Alt+H", "Ctrl+Alt+F", "Ctrl+Alt+Shift+F13", "Ctrl+Alt+Shift+F14"] {
+            for accel in ["Ctrl+Alt+A", "Ctrl+Alt+H", "Ctrl+Alt+F", "Ctrl+Alt+V", "Ctrl+Alt+Shift+F13", "Ctrl+Alt+Shift+F14"] {
                 if key(accel) == s {
                     return accel.to_owned();
                 }
@@ -732,13 +784,17 @@ mod tests {
         let keys = FakeKeys::holding(&["Ctrl+Alt+A"]);
         let store = Mutex::new(Vec::new());
         register_with(&keys, &store, &Hotkeys::default());
-        assert_eq!(keys.calls(), ["register Ctrl+Alt+A", "register Ctrl+Alt+H", "register Ctrl+Alt+F"]);
+        assert_eq!(
+            keys.calls(),
+            ["register Ctrl+Alt+A", "register Ctrl+Alt+H", "register Ctrl+Alt+F", "register Ctrl+Alt+V"]
+        );
         let now = bound_in(&store);
         assert_eq!(now.keys().copied().collect::<Vec<_>>(), ["arrange", "park", "prompt"]);
         assert_eq!(now["arrange"], None);
         assert_eq!(now["park"].as_deref(), Some("Ctrl+Alt+H"));
         assert_eq!(now["prompt"].as_deref(), Some("Ctrl+Alt+F"));
         assert_eq!(id_in(&store, &key("Ctrl+Alt+A")), None);
+        assert_eq!(id_in(&store, &key("Ctrl+Alt+V")), Some(PTT), "push-to-talk is bound, though no row shows it yet");
     }
 
     /// The actions a window may name are the fixture's, and each is handled
@@ -759,7 +815,7 @@ mod tests {
         assert_eq!(super::id_for("prompt"), Some(PROMPT));
         assert_eq!(super::id_for("arrange"), Some(HOTKEY_ARRANGE));
         assert_eq!(super::id_for("park"), Some(PARK));
-        assert_eq!(super::id_for("ptt"), None, "push-to-talk comes with PR 8");
+        assert_eq!(super::id_for("ptt"), None, "push-to-talk's row, and set_hotkey for it, come later in PR 8");
     }
 
     /// This module's code, without its tests.

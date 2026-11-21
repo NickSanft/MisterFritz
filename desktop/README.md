@@ -5,11 +5,12 @@ over the `/companion` WebSocket ([plan 14](../plans/14-desktop-companion.md),
 [build plan](../plans/14-desktop-companion-build.md)). Windows only.
 
 Today it is one persistent, transparent, never-focused avatar window with a
-WebGL VRM in it, a control window (tray > Settings…), a tray, three hotkeys,
+WebGL VRM in it, a control window (tray > Settings…), a tray, four hotkeys,
 the prompt (*Ask Fritz*: Ctrl+Alt+F, a double-click on him, or his menu),
 and a mouse hook that makes his body his to click. That is Phase 1 of the
-build plan, its CI job (PR 7) included; voice (Phase 2) is next, and the
-wallpaper and the widgets come after. Spike 0 proved the window
+build plan, its CI job (PR 7) included. Voice (Phase 2) is under way: PR 8
+gives him ears (push-to-talk, below), which stay shut until his brain can
+hear; the wallpaper and the widgets come after. Spike 0 proved the window
 ([docs/SPIKE0.md](docs/SPIKE0.md)), and its table is PR 2's acceptance.
 
 ## What it keeps, and where
@@ -31,13 +32,18 @@ The hotkeys are `hotkeys.arrange` (Ctrl+Alt+A), `hotkeys.park`
 set in Settings › Hotkeys: click a key's field and press the new chord (Esc
 cancels). It is bound the moment it is saved: checked (Ctrl and Alt
 together, or Win, or F13 to F24 alone; no other action's key, nor
-push-to-talk's Ctrl+Alt+Space), taken from Windows, saved, and only then is
+push-to-talk's Ctrl+Alt+V), taken from Windows, saved, and only then is
 the old key let go, so a key another app holds is refused on its row with
 the old one still working. A chord Fritz or another app already holds does
 its job instead of reaching the field. Each row says when the key set isn't
 the one working (it fell back to its default at start, or Windows wouldn't
 give it), and *Default* puts the default back. A key edited into
-`settings.json` by hand takes effect at the next start. His eyes follow the cursor while
+`settings.json` by hand takes effect at the next start. Push-to-talk's,
+`hotkeys.ptt` (Ctrl+Alt+V), is registered at start too, but set only
+that way for now: its row in Settings comes later in PR 8. It was
+Ctrl+Alt+Space until another app turned out to hold that: a
+`settings.json` from before (its `version` 1) still saying Ctrl+Alt+Space
+is moved to Ctrl+Alt+V once, at the first start; any other key is kept. His eyes follow the cursor while
 `avatar.lookatCursor` is `true` (the default): on a VRoid export the eyes
 turn, and on any model his head turns part of the way, which is what shows
 on the placeholder.
@@ -156,6 +162,27 @@ again, the desk thread too. Until then he is talking with a stranger, and
 the brain's log says so as the desk connects (`desktop-<new id> connected
 as itself: IDENTITY_LINKS links desktop-<old id>, not this desk`). Or quit
 Fritz and write the old id back into `brain.clientId`.
+
+## His ears
+
+Push-to-talk (`hotkeys.ptt`, Ctrl+Alt+V) is held while you speak:
+[`audio_in.rs`](src-tauri/src/audio_in.rs) opens the microphone when it is
+pressed and closes it when it is let go, after 30 seconds however long it is
+held, or when the microphone fails, so Windows shows it in use only then. It
+listens through WASAPI in shared mode on a thread of its own, and Windows
+itself converts the sound to 16 kHz mono PCM16, what the brain's speech to
+text reads; nothing in the app resamples, and no audio crate is used beyond
+`windows`. `audio.inputDevice` names a microphone as Windows shows it (its
+row in Settings comes later); unset, or not connected, it is the default
+one. If Windows' privacy settings keep desktop apps from the microphone,
+the log says where to let them, whenever the microphone is opened.
+
+Nothing carries what he hears to the brain yet, and the brain can't hear
+until its audio turn (PR 9) lands: so today a press is only logged, and the
+microphone stays closed. The one exception is a debug build given
+`FRITZ_SAVE_CLIPS` (under *Test*), which opens it and keeps each clip in that
+folder as a WAV until you delete it; outside that switch, a clip is never
+kept.
 
 ## His speech bubble
 
@@ -279,7 +306,9 @@ a run nobody clicks; set to a section (`brain`, `hotkeys`, `appearance`,
 `model`, …) it opens there, and set to `wizard`, at the first run. Without a
 token it opens at the first run anyway. In a debug build,
 `FRITZ_PRETEND_SAY` asks the brain its text once he first connects, as Ask
-would (a release build never reads it).
+would, and `FRITZ_SAVE_CLIPS` set to a folder opens the microphone while
+push-to-talk is held and saves each clip there as a WAV, for a live check of
+his ears (a release build reads neither).
 
 ## The placeholder model
 

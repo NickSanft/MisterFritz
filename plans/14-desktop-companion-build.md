@@ -517,7 +517,7 @@ pub struct Settings {
   pub brain: Brain { url: String /* ws://127.0.0.1:8001/companion */, client_id: String, client_name: String },
   pub avatar: Avatar { x: i32, y: i32, w: u32, h: u32, scale: f32, parked: bool, vrm_path: Option<String>, lookat_cursor: bool },
   pub theme: Theme { theme: String /*dark|light*/, mood: String /*ink*/, accent: String /*brand*/, motion: f32 /*0.6*/, grain: bool, motion_user: bool },
-  pub hotkeys: Hotkeys { prompt: String, ptt: String, arrange: String, park: String },  // "Ctrl+Alt+F", "Ctrl+Alt+Space", "Ctrl+Alt+A", "Ctrl+Alt+H"
+  pub hotkeys: Hotkeys { prompt: String, ptt: String, arrange: String, park: String },  // "Ctrl+Alt+F", "Ctrl+Alt+V" (as built, PR 8: was "Ctrl+Alt+Space"), "Ctrl+Alt+A", "Ctrl+Alt+H"
   pub audio: Audio { input_device: Option<String>, output_device: Option<String>, muted: bool, tts_voice: String /* "bm_george" */ },
   pub widget_layout: HashMap<String, WidgetPos>,     // Ph3, Lorraine's WidgetPos
   pub run_at_startup: bool,                          // Ph5
@@ -826,7 +826,7 @@ The Python jobs add `python scripts/gen_protocol_ts.py --check` after `ruff`. No
 | Q3 mood source | None in Phase 2; expressions follow `state` only | PR 11 adds inline `[mood:…]` tags |
 | Q4 mic | Rust `cpal` capture | WebView `getUserMedia` + Tauri 2.12 `on_permission_request` |
 | Q5 cancel | Partial reply checkpointed with ` [interrupted]` | Drop the exchange in `executor` when interrupted |
-| Q6 hotkeys | `Ctrl+Alt+F` prompt · `Ctrl+Alt+Space` PTT · `Ctrl+Alt+A` arrange · `Ctrl+Alt+H` park | Settings → Hotkeys |
+| Q6 hotkeys | `Ctrl+Alt+F` prompt · `Ctrl+Alt+Space` PTT · `Ctrl+Alt+A` arrange · `Ctrl+Alt+H` park. *As applied (PR 8):* PTT is `Ctrl+Alt+V`, the owner's call on 2026-11-21, when another app on their PC turned out to hold `Ctrl+Alt+Space` | Settings → Hotkeys |
 | Q7 thread | Own thread `…#desktop` | Pass `thread_id=identity` in `companion_api` |
 | Q8 scheduler in `main_local` | No (Phase 1) | After PR 14 |
 | Q9 default look | `ink` · brand · dark · motion 0.6 · grain on (control only) | Settings → Appearance |

@@ -264,7 +264,7 @@ Effort tags follow the README's scale — **M = half day, L = 1–3 days, XL = >
 
 ### Phase 2 — voice: push-to-talk in, spoken reply out
 
-**PR 8 (body, M) — microphone capture in Rust.** `audio.rs` gains a capture path on the default **capture** endpoint — via `wasapi` (Lorraine's crate, `Direction::Capture`) or `cpal` (DivoraVoice's mic path; both are proven on the owner's hardware) — 16 kHz mono PCM16, started on `Ctrl+Alt+Space` **Pressed** and stopped on **Released** (the plugin emits both states since 2.x), 30 s cap, sent as one binary WS frame + `audio_end`. Rust capture avoids WebView2's microphone permission prompt entirely (Tauri 2.12 added `on_permission_request` if the getUserMedia route is ever preferred — see Q4). Tray `Mute` kills the hotkey.
+**PR 8 (body, M) — microphone capture in Rust.** `audio.rs` gains a capture path on the default **capture** endpoint — via `wasapi` (Lorraine's crate, `Direction::Capture`) or `cpal` (DivoraVoice's mic path; both are proven on the owner's hardware) — 16 kHz mono PCM16, started on `Ctrl+Alt+Space` (*as built*: `Ctrl+Alt+V`, see the build plan's § 7, Q6) **Pressed** and stopped on **Released** (the plugin emits both states since 2.x), 30 s cap, sent as one binary WS frame + `audio_end`. Rust capture avoids WebView2's microphone permission prompt entirely (Tauri 2.12 added `on_permission_request` if the getUserMedia route is ever preferred — see Q4). Tray `Mute` kills the hotkey.
 
 **PR 9 (brain, M) — audio turn.** `companion_api` writes the clip to a temp file, `stt.transcribe`, emits `stt`, runs the turn as `DESKTOP_VOICE`. **Sentence-chunked TTS:** a `SentenceChunker` consumes the delta stream and, at each sentence boundary, calls `TTSEngine.generate_speech` on a dedicated single worker (respecting `TTS_MAX_CONCURRENCY`), reads the WAV, emits `speech{seq}`. First audio arrives after the first sentence rather than the whole reply. `TTSEngine` construction moves out of `main_discord.on_ready` into a lazy shared accessor so `main_local.py` has it too (this also makes plan 13 A1's "failed TTS load" path explicit). Cache hits (`output/speech_<md5>.wav`) make repeated butler phrases instant.
 
@@ -272,7 +272,7 @@ Effort tags follow the README's scale — **M = half day, L = 1–3 days, XL = >
 
 **PR 11 (brain, S, optional) — mood tags.** Decide Q3 first. If "inline tags": the desktop system-prompt branch asks for a leading `[mood:dry|pleased|alarmed|weary]` token, stripped before `token` events and emitted as `state`-adjacent `mood`; the Discord path strips it too. If "none": skip.
 
-**Phase 2 DoD.** Hold Ctrl+Alt+Space, ask for the time, release: transcript appears in the bubble within ~1 s, Fritz begins speaking within ~3 s of release on the agreed hardware (see Q1), mouth moves with the audio, pressing PTT mid-sentence cuts him off and Ollama stops generating (verified with `ollama ps` load dropping).
+**Phase 2 DoD.** Hold push-to-talk (Ctrl+Alt+V as built; the plan said Ctrl+Alt+Space), ask for the time, release: transcript appears in the bubble within ~1 s, Fritz begins speaking within ~3 s of release on the agreed hardware (see Q1), mouth moves with the audio, pressing PTT mid-sentence cuts him off and Ollama stops generating (verified with `ollama ps` load dropping).
 
 ### Phase 3 — the ambient layer: live wallpaper + widgets
 
