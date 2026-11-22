@@ -16,7 +16,16 @@
  * - An error for the shown turn ends it with Fritz's apology, the reply so
  *   far kept. An error for no turn is not shown.
  * - The link lost mid-turn ends it with an apology of the page's own: the
- *   brain sends nothing more for a turn once its socket is gone.
+ *   brain sends nothing more for a turn once its socket is gone. A
+ *   listening turn is left to its clip, whose outcome ends it.
+ * - Push-to-talk (PR 8): listening is a turn of its own, under a local id
+ *   (its press's number) no brain frame carries, until the clip is sent and
+ *   the brain's turn (`asked`) takes its place. Unheard (the clip came to
+ *   nothing, or the brain couldn't hear) ends its own press's listening
+ *   turn with why, never another press's (a refusal, which is always a
+ *   newer press's, is the listening turn's notice); over a reply the brain
+ *   is still giving it is that reply's notice, the reply kept; with
+ *   nothing running it shows on its own.
  *
  * `revision` changes whenever what the bubble shows changes, and only then,
  * so the page writes and measures text only when it must.
@@ -42,7 +51,23 @@ export interface TurnView {
 export type TurnEvent =
   | { kind: "asked"; turnId: string }
   | { kind: "frame"; frame: ServerFrame }
-  | { kind: "lost" };
+  | { kind: "lost" }
+  | { kind: "listening"; press: number }
+  | { kind: "unheard"; why: string; press?: number };
+
+/** A turn the page made itself, not the brain's: no frame's id is ever
+ * one, since the brain's are UUIDs. A press's listening turn, or a notice
+ * of why something went unheard. */
+export const PRESS_PREFIX = "ptt-";
+export const NOTE_PREFIX = "note-";
+export const isLocal = (turnId: string | null): boolean =>
+  turnId !== null && (turnId.startsWith(PRESS_PREFIX) || turnId.startsWith(NOTE_PREFIX));
+/** The press a listening turn is for, or null. */
+export function pressOf(turnId: string | null): number | null {
+  if (turnId === null || !turnId.startsWith(PRESS_PREFIX)) return null;
+  const n = Number(turnId.slice(PRESS_PREFIX.length));
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
 
 export const INITIAL: TurnView = Object.freeze({
   turnId: null,
@@ -87,9 +112,9 @@ export function apologyText(s: string): string {
 }
 
 /** The turn to cancel before asking anew (a barge-in): the one shown, if it
- * hasn't ended. */
+ * hasn't ended and is the brain's (a listening turn is the page's own). */
 export function cancelFirst(v: TurnView): string | null {
-  return v.turnId !== null && !v.ended ? v.turnId : null;
+  return v.turnId !== null && !v.ended && !isLocal(v.turnId) ? v.turnId : null;
 }
 
 export function reduce(v: TurnView, e: TurnEvent): TurnView {
@@ -107,8 +132,38 @@ export function reduce(v: TurnView, e: TurnEvent): TurnView {
         revision: v.revision + 1,
       };
     case "lost":
-      if (v.turnId === null || v.ended) return v;
+      if (v.turnId === null || v.ended || isLocal(v.turnId)) return v;
       return next(v, { apology: LOST_APOLOGY, progress: null, phase: "idle", ended: true });
+    case "listening":
+      return {
+        turnId: `${PRESS_PREFIX}${e.press}`,
+        phase: "listening",
+        reply: "",
+        progress: null,
+        apology: null,
+        pictures: 0,
+        interrupted: false,
+        ended: false,
+        revision: v.revision + 1,
+      };
+    case "unheard":
+      // A reply the brain is still giving is kept: why is its notice.
+      if (!v.ended && !isLocal(v.turnId)) return next(v, { progress: e.why });
+      if (!v.ended) {
+        // Only its own press's outcome ends a listening turn. A refusal
+        // carries no press: it is always a newer press's, shown as a notice
+        // while this one listens; another press's outcome isn't shown at all.
+        const listening = pressOf(v.turnId);
+        if (listening !== null && e.press === undefined) return next(v, { progress: e.why });
+        if (listening !== null && listening !== e.press) return v;
+        return next(v, { apology: e.why, progress: null, phase: "idle", ended: true });
+      }
+      return {
+        ...INITIAL,
+        turnId: `${NOTE_PREFIX}${v.revision + 1}`,
+        apology: e.why,
+        revision: v.revision + 1,
+      };
     case "frame":
       return frame(v, e.frame);
   }

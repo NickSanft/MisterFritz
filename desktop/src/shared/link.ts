@@ -5,6 +5,7 @@
  */
 import type { AvatarStatus } from "../avatar/status";
 import type { Link, LinkStatus, Reason } from "./companion";
+import { CAP_VALUES, type Cap } from "./protocol";
 
 /** The avatar's page reported the brain's link (a `LinkStatus`). */
 export const COMPANION_STATUS_EVENT = "companion:status";
@@ -25,6 +26,9 @@ export function parseCompanionStatus(v: unknown): LinkStatus | null {
   for (const k of ["identity", "displayName", "threadId"]) {
     if (o[k] !== null && typeof o[k] !== "string") return null;
   }
+  // What the brain can take: the protocol's caps, as the shell keeps them.
+  const caps = o.serverCaps;
+  if (!Array.isArray(caps) || !caps.every((c) => CAP_VALUES.includes(c as Cap))) return null;
   return {
     link: o.link as Link,
     reason: o.reason as Reason,
@@ -32,6 +36,7 @@ export function parseCompanionStatus(v: unknown): LinkStatus | null {
     identity: o.identity as string | null,
     displayName: o.displayName as string | null,
     threadId: o.threadId as string | null,
+    serverCaps: [...(caps as Cap[])],
   };
 }
 

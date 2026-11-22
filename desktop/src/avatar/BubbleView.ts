@@ -27,6 +27,9 @@ export interface BubbleText {
 /** Shown while he thinks and nothing of the reply has come yet. */
 export const THINKING = "…";
 
+/** Shown while push-to-talk is held and he listens. */
+export const LISTENING = "Listening…";
+
 /** A turn that ended with nothing at all to show (the model said nothing):
  * a line of his own rather than an empty bubble. */
 export const NOTHING_TO_SAY = "I find I have nothing whatsoever to say on the matter, sir. Do try again.";
@@ -40,7 +43,7 @@ export function bubbleText(v: TurnView): BubbleText {
   const note = notes.length ? notes.join(" · ") : null;
   let body = reply;
   if (reply.trim() === "") {
-    if (!v.ended) body = THINKING;
+    if (!v.ended) body = v.phase === "listening" ? LISTENING : THINKING;
     else body = v.apology === null && note === null ? NOTHING_TO_SAY : "";
   }
   return { progress: v.ended ? null : v.progress, body, apology: v.apology, note };

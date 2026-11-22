@@ -35,10 +35,29 @@ import { keyAction } from "./keys";
 import { POWER_EVENT, afterAsking, fetchDisplayOn, parseDisplay, shouldDraw } from "./run";
 import { AHEAD, CURSOR_EVENT, fetchCursor, gaze, parseCursor, type CursorFrame, type Gaze } from "./look";
 import { CompanionClient } from "../shared/companion";
-import { SAY_EVENT, answerSay, onSay, startCompanion, takeSay } from "./companionLink";
+import {
+  BRAIN_CANT_HEAR,
+  NOT_CONNECTED,
+  PTT_CLIP_EVENT,
+  PTT_LISTENING_EVENT,
+  PTT_NOTHING_EVENT,
+  PTT_REFUSED_EVENT,
+  SAY_EVENT,
+  answerClip,
+  answerSay,
+  onClip,
+  onSay,
+  parseListening,
+  parseNothing,
+  parseWhy,
+  SUPERSEDED,
+  startCompanion,
+  takeClip,
+  takeSay,
+} from "./companionLink";
 import { BubbleClock, anchorAbove, charCount, plainText } from "./bubble";
 import { createBubble } from "./BubbleView";
-import { INITIAL, cancelFirst, reduce, type TurnEvent, type TurnView } from "./state";
+import { INITIAL, cancelFirst, pressOf, reduce, type TurnEvent, type TurnView } from "./state";
 import { HitPublisher, shapeNow, stamped } from "./hitShape";
 import { fetchPage, hitArgs, sendHitRects } from "./hitWire";
 import {
@@ -155,6 +174,45 @@ for (const type of ["state", "token", "progress", "done", "error"] as const) {
 companion.onLink((s) => {
   if (wasOnline && s.link !== "online") apply({ kind: "lost" });
   wasOnline = s.link === "online";
+});
+
+/** Send press `press`'s clip: the turn's id, or why not. A newer press
+ * listening now has barged in on it: it isn't sent. */
+function sendClip(pcm: ArrayBuffer, press: number): { turnId: string } | { why: string } {
+  const listening = pressOf(turn.turnId);
+  if (!turn.ended && listening !== null && listening !== press) return { why: SUPERSEDED };
+  // A barge-in, as asking is: a turn asked while he listened is cancelled.
+  const old = cancelFirst(turn);
+  if (old !== null && companion.hears()) companion.cancel(old);
+  const id = companion.sendAudio(pcm);
+  if (id !== null) {
+    apply({ kind: "asked", turnId: id });
+    return { turnId: id };
+  }
+  return { why: companion.status.link === "online" ? BRAIN_CANT_HEAR : NOT_CONNECTED };
+}
+
+// Push-to-talk (PR 8). Listening is a barge-in, as asking is: a reply still
+// running is cancelled first.
+void listen<unknown>(PTT_LISTENING_EVENT, (e) => {
+  const press = parseListening(e.payload);
+  if (press === null) return;
+  const old = cancelFirst(turn);
+  if (old !== null) companion.cancel(old);
+  apply({ kind: "listening", press });
+});
+void listen<unknown>(PTT_REFUSED_EVENT, (e) => {
+  const why = parseWhy(e.payload);
+  if (why !== null) apply({ kind: "unheard", why });
+});
+void listen<unknown>(PTT_NOTHING_EVENT, (e) => {
+  const n = parseNothing(e.payload);
+  if (n !== null) apply({ kind: "unheard", why: n.why, press: n.press });
+});
+void listen<unknown>(PTT_CLIP_EVENT, (e) => {
+  void onClip(e.payload, (id) => takeClip(id), sendClip, (id, sent, why) => answerClip(id, sent, why)).then((r) => {
+    if (r.kind === "unsent") apply({ kind: "unheard", why: r.why, press: r.press });
+  });
 });
 
 /** Tint `a` and set its motion from the theme (none heard yet: as he was). */

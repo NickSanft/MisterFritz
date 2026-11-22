@@ -8,6 +8,7 @@ import fixtures from "./protocol.fixtures.json";
 import { FakeClock } from "./testClock";
 import { CLOSE, SAY_MAX_CHARS, TURN_ID_PATTERN } from "./protocol";
 import {
+  AUDIO_MAX_BYTES,
   BACKOFF_S,
   CompanionClient,
   PING_EVERY_MS,
@@ -29,8 +30,15 @@ class FakeSocket implements SocketLike {
   onclose: ((e: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
   constructor(readonly url: string) {}
-  send(data: string): void {
-    this.sent.push(JSON.parse(data) as Record<string, unknown>);
+  /** Binary frames are recorded as their size, and the bytes kept. */
+  binary: ArrayBuffer[] = [];
+  send(data: string | ArrayBuffer): void {
+    if (typeof data === "string") {
+      this.sent.push(JSON.parse(data) as Record<string, unknown>);
+    } else {
+      this.binary.push(data);
+      this.sent.push({ binary: data.byteLength });
+    }
   }
   close(code?: number): void {
     this.closed = code;
@@ -106,7 +114,7 @@ describe("connecting", () => {
     expect(h.last().sent).toEqual([]);
     h.last().open();
     expect(h.last().sent).toEqual([
-      { type: "hello", protocol: 1, token: CONFIG.token, client: { id: "nick-pc", name: "Nick's PC", caps: ["text", "vrm"] } },
+      { type: "hello", protocol: 1, token: CONFIG.token, client: { id: "nick-pc", name: "Nick's PC", caps: ["text", "audio-in", "vrm"] } },
     ]);
   });
 
@@ -123,6 +131,7 @@ describe("connecting", () => {
       identity: WELCOME.identity,
       displayName: WELCOME.display_name,
       threadId: WELCOME.thread_id,
+      serverCaps: WELCOME.server_caps,
     });
     expect(h.links.map((s) => s.link)).toEqual(["connecting", "online"]);
   });
@@ -421,7 +430,7 @@ describe("configuring", () => {
     expect(h.client.configure(null)).toBe(true);
     expect(s.closed).toBe(1000);
     expect(h.client.status).toEqual({
-      link: "unconfigured", reason: null, retryIn: null, identity: null, displayName: null, threadId: null,
+      link: "unconfigured", reason: null, retryIn: null, identity: null, displayName: null, threadId: null, serverCaps: [],
     });
     h.clock.advance(10 * 60_000);
     expect(h.sockets).toHaveLength(1);
@@ -511,5 +520,78 @@ describe("configuring", () => {
     h.client.reconnectNow();
     expect(h.sockets).toHaveLength(1);
     expect(h.clock.pending).toBe(0);
+  });
+});
+
+describe("sending a clip", () => {
+  const HEARING = { ...WELCOME, server_caps: ["text", "audio-in"] };
+  /** Online to a brain whose welcome says `caps`. */
+  const welcomed = (h: ReturnType<typeof harness>, caps: string[]) => {
+    h.client.configure(CONFIG);
+    h.last().open();
+    h.last().frame({ ...WELCOME, server_caps: caps });
+    h.last().sent.length = 0;
+    return h.last();
+  };
+
+  it("goes to a brain that can hear: one binary frame, then its audio_end", () => {
+    const h = harness();
+    const s = welcomed(h, HEARING.server_caps);
+    expect(h.client.hears()).toBe(true);
+    expect(h.client.status.serverCaps).toEqual(["text", "audio-in"]);
+    const pcm = new ArrayBuffer(4800);
+    const id = h.client.sendAudio(pcm);
+    expect(id).not.toBeNull();
+    expect(TURN_ID_PATTERN.test(id!)).toBe(true);
+    expect(s.sent).toEqual([
+      { binary: 4800 },
+      { type: "audio_end", turn_id: id, sample_rate: 16000, channels: 1, format: "pcm16" },
+    ]);
+    expect(s.binary[0]).toBe(pcm);
+    // The longest a clip may be, and no more.
+    expect(h.client.sendAudio(new ArrayBuffer(AUDIO_MAX_BYTES))).not.toBeNull();
+    expect(AUDIO_MAX_BYTES).toBe(30 * 16000 * 2);
+  });
+
+  it("never goes to a brain that can't hear, nor anywhere offline", () => {
+    const h = harness();
+    expect(h.client.sendAudio(new ArrayBuffer(4))).toBeNull();
+    const s = welcomed(h, ["text"]);
+    expect(h.client.hears()).toBe(false);
+    expect(h.client.sendAudio(new ArrayBuffer(4))).toBeNull();
+    expect(s.sent, "nothing sent at all").toEqual([]);
+    s.shut(1006);
+    expect(h.client.hears()).toBe(false);
+    expect(h.client.status.serverCaps, "gone with the link").toEqual([]);
+  });
+
+  it("a client closed for good hears nothing, whatever its last status said", () => {
+    const h = harness();
+    welcomed(h, HEARING.server_caps);
+    h.client.close();
+    expect(h.client.status.serverCaps).toEqual(["text", "audio-in"]);
+    expect(h.client.hears()).toBe(false);
+    expect(h.client.sendAudio(new ArrayBuffer(4))).toBeNull();
+  });
+
+  it("isn't a clip unless it is whole samples, and no longer than 30 s", () => {
+    const h = harness();
+    const s = welcomed(h, HEARING.server_caps);
+    for (const n of [0, 3, AUDIO_MAX_BYTES + 2]) {
+      expect(h.client.sendAudio(new ArrayBuffer(n)), String(n)).toBeNull();
+    }
+    expect(s.sent).toEqual([]);
+  });
+
+  it("a socket that won't take the clip sends no audio_end", () => {
+    const h = harness();
+    const s = welcomed(h, HEARING.server_caps);
+    const frames: unknown[] = [];
+    s.send = (data) => {
+      if (typeof data !== "string") throw new Error("closing");
+      frames.push(JSON.parse(data));
+    };
+    expect(h.client.sendAudio(new ArrayBuffer(4))).toBeNull();
+    expect(frames, "no audio_end after a clip that didn't go").toEqual([]);
   });
 });

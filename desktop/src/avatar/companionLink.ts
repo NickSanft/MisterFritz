@@ -94,6 +94,134 @@ export async function answerSay(
   }
 }
 
+// ── Push-to-talk (PR 8): what the shell's ears say, and the clip ─────────
+
+/** `{press}`: the shell opened the microphone for the brain, for press
+ * number `press`: he is listening. Its outcome (`ptt:nothing` or
+ * `ptt:clip`) carries the same number. */
+export const PTT_LISTENING_EVENT = "ptt:listening";
+/** `{why}`: push-to-talk couldn't be heard, and the microphone stayed shut. */
+export const PTT_REFUSED_EVENT = "ptt:refused";
+/** `{press, why}`: a clip came to nothing (too short, or the microphone failed). */
+export const PTT_NOTHING_EVENT = "ptt:nothing";
+/** `{id, millis, press}`: a clip waits for the page, which takes it (`ptt_take`,
+ * the raw PCM16 as an ArrayBuffer), sends it to the brain, and says whether
+ * it went on (`ptt_sent`). */
+export const PTT_CLIP_EVENT = "ptt:clip";
+export const PTT_TAKE_CMD = "ptt_take";
+export const PTT_SENT_CMD = "ptt_sent";
+
+/** A clip waiting for the page: its number, how long it is, and its press. */
+export interface Clip {
+  id: number;
+  millis: number;
+  press: number;
+}
+
+const whole = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n);
+
+/** A `ptt:listening`'s press, or null when it isn't one. */
+export function parseListening(v: unknown): number | null {
+  const o = obj(v);
+  return o && whole(o.press) && o.press > 0 ? o.press : null;
+}
+
+/** A `ptt:nothing`, or null when it isn't one. */
+export function parseNothing(v: unknown): { press: number; why: string } | null {
+  const why = parseWhy(v);
+  const press = parseListening(v);
+  return why === null || press === null ? null : { press, why };
+}
+
+/** A `{why}`'s words, or null when it isn't one. */
+export function parseWhy(v: unknown): string | null {
+  const o = obj(v);
+  return o && typeof o.why === "string" && o.why.trim() !== "" ? o.why : null;
+}
+
+/** A `ptt:clip`, or null when it isn't one. */
+export function parseClip(v: unknown): Clip | null {
+  const o = obj(v);
+  if (!o) return null;
+  const press = parseListening(v);
+  if (!(whole(o.id) && o.id > 0 && whole(o.millis) && o.millis >= 0) || press === null) return null;
+  return { id: o.id, millis: o.millis, press };
+}
+
+export const pttTakeArgs = (id: number) => ({ id });
+export const pttSentArgs = (id: number, sent: boolean, why: string | null) => ({ id, sent, why });
+
+/** Take clip `id` from the shell: its bytes, or null when it isn't waiting
+ * any more (or the answer isn't bytes). */
+export async function takeClip(
+  id: number,
+  call: (cmd: string, args: Record<string, unknown>) => Promise<unknown> = invoke,
+): Promise<ArrayBuffer | null> {
+  try {
+    const got = await call(PTT_TAKE_CMD, pttTakeArgs(id));
+    return got instanceof ArrayBuffer ? got : null;
+  } catch (e) {
+    console.warn(`avatar: ${PTT_TAKE_CMD} failed`, e);
+    return null;
+  }
+}
+
+/** Tell the shell whether clip `id` went on, and if not, why. */
+export async function answerClip(
+  id: number,
+  sent: boolean,
+  why: string | null,
+  call: (cmd: string, args: Record<string, unknown>) => Promise<unknown> = invoke,
+): Promise<void> {
+  try {
+    await call(PTT_SENT_CMD, pttSentArgs(id, sent, why));
+  } catch (e) {
+    console.warn(`avatar: ${PTT_SENT_CMD} failed`, e);
+  }
+}
+
+/** What became of a clip the shell handed over. */
+export type ClipOutcome =
+  | { kind: "sent"; turnId: string }
+  | { kind: "unsent"; why: string; press: number }
+  | { kind: "bad" };
+
+/** Why a clip can't be heard: the shell's words (companion.rs's
+ * BRAIN_CANT_HEAR and NOT_CONNECTED; the wire fixture holds both to them). */
+export const BRAIN_CANT_HEAR = "His brain can't hear yet: type to him instead.";
+export const NOT_CONNECTED = "He isn't connected to his brain just now.";
+
+/** A clip not sent because a newer press is listening (for the log: the
+ * page shows the newer press). */
+export const SUPERSEDED = "Spoken again before it was sent: only the newer clip goes to him.";
+
+/** A clip couldn't be taken from the shell (it waited too long). */
+export const CLIP_GONE = "What you said was lost on its way to his brain: say it again.";
+
+/** What the page does with a `ptt:clip`: takes it, sends it (`send` gives
+ * the turn's id, or why not), and answers the shell either way. */
+export async function onClip(
+  payload: unknown,
+  take: (id: number) => Promise<ArrayBuffer | null>,
+  send: (pcm: ArrayBuffer, press: number) => { turnId: string } | { why: string },
+  answer: (id: number, sent: boolean, why: string | null) => Promise<void>,
+): Promise<ClipOutcome> {
+  const clip = parseClip(payload);
+  if (clip === null) return { kind: "bad" };
+  const pcm = await take(clip.id);
+  if (pcm === null) {
+    void answer(clip.id, false, CLIP_GONE);
+    return { kind: "unsent", why: CLIP_GONE, press: clip.press };
+  }
+  const r = send(pcm, clip.press);
+  if ("turnId" in r) {
+    void answer(clip.id, true, null);
+    return { kind: "sent", turnId: r.turnId };
+  }
+  void answer(clip.id, false, r.why);
+  return { kind: "unsent", why: r.why, press: clip.press };
+}
+
 /** What `companion_config` answers: the token is null when there is none. */
 export interface ShellConfig {
   url: string;
@@ -130,6 +258,7 @@ export const reportArgs = (s: LinkStatus) => ({
     identity: s.identity,
     displayName: s.displayName,
     threadId: s.threadId,
+    serverCaps: [...s.serverCaps],
   },
 });
 

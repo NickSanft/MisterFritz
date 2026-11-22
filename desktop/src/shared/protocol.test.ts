@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 import fixtures from "./protocol.fixtures.json";
 import { CLIENT_ID_PATTERN, SERVER_FRAME_TYPES, TURN_ID_PATTERN, isServerFrame } from "./protocol";
-import { CAPS, cancelFrame, helloFrame, pingFrame, pongFrame, sayFrame } from "./companion";
+import { CAPS, audioEndFrame, cancelFrame, helloFrame, pingFrame, pongFrame, sayFrame } from "./companion";
 
 /** Each key's JSON type, recursively: what a frame looks like on the wire. */
 function shapeOf(v: unknown): unknown {
@@ -57,9 +57,11 @@ describe("the frames the client sends", () => {
       type: "hello",
       protocol: 1,
       token: "a-token",
-      client: { id: "nick-pc", name: "Nick's PC", caps: ["text", "vrm"] },
+      client: { id: "nick-pc", name: "Nick's PC", caps: ["text", "audio-in", "vrm"] },
     });
-    expect(CAPS).toEqual(["text", "vrm"]);
+    expect(CAPS).toEqual(["text", "audio-in", "vrm"]);
+    // audio_end says what the shell's ears hand over: the fixture's own.
+    expect(audioEndFrame(id)).toEqual({ ...fixtures.client.valid.audio_end, turn_id: id });
     expect(sayFrame(id, "hi")).toEqual({ type: "say", turn_id: id, text: "hi" });
     expect(pongFrame(42)).toEqual({ type: "pong", t: 42 });
   });

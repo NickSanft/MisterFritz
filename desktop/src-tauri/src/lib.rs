@@ -68,6 +68,27 @@ pub const COMPANION_CONFIG_EVENT: &str = "companion:config";
 /// (`companion_take`), asks it only if the shell still waits for it, and
 /// answers `companion_said` with whether it went on.
 pub const COMPANION_SAY_EVENT: &str = "companion:say";
+/// Sent to the avatar's page with `{press}`, from the ears' own thread, as
+/// push-to-talk opens the microphone for the brain: he is listening. Each
+/// press for the brain is numbered, and its outcome (`ptt:nothing` or
+/// `ptt:clip`) carries the number, so the page never takes one press's
+/// outcome for another's.
+pub const PTT_LISTENING_EVENT: &str = "ptt:listening";
+/// The presses for the brain so far.
+static PRESSES: AtomicU64 = AtomicU64::new(0);
+/// Sent to the avatar's page with `{why}` when push-to-talk can't be heard
+/// (his brain can't hear yet, or isn't connected): the microphone stayed
+/// closed.
+pub const PTT_REFUSED_EVENT: &str = "ptt:refused";
+/// Sent to the avatar's page with `{press, why}` when a clip came to
+/// nothing: too short, or the microphone failed.
+pub const PTT_NOTHING_EVENT: &str = "ptt:nothing";
+/// Sent to the avatar's page with `{id, millis, press}`: a clip waits for it. The
+/// page takes it (`ptt_take`), sends it to the brain, and says whether it
+/// went on (`ptt_sent`).
+pub const PTT_CLIP_EVENT: &str = "ptt:clip";
+/// A clip too short to be anything said.
+pub const TOO_SHORT: &str = "That was too short for him to hear: hold the key while you speak.";
 /// A debug build only: once the link is first online, ask the brain this,
 /// through the same path as Ask (a live check's turn with no click).
 pub const PRETEND_SAY_ENV: &str = "FRITZ_PRETEND_SAY";
@@ -179,7 +200,7 @@ fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutEvent) {
                 prompt::toggle(app, prompt::Opener::Hotkey);
             }
         } else if id == hotkeys::PTT {
-            push_to_talk(pressed);
+            push_to_talk(app, pressed);
         } else if id == hotkeys::PARK {
             if pressed {
                 let status = overlay_windows::status(app);
@@ -197,31 +218,111 @@ fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutEvent) {
 
 /// Push-to-talk, pressed or let go, from `on_shortcut`: a press on the main
 /// thread inside WM_HOTKEY, a release on the poller thread global-hotkey
-/// spawns for it (the microphone is opened on a thread of its own). Nothing yet carries a clip
-/// to the brain, which doesn't hear yet either (its welcome offers only
-/// text), so the microphone stays closed, unless a debug build was given
-/// `FRITZ_SAVE_CLIPS`, which saves each clip there for a live check.
-fn push_to_talk(pressed: bool) {
+/// spawns for it (the microphone is opened on a thread of its own). The
+/// microphone opens only for a brain that can hear (its welcome offered
+/// `audio-in`), and his page is told why when it doesn't; a debug build
+/// given `FRITZ_SAVE_CLIPS` saves each clip there instead, for a live check.
+fn push_to_talk(app: &AppHandle, pressed: bool) {
     let save_to = audio_in::save_clips_dir(cfg!(debug_assertions), std::env::var_os(audio_in::SAVE_CLIPS_ENV));
-    let dir = match audio_in::on_edge(pressed, save_to) {
+    let heard = if pressed { ptt_heard(app) } else { Ok(()) };
+    let device = settings::get().audio.input_device;
+    let outcome = match audio_in::on_edge(pressed, save_to, heard) {
         audio_in::Edge::LetGo => {
             audio_in::release();
             return;
         }
-        audio_in::Edge::StayClosed => {
-            tracing::info!("push-to-talk: nothing carries what he hears to his brain yet, so the microphone stays closed");
+        audio_in::Edge::StayClosed(why) => {
+            tracing::info!("push-to-talk: {why} The microphone stays closed.");
+            if let Err(e) = app.emit_to(OVERLAY_LABEL, PTT_REFUSED_EVENT, ptt_why_payload(why)) {
+                tracing::warn!("push-to-talk: couldn't tell his window: {e}");
+            }
             return;
         }
-        audio_in::Edge::Listen(dir) => dir,
+        audio_in::Edge::Save(dir) => audio_in::press(device, || {}, |_| {}, move |clip| audio_in::save_clip(&dir, clip)),
+        audio_in::Edge::Send => {
+            let (h, k) = (app.clone(), app.clone());
+            // A press that is AlreadyHeld leaves a gap: no outcome comes for it.
+            let press = PRESSES.fetch_add(1, Ordering::SeqCst) + 1;
+            // Told from the ears' thread, before it opens the microphone, so
+            // his page hears it before whatever the clip comes to.
+            let listening = move || {
+                let _ = h.emit_to(OVERLAY_LABEL, PTT_LISTENING_EVENT, ptt_listening_payload(press));
+            };
+            audio_in::press(device, listening, |_| {}, move |clip| clip_heard(&k, press, clip))
+        }
     };
-    let device = settings::get().audio.input_device;
-    match audio_in::press(device, |_| {}, move |clip| audio_in::save_clip(&dir, clip)) {
+    match outcome {
         audio_in::Pressed::Started => tracing::info!("push-to-talk: pressed"),
         audio_in::Pressed::AlreadyHeld => tracing::debug!("push-to-talk: pressed again while held"),
         audio_in::Pressed::StartedAfterALostRelease => {
             tracing::warn!("push-to-talk: pressed, though it was never let go; listening anew");
         }
         audio_in::Pressed::Failed(e) => tracing::warn!("push-to-talk: {e}"),
+    }
+}
+
+/// Whether a clip would be heard now (`companion::ptt_refusal`). The page's
+/// last report, or none yet, which is never online: no token file is read
+/// here, inside WM_HOTKEY.
+fn ptt_heard(app: &AppHandle) -> Result<(), &'static str> {
+    let avatar = overlay_windows::status(app);
+    let open = avatar.open && avatar.phase != overlay_machine::PhaseName::Closing;
+    companion::ptt_refusal(&companion::current(true), open).map_or(Ok(()), Err)
+}
+
+/// `{why}`, for `ptt:refused`.
+fn ptt_why_payload(why: &str) -> serde_json::Value {
+    serde_json::json!({ "why": why })
+}
+
+/// `{press}`, for `ptt:listening`.
+fn ptt_listening_payload(press: u64) -> serde_json::Value {
+    serde_json::json!({ "press": press })
+}
+
+/// `{press, why}`, for `ptt:nothing`.
+fn ptt_nothing_payload(press: u64, why: &str) -> serde_json::Value {
+    serde_json::json!({ "press": press, "why": why })
+}
+
+/// `{id, millis, press}`, for `ptt:clip`.
+fn ptt_clip_payload(id: u64, millis: u64, press: u64) -> serde_json::Value {
+    serde_json::json!({ "id": id, "millis": millis, "press": press })
+}
+
+/// What press `press`'s clip came to (the ears' thread): one long enough
+/// waits for his page, which is told; anything else is told as nothing.
+fn clip_heard(app: &AppHandle, press: u64, result: Result<audio_in::Captured, String>) {
+    let nothing = |why: &str| {
+        if let Err(e) = app.emit_to(OVERLAY_LABEL, PTT_NOTHING_EVENT, ptt_nothing_payload(press, why)) {
+            tracing::warn!("push-to-talk: couldn't tell his window: {e}");
+        }
+    };
+    let clip = match result {
+        Ok(clip) => clip,
+        Err(e) => {
+            tracing::warn!("push-to-talk: {e}");
+            nothing(&e);
+            return;
+        }
+    };
+    let what = audio_in::describe(&clip);
+    if !clip.long_enough() {
+        tracing::info!("push-to-talk: {what}; not sent");
+        nothing(TOO_SHORT);
+        return;
+    }
+    let millis = clip.millis();
+    let (id, dropped) = audio_in::hold_for_page(clip.pcm);
+    if dropped {
+        tracing::warn!("push-to-talk: a clip his window never took was dropped");
+    }
+    match app.emit_to(OVERLAY_LABEL, PTT_CLIP_EVENT, ptt_clip_payload(id, millis, press)) {
+        Ok(()) => tracing::info!(id, "push-to-talk: {what}; waiting for his window"),
+        Err(e) => {
+            let _ = audio_in::take_for_page(id);
+            tracing::warn!("push-to-talk: {what}; couldn't reach his window: {e}");
+        }
     }
 }
 
@@ -863,6 +964,7 @@ async fn companion_report(app: AppHandle, webview: tauri::Webview, report: serde
 /// of a page that isn't there, nor of the next one before it is online.
 fn companion_page_gone(app: &AppHandle) {
     companion::forget();
+    audio_in::forget_for_page();
     let _ = app.emit(COMPANION_STATUS_EVENT, companion::current(token_present()));
 }
 
@@ -1033,6 +1135,31 @@ async fn companion_said(webview: tauri::Webview, id: u64, sent: bool) -> Result<
     Ok(())
 }
 
+/// The avatar's page takes clip `id` (`ptt:clip`): its PCM16 bytes, raw
+/// (an ArrayBuffer on the page's side), or why not when it isn't waiting
+/// (taken, replaced by a newer one, or waited too long).
+#[tauri::command]
+async fn ptt_take(webview: tauri::Webview, id: u64) -> Result<tauri::ipc::Response, String> {
+    from_the_avatar(webview.label())?;
+    audio_in::take_for_page(id)
+        .map(tauri::ipc::Response::new)
+        .ok_or_else(|| "That clip isn't waiting any more.".to_owned())
+}
+
+/// The avatar's page says whether it sent clip `id` on to the brain, and if
+/// not, why (cut to a line for the log).
+#[tauri::command]
+async fn ptt_sent(webview: tauri::Webview, id: u64, sent: bool, why: Option<String>) -> Result<(), String> {
+    from_the_avatar(webview.label())?;
+    if sent {
+        tracing::info!(id, "push-to-talk: clip sent to the brain");
+    } else {
+        let why = why.map(|w| printable(&w, 200)).unwrap_or_default();
+        tracing::warn!(id, "push-to-talk: clip not sent: {why}");
+    }
+    Ok(())
+}
+
 /// A turn asked from a window (Settings › Brain's Ask): the avatar's page
 /// asks it, and his bubble shows the reply.
 #[tauri::command]
@@ -1137,6 +1264,8 @@ pub fn run() {
             companion_say,
             companion_take,
             companion_said,
+            ptt_take,
+            ptt_sent,
             prompt_say,
             prompt_close,
             prompt_ready
@@ -1277,7 +1406,26 @@ mod tests {
         assert_eq!(events["companionSay"], super::COMPANION_SAY_EVENT);
         assert_eq!(events["hookStatus"], crate::hook::STATUS_EVENT);
         assert_eq!(events["promptWaiting"], crate::prompt::WAITING_EVENT);
-        assert_eq!(events.len(), 11, "an event with no Rust half: {events:?}");
+        assert_eq!(events["pttListening"], super::PTT_LISTENING_EVENT);
+        assert_eq!(events["pttRefused"], super::PTT_REFUSED_EVENT);
+        assert_eq!(events["pttNothing"], super::PTT_NOTHING_EVENT);
+        assert_eq!(events["pttClip"], super::PTT_CLIP_EVENT);
+        assert_eq!(events.len(), 15, "an event with no Rust half: {events:?}");
+        let sorted = |v: &Value| {
+            let mut k: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+            k.sort_unstable();
+            serde_json::json!(k)
+        };
+        assert_eq!(sorted(&super::ptt_why_payload("x")), fixture["pttWhyKeys"]);
+        assert_eq!(sorted(&super::ptt_listening_payload(2)), fixture["pttListeningKeys"]);
+        assert_eq!(sorted(&super::ptt_nothing_payload(2, "x")), fixture["pttNothingKeys"]);
+        assert_eq!(sorted(&super::ptt_clip_payload(3, 2400, 2)), fixture["pttClipKeys"]);
+        assert_eq!(super::ptt_clip_payload(3, 2400, 2), serde_json::json!({ "id": 3, "millis": 2400, "press": 2 }));
+        assert_eq!(super::ptt_nothing_payload(2, "x"), serde_json::json!({ "press": 2, "why": "x" }));
+        assert_eq!(super::ptt_listening_payload(2), serde_json::json!({ "press": 2 }));
+        // The page says why a clip went unheard in the shell's own words.
+        assert_eq!(fixture["pttWords"]["brainCantHear"], crate::companion::BRAIN_CANT_HEAR);
+        assert_eq!(fixture["pttWords"]["notConnected"], crate::companion::NOT_CONNECTED);
         assert_eq!(fixture["debug"]["pretendSayEnv"], super::PRETEND_SAY_ENV);
         assert_eq!(fixture["debug"]["pretendPromptEnv"], crate::prompt::PRETEND_ENV);
         assert_eq!(fixture["debug"]["pretendPromptWait"], crate::prompt::PRETEND_WAIT);
@@ -1857,6 +2005,8 @@ mod tests {
             ("companion_report", "from_the_avatar"),
             ("companion_take", "from_the_avatar"),
             ("companion_said", "from_the_avatar"),
+            ("ptt_take", "from_the_avatar"),
+            ("ptt_sent", "from_the_avatar"),
             ("prompt_say", "from_the_prompt"),
             ("prompt_close", "from_the_prompt"),
             ("prompt_ready", "from_the_prompt"),
@@ -1885,23 +2035,58 @@ mod tests {
     }
 
     /// FRITZ_SAVE_CLIPS writes what the microphone heard to disk, so only a
-    /// debug build reads it; and push-to-talk opens the microphone only
-    /// after it was read (nothing else carries a clip yet).
+    /// debug build reads it; and push-to-talk opens the microphone only in
+    /// on_edge's Save and Send arms: Send only for a brain that can hear,
+    /// as ptt_heard says (the window first, then the link and its caps).
     #[test]
-    fn clips_are_saved_only_by_a_debug_build_and_the_microphone_opens_only_for_that() {
+    fn the_microphone_opens_only_to_save_in_a_debug_build_or_for_a_brain_that_hears() {
         let all = include_str!("lib.rs").replace("\r\n", "\n");
         let src = &all[..all.find("#[cfg(test)]").unwrap()];
         let calls: Vec<_> = src.match_indices("audio_in::save_clips_dir(").collect();
         assert_eq!(calls.len(), 1, "one caller");
         let call = &src[calls[0].0..];
         assert!(call.starts_with("audio_in::save_clips_dir(cfg!(debug_assertions), "), "{}", &call[..80]);
-        let presses: Vec<_> = src.match_indices("audio_in::press(").collect();
-        assert_eq!(presses.len(), 1, "one place opens the microphone");
-        assert!(calls[0].0 < presses[0].0, "after the switch is read");
-        let between = &src[calls[0].0..presses[0].0];
-        assert!(between.contains("audio_in::on_edge(pressed, save_to)"), "and as on_edge says");
-        assert!(between.contains("audio_in::Edge::Listen(dir) => dir,"), "only to listen");
-        assert_eq!(between.matches("return;").count(), 2, "every other edge returns first");
+        let ptt = &src[src.find("fn push_to_talk(").unwrap()..];
+        let ptt = &ptt[..ptt.find("\n}\n").unwrap()];
+        assert!(ptt.contains("audio_in::on_edge(pressed, save_to, heard)"), "{ptt}");
+        assert!(ptt.contains("let heard = if pressed { ptt_heard(app) } else { Ok(()) };"));
+        assert_eq!(src.matches("audio_in::press(").count(), 2, "two places open the microphone");
+        let save = ptt.find("audio_in::Edge::Save(dir) => audio_in::press(").expect("one to save");
+        let send = ptt.find("audio_in::Edge::Send => {").expect("one to send");
+        assert!(ptt[send..].contains("audio_in::press(device, listening, |_| {}, move |clip| clip_heard(&k, press, clip))"));
+        assert!(ptt[send..].contains("ptt_listening_payload(press)"), "listening says which press");
+        assert!(ptt[send..].contains("let press = PRESSES.fetch_add(1, Ordering::SeqCst) + 1;"), "each press its own number");
+        let closed = ptt.find("audio_in::Edge::StayClosed(why) => {").unwrap();
+        assert!(ptt[closed..save].contains("PTT_REFUSED_EVENT") && ptt[closed..save].contains("return;"));
+        let heard = &src[src.find("fn ptt_heard(").unwrap()..];
+        let heard = &heard[..heard.find("\n}\n").unwrap()];
+        assert!(heard.contains("companion::ptt_refusal(&companion::current(true), open)"), "{heard}");
+        assert!(heard.contains("avatar.open && avatar.phase != overlay_machine::PhaseName::Closing"));
+    }
+
+    /// A clip for the brain waits for his page only when it is long enough;
+    /// anything else is told to the page as nothing. His page gone, nothing
+    /// waits for it.
+    #[test]
+    fn a_clip_is_handed_to_his_page_only_when_it_could_be_heard() {
+        let all = include_str!("lib.rs").replace("\r\n", "\n");
+        let heard = &all[all.find("fn clip_heard(").unwrap()..];
+        let heard = &heard[..heard.find("\n}\n").unwrap()];
+        let short = heard.find("if !clip.long_enough() {").expect("the length is checked");
+        let hold = heard.find("audio_in::hold_for_page(clip.pcm)").expect("a clip is held");
+        assert!(short < hold);
+        assert!(heard[short..hold].contains("nothing(TOO_SHORT);") && heard[short..hold].contains("return;"));
+        assert!(heard[..short].contains("nothing(&e);"), "a failed clip is told");
+        assert!(
+            heard.contains("app.emit_to(OVERLAY_LABEL, PTT_NOTHING_EVENT, ptt_nothing_payload(press, why))"),
+            "nothing says its own press"
+        );
+        assert!(
+            heard[hold..].contains("app.emit_to(OVERLAY_LABEL, PTT_CLIP_EVENT, ptt_clip_payload(id, millis, press))"),
+            "a clip says its own press, and the id it is held under"
+        );
+        let gone = &all[all.find("fn companion_page_gone(").unwrap()..];
+        assert!(gone[..gone.find("\n}\n").unwrap()].contains("audio_in::forget_for_page();"));
     }
 
     /// Push-to-talk's key goes to push_to_talk, presses and releases alike.
@@ -1910,7 +2095,7 @@ mod tests {
         let all = include_str!("lib.rs").replace("\r\n", "\n");
         let handler = &all[all.find("fn on_shortcut(").unwrap()..];
         let handler = &handler[..handler.find("\n}\n").unwrap()];
-        assert!(handler.contains("} else if id == hotkeys::PTT {\n            push_to_talk(pressed);"), "{handler}");
+        assert!(handler.contains("} else if id == hotkeys::PTT {\n            push_to_talk(app, pressed);"), "{handler}");
         let ptt = handler.find("hotkeys::PTT").unwrap();
         assert!(!handler[..ptt].contains("if pressed"), "not only on a press");
     }

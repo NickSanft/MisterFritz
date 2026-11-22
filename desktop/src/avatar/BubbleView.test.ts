@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HIDDEN, type Envelope } from "./bubble";
-import { NOTHING_TO_SAY, THINKING, bubbleText, createBubble } from "./BubbleView";
+import { LISTENING, NOTHING_TO_SAY, THINKING, bubbleText, createBubble } from "./BubbleView";
 import { INITIAL, type TurnView } from "./state";
 
 const SHOWN: Envelope = { visible: true, opacity: 1, scale: 1, blurPx: 0 };
@@ -34,6 +34,11 @@ function mount() {
 }
 
 describe("what the bubble shows of a turn", () => {
+  it("says he is listening while push-to-talk is held", () => {
+    expect(bubbleText({ ...INITIAL, turnId: "ptt-1", phase: "listening", ended: false }).body).toBe(LISTENING);
+    expect(bubbleText({ ...INITIAL, turnId: "ptt-1", phase: "transcribing", ended: false }).body).toBe(THINKING);
+  });
+
   it("an ellipsis while he thinks, the reply as it comes", () => {
     expect(bubbleText(turn()).body).toBe(THINKING);
     expect(bubbleText(turn({ reply: "**Good** evening" })).body).toBe("Good evening");

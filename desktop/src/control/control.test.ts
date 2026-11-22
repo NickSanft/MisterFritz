@@ -131,6 +131,11 @@ describe("the control window's wire", () => {
       { ...online, retryIn: "4" },
       { ...online, identity: 3 },
       { ...online, threadId: undefined },
+      // What the brain can take: the protocol's caps, in a list.
+      { ...online, serverCaps: ["text", "hearing"] },
+      { ...online, serverCaps: "audio-in" },
+      { ...online, serverCaps: [3] },
+      { ...online, serverCaps: undefined },
       [online],
       null,
     ]) {

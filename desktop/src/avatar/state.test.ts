@@ -5,7 +5,20 @@
  */
 import { describe, expect, it } from "vitest";
 import type { ServerFrame } from "../shared/protocol";
-import { INITIAL, INTERRUPTED_MARK, LOST_APOLOGY, apologyText, cancelFirst, reduce, type TurnEvent, type TurnView } from "./state";
+import {
+  INITIAL,
+  INTERRUPTED_MARK,
+  LOST_APOLOGY,
+  NOTE_PREFIX,
+  PRESS_PREFIX,
+  apologyText,
+  cancelFirst,
+  isLocal,
+  pressOf,
+  reduce,
+  type TurnEvent,
+  type TurnView,
+} from "./state";
 
 const asked = (turnId: string): TurnEvent => ({ kind: "asked", turnId });
 const f = (frame: ServerFrame): TurnEvent => ({ kind: "frame", frame });
@@ -172,5 +185,93 @@ describe("the turn the bubble shows", () => {
     expect(v.revision, "the progress went, and it ended").toBe(++r);
     v = reduce(v, asked("t2"));
     expect(v.revision).toBe(++r);
+  });
+});
+
+describe("push-to-talk's turns", () => {
+  const listening: TurnEvent = { kind: "listening", press: 1 };
+  const unheard = (why: string, press?: number): TurnEvent => ({ kind: "unheard", why, press });
+
+  it("listening is a turn of its own, under its press's local id no frame carries", () => {
+    const v = run(listening);
+    expect(v).toMatchObject({ turnId: `${PRESS_PREFIX}1`, phase: "listening", reply: "", apology: null, ended: false });
+    expect(isLocal(v.turnId)).toBe(true);
+    expect(pressOf(v.turnId)).toBe(1);
+    expect(isLocal("7f3c2a10-4b5e-4f6a-9c8d-0e1f2a3b4c5d")).toBe(false);
+    expect(pressOf("7f3c2a10-4b5e-4f6a-9c8d-0e1f2a3b4c5d")).toBeNull();
+    expect(isLocal(`${NOTE_PREFIX}3`)).toBe(true);
+    expect(pressOf(`${NOTE_PREFIX}3`)).toBeNull();
+    expect(isLocal(null)).toBe(false);
+    // A brain frame for any turn leaves it be.
+    expect(reduce(v, token("7f3c2a10-4b5e-4f6a-9c8d-0e1f2a3b4c5d", "hi"))).toBe(v);
+    // The next press is a new turn, so the bubble comes up for it.
+    const again = reduce(v, { kind: "listening", press: 2 });
+    expect(again.turnId).toBe(`${PRESS_PREFIX}2`);
+    expect(again.revision).toBeGreaterThan(v.revision);
+  });
+
+  it("another press's outcome never ends the press listening now", () => {
+    const v = run(listening, { kind: "listening", press: 2 });
+    expect(reduce(v, unheard("That was too short for him to hear.", 1))).toBe(v);
+    const own = reduce(v, unheard("That was too short for him to hear.", 2));
+    expect(own).toMatchObject({ turnId: `${PRESS_PREFIX}2`, apology: "That was too short for him to hear.", ended: true });
+  });
+
+  it("a link lost while listening leaves the turn to its clip", () => {
+    const v = run(listening);
+    expect(reduce(v, { kind: "lost" })).toBe(v);
+    const after = run(listening, { kind: "lost" }, unheard("He isn't connected to his brain just now.", 1));
+    expect(after).toMatchObject({
+      turnId: v.turnId, phase: "idle", apology: "He isn't connected to his brain just now.", ended: true,
+    });
+  });
+
+  it("the clip sent, the brain's turn takes its place", () => {
+    const v = run(listening, asked("t1"), state("t1"), token("t1", "Good evening."));
+    expect(v).toMatchObject({ turnId: "t1", phase: "thinking", reply: "Good evening.", ended: false });
+  });
+
+  it("a refusal, a newer press's, never ends the press listening: its notice until its own outcome", () => {
+    const v = run(listening);
+    const refused = reduce(v, unheard("He isn't connected to his brain just now."));
+    expect(refused).toMatchObject({ turnId: v.turnId, phase: "listening", progress: "He isn't connected to his brain just now.", ended: false });
+    const own = reduce(refused, unheard("He isn't connected to his brain just now.", 1));
+    expect(own).toMatchObject({ turnId: v.turnId, apology: "He isn't connected to his brain just now.", progress: null, ended: true });
+  });
+
+  it("unheard ends a listening turn with why", () => {
+    const v = run(listening, unheard("That was too short for him to hear.", 1));
+    expect(v).toMatchObject({ phase: "idle", apology: "That was too short for him to hear.", ended: true });
+    expect(isLocal(v.turnId)).toBe(true);
+  });
+
+  it("unheard with nothing showing shows why on its own", () => {
+    const v = run(unheard("His brain can't hear yet: type to him instead."));
+    expect(v).toMatchObject({ phase: "idle", apology: "His brain can't hear yet: type to him instead.", ended: true });
+    expect(isLocal(v.turnId)).toBe(true);
+    // After a turn that ended, too: a new local turn, so the bubble comes up.
+    const after = run(asked("t1"), done("t1", "Quite."), unheard("x"));
+    expect(after).toMatchObject({ apology: "x", ended: true, reply: "" });
+    expect(after.turnId).not.toBe("t1");
+  });
+
+  it("unheard over a reply the brain is still giving is its notice, the reply kept", () => {
+    const giving = run(asked("t1"), token("t1", "Well, sir"));
+    const v = reduce(giving, unheard("His brain can't hear yet: type to him instead."));
+    expect(v).toMatchObject({
+      turnId: "t1", reply: "Well, sir", progress: "His brain can't hear yet: type to him instead.", ended: false,
+    });
+    expect(v.revision).toBeGreaterThan(giving.revision);
+    expect(reduce(v, unheard("His brain can't hear yet: type to him instead."))).toBe(v);
+    expect(reduce(v, done("t1", "Well, sir."))).toMatchObject({ progress: null, ended: true, reply: "Well, sir." });
+  });
+
+  it("listening is a barge-in: the reply running is the one to cancel", () => {
+    const giving = run(asked("t1"), token("t1", "Well"));
+    expect(cancelFirst(giving)).toBe("t1");
+    const v = reduce(giving, listening);
+    // A listening turn is the page's own: nothing to cancel at the brain.
+    expect(cancelFirst(v)).toBeNull();
+    expect(reduce(v, done("t1", "Well, sir."))).toBe(v);
   });
 });

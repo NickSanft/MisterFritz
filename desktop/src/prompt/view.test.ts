@@ -16,7 +16,9 @@ const shown: AvatarStatus = {
   parked: false,
   error: null,
 };
-const online: LinkStatus = { link: "online", reason: null, retryIn: null, identity: "nick-pc", displayName: null, threadId: null };
+const online: LinkStatus = {
+  link: "online", reason: null, retryIn: null, identity: "nick-pc", displayName: null, threadId: null, serverCaps: ["text"],
+};
 const samples = Object.entries(fixture.companionStatusSamples).map(([name, s]) => [name, parseCompanionStatus(s)!] as const);
 
 describe("the prompt waiting for a click", () => {

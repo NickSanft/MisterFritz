@@ -177,12 +177,24 @@ row in Settings comes later); unset, or not connected, it is the default
 one. If Windows' privacy settings keep desktop apps from the microphone,
 the log says where to let them, whenever the microphone is opened.
 
-Nothing carries what he hears to the brain yet, and the brain can't hear
-until its audio turn (PR 9) lands: so today a press is only logged, and the
-microphone stays closed. The one exception is a debug build given
-`FRITZ_SAVE_CLIPS` (under *Test*), which opens it and keeps each clip in that
-folder as a WAV until you delete it; outside that switch, a clip is never
-kept.
+The microphone opens only for a brain that can hear: his window open, the
+link online, and the brain's welcome offering `audio-in` (his hello offers
+to send it). Otherwise it stays closed and the bubble says why: "His brain
+can't hear yet: type to him instead." until the brain's audio turn (PR 9)
+lands, or that he isn't connected; over a reply still running, as that
+reply's notice, the reply kept. While it is open the bubble says
+*Listening…*, and a reply still running is cancelled, as asking anew
+cancels one. Let go, a clip of at least 0.3 s waits in the shell for his
+page, which takes it (`ptt_take`, the raw bytes), sends it to the brain as
+one binary frame and its `audio_end`, and shows the brain's turn as a typed
+one is shown; a shorter one, or a microphone that failed, is said in the
+bubble instead. A clip his page hasn't taken within 10 seconds is dropped,
+and one it has taken is gone from the shell.
+
+The one exception is a debug build given `FRITZ_SAVE_CLIPS` (under *Test*),
+which opens the microphone whatever the brain says and keeps each clip in
+that folder as a WAV until you delete it, sending nothing; outside that
+switch, a clip is never kept.
 
 ## His speech bubble
 

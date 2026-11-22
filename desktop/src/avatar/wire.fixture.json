@@ -13,7 +13,11 @@
     "companionConfig": "companion:config",
     "companionSay": "companion:say",
     "hookStatus": "hook:status",
-    "promptWaiting": "prompt:waiting"
+    "promptWaiting": "prompt:waiting",
+    "pttListening": "ptt:listening",
+    "pttRefused": "ptt:refused",
+    "pttNothing": "ptt:nothing",
+    "pttClip": "ptt:clip"
   },
   "hotkeys": {
     "arrange": "avatar:arrange"
@@ -107,6 +111,14 @@
     "pretendClickEnv": "FRITZ_PRETEND_CLICK"
   },
   "sayKeys": ["id", "text"],
+  "pttWhyKeys": ["why"],
+  "pttListeningKeys": ["press"],
+  "pttNothingKeys": ["press", "why"],
+  "pttClipKeys": ["id", "millis", "press"],
+  "pttWords": {
+    "brainCantHear": "His brain can't hear yet: type to him instead.",
+    "notConnected": "He isn't connected to his brain just now."
+  },
   "hookStatusKeys": [
     "covered",
     "events",
@@ -276,6 +288,14 @@
       "name": "companion_said",
       "args": ["id", "sent"]
     },
+    "pttTake": {
+      "name": "ptt_take",
+      "args": ["id"]
+    },
+    "pttSent": {
+      "name": "ptt_sent",
+      "args": ["id", "sent", "why"]
+    },
     "promptSay": {
       "name": "prompt_say",
       "args": ["text"]
@@ -380,6 +400,7 @@
     "link",
     "reason",
     "retryIn",
+    "serverCaps",
     "threadId"
   ],
   "companionStatusSamples": {
@@ -389,7 +410,8 @@
       "retryIn": null,
       "identity": null,
       "displayName": null,
-      "threadId": null
+      "threadId": null,
+      "serverCaps": []
     },
     "connecting": {
       "link": "connecting",
@@ -397,7 +419,8 @@
       "retryIn": null,
       "identity": null,
       "displayName": null,
-      "threadId": null
+      "threadId": null,
+      "serverCaps": []
     },
     "online": {
       "link": "online",
@@ -405,7 +428,17 @@
       "retryIn": null,
       "identity": "desktop-nick-pc",
       "displayName": "Nick",
-      "threadId": "desktop-nick-pc#desktop"
+      "threadId": "desktop-nick-pc#desktop",
+      "serverCaps": ["text"]
+    },
+    "hearing": {
+      "link": "online",
+      "reason": null,
+      "retryIn": null,
+      "identity": "desktop-nick-pc",
+      "displayName": "Nick",
+      "threadId": "desktop-nick-pc#desktop",
+      "serverCaps": ["text", "audio-in"]
     },
     "offline": {
       "link": "offline",
@@ -413,7 +446,8 @@
       "retryIn": 4,
       "identity": null,
       "displayName": null,
-      "threadId": null
+      "threadId": null,
+      "serverCaps": []
     },
     "refused": {
       "link": "refused",
@@ -421,7 +455,8 @@
       "retryIn": null,
       "identity": null,
       "displayName": null,
-      "threadId": null
+      "threadId": null,
+      "serverCaps": []
     }
   }
 }

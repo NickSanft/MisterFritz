@@ -18,9 +18,11 @@
  * - A frame that isn't JSON, or isn't a frame the server sends
  *   (`isServerFrame`), is ignored.
  *
+ * - A clip (`sendAudio`) goes only to a brain whose welcome offered
+ *   `audio-in`: one binary frame of PCM16, then its `audio_end`.
+ *
  * Retrying while offline isn't animation: it runs on the clock, not the
- * paced loop. Audio (`sendAudio`, PR 8) and widgets (`subscribe`, PR 13)
- * come with the PRs that use them; the brain answers both bad_frame today.
+ * paced loop. Widgets (`subscribe`, PR 13) come with the PR that uses them.
  */
 import { browserClock, type Clock } from "./clock";
 import {
@@ -29,6 +31,7 @@ import {
   SAY_MAX_CHARS,
   TURN_ID_PATTERN,
   isServerFrame,
+  type AudioEnd,
   type Cancel,
   type Cap,
   type Hello,
@@ -59,11 +62,15 @@ export interface LinkStatus {
   identity: string | null;
   displayName: string | null;
   threadId: string | null;
+  /** The welcome's `server_caps`, while online: what the brain can take
+   * (`audio-in`: it can hear). */
+  serverCaps: Cap[];
 }
 
-/** What the client needs of a WebSocket; tests pass a fake. */
+/** What the client needs of a WebSocket; tests pass a fake. A string is a
+ * text frame, an ArrayBuffer a binary one. */
 export interface SocketLike {
-  send(data: string): void;
+  send(data: string | ArrayBuffer): void;
   close(code?: number): void;
   onopen: (() => void) | null;
   onmessage: ((e: { data: unknown }) => void) | null;
@@ -79,8 +86,15 @@ export interface ClientDeps {
   wallNow(): number;
 }
 
-/** What this desk can do, told to the brain in its hello. */
-export const CAPS: Cap[] = ["text", "vrm"];
+/** What this desk can do, told to the brain in its hello: it can send
+ * what it hears (PR 8). */
+export const CAPS: Cap[] = ["text", "audio-in", "vrm"];
+/** The longest clip, in bytes: 30 s of 16 kHz PCM16 mono, what the shell's
+ * ears hand over (audio_in.rs's MAX_BYTES), and under the brain's 1 MiB
+ * frame limit. */
+export const AUDIO_MAX_BYTES = 960_000;
+/** What a clip is, as `audio_end` says it. */
+export const AUDIO_FORMAT = { sample_rate: 16_000, channels: 1, format: "pcm16" } as const;
 /** Seconds between tries, then the last for ever. */
 export const BACKOFF_S = [1, 2, 4, 8, 16, 30] as const;
 export const WELCOME_TIMEOUT_MS = 10_000;
@@ -124,6 +138,7 @@ export const helloFrame = (c: CompanionConfig): Hello => ({
 });
 export const sayFrame = (turnId: string, text: string): Say => ({ type: "say", turn_id: turnId, text });
 export const cancelFrame = (turnId: string): Cancel => ({ type: "cancel", turn_id: turnId });
+export const audioEndFrame = (turnId: string): AudioEnd => ({ type: "audio_end", turn_id: turnId, ...AUDIO_FORMAT });
 export const pingFrame = (t: number): Ping => ({ type: "ping", t });
 export const pongFrame = (t: number): Pong => ({ type: "pong", t });
 
@@ -146,6 +161,7 @@ const OFFLINE: LinkStatus = {
   identity: null,
   displayName: null,
   threadId: null,
+  serverCaps: [],
 };
 
 function sameConfig(a: CompanionConfig | null, b: CompanionConfig | null): boolean {
@@ -160,7 +176,8 @@ function sameStatus(a: LinkStatus, b: LinkStatus): boolean {
     a.retryIn === b.retryIn &&
     a.identity === b.identity &&
     a.displayName === b.displayName &&
-    a.threadId === b.threadId
+    a.threadId === b.threadId &&
+    a.serverCaps.join(" ") === b.serverCaps.join(" ")
   );
 }
 
@@ -197,7 +214,12 @@ export class CompanionClient {
   }
 
   get status(): LinkStatus {
-    return { ...this.current };
+    return { ...this.current, serverCaps: [...this.current.serverCaps] };
+  }
+
+  /** Online, to a brain that can hear (its welcome offered `audio-in`). */
+  hears(): boolean {
+    return this.online() && this.current.serverCaps.includes("audio-in");
   }
 
   /** Where to connect, and as whom; null when there is no token. Null is
@@ -242,6 +264,19 @@ export class CompanionClient {
     const turnId = this.deps.uuid();
     if (!TURN_ID_PATTERN.test(turnId)) return null;
     return this.send(sayFrame(turnId, t)) ? turnId : null;
+  }
+
+  /** Send a clip of PCM16 (16 kHz, mono) as a turn: one binary frame,
+   * then its `audio_end`. The turn's id, or null when the brain can't hear
+   * it (not online, or no `audio-in` in its welcome) or the clip isn't one
+   * (empty, half a sample, or over AUDIO_MAX_BYTES). */
+  sendAudio(pcm: ArrayBuffer): string | null {
+    const n = pcm.byteLength;
+    if (!this.hears() || n === 0 || n % 2 !== 0 || n > AUDIO_MAX_BYTES) return null;
+    const turnId = this.deps.uuid();
+    if (!TURN_ID_PATTERN.test(turnId)) return null;
+    if (!this.sendRaw(pcm)) return null;
+    return this.send(audioEndFrame(turnId)) ? turnId : null;
   }
 
   /** Stop a turn (the brain ends it with `done`, interrupted). */
@@ -352,6 +387,7 @@ export class CompanionClient {
       identity: w.identity,
       displayName: w.display_name,
       threadId: w.thread_id,
+      serverCaps: [...w.server_caps],
     });
     this.emit(w);
   }
@@ -411,9 +447,13 @@ export class CompanionClient {
   }
 
   private send(frame: object): boolean {
+    return this.sendRaw(JSON.stringify(frame));
+  }
+
+  private sendRaw(data: string | ArrayBuffer): boolean {
     if (!this.sock) return false;
     try {
-      this.sock.send(JSON.stringify(frame));
+      this.sock.send(data);
       return true;
     } catch {
       return false;

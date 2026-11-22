@@ -11,9 +11,11 @@
 //! this over cpal and rubato on 2026-11-20, so that no crate beyond
 //! `windows` is needed.
 //!
-//! `Ears` hands a clip to `on_done` and keeps it nowhere itself; the one
-//! thing here that writes a clip to disk is `save_clip`, the debug-only
-//! `FRITZ_SAVE_CLIPS` saver. The capture loop
+//! `Ears` hands a clip to `on_done` and keeps it nowhere itself. A clip
+//! for the brain waits in memory for his page to take it (`Handoff`: one
+//! clip, up to `HANDOFF_FOR`, gone once taken); the one thing here that
+//! writes a clip to disk is `save_clip`, the debug-only `FRITZ_SAVE_CLIPS`
+//! saver. The capture loop
 //! (`gather`) is generic over a `Source`, so its rules are tested with a
 //! fake; `Mic` is the real one, which only a live run reaches.
 
@@ -244,21 +246,93 @@ pub fn save_clips_dir(debug: bool, env: Option<OsString>) -> Option<PathBuf> {
 pub enum Edge {
     /// Let go: the clip, if any, ends.
     LetGo,
-    /// Pressed, but nothing would carry what he hears: the microphone
-    /// stays closed.
-    StayClosed,
-    /// Pressed: listen, and save the clip in this folder.
-    Listen(PathBuf),
+    /// Pressed, but nothing would hear him: the microphone stays closed,
+    /// and this says why.
+    StayClosed(&'static str),
+    /// Pressed, in a debug build given FRITZ_SAVE_CLIPS: listen, and save
+    /// the clip in this folder rather than send it.
+    Save(PathBuf),
+    /// Pressed, and the brain can hear: listen, and send the clip.
+    Send,
 }
 
 /// What an edge does, given the folder clips are saved to (`None`: none,
-/// which is every release build). Nothing carries a clip to the brain yet,
-/// so without that folder the microphone isn't opened at all.
-pub fn on_edge(pressed: bool, save_to: Option<PathBuf>) -> Edge {
+/// which is every release build) and whether the brain would hear a clip
+/// (`Err` says why not; `companion::ptt_refusal`). The debug folder comes
+/// first, so a live check of his ears needs no brain; otherwise the
+/// microphone is opened only for a brain that can hear.
+pub fn on_edge(pressed: bool, save_to: Option<PathBuf>, heard: Result<(), &'static str>) -> Edge {
     if !pressed {
         return Edge::LetGo;
     }
-    save_to.map_or(Edge::StayClosed, Edge::Listen)
+    if let Some(dir) = save_to {
+        return Edge::Save(dir);
+    }
+    match heard {
+        Ok(()) => Edge::Send,
+        Err(why) => Edge::StayClosed(why),
+    }
+}
+
+/// How long a clip waits for his page to take it.
+pub const HANDOFF_FOR: Duration = Duration::from_secs(10);
+
+/// The one clip waiting for his page (`ptt_take`), with its number: a newer
+/// clip replaces it, and one not taken within `HANDOFF_FOR` is dropped.
+/// Taken, it is gone from here.
+pub(crate) struct Handoff {
+    waiting: Mutex<Option<(u64, Vec<u8>, Instant)>>,
+    next: AtomicU64,
+}
+
+impl Handoff {
+    pub(crate) const fn new() -> Self {
+        Self { waiting: Mutex::new(None), next: AtomicU64::new(0) }
+    }
+
+    /// Hold `pcm` for the page, at `now`: its number, and whether a clip
+    /// was waiting still (it is dropped).
+    pub(crate) fn hold(&self, pcm: Vec<u8>, now: Instant) -> (u64, bool) {
+        let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
+        let was = self.waiting.lock().unwrap_or_else(|e| e.into_inner()).replace((id, pcm, now));
+        (id, was.is_some())
+    }
+
+    /// Clip `id`, if it is the one waiting and hasn't waited too long. Any
+    /// clip waiting too long is dropped, whichever was asked for.
+    pub(crate) fn take(&self, id: u64, now: Instant) -> Option<Vec<u8>> {
+        let mut w = self.waiting.lock().unwrap_or_else(|e| e.into_inner());
+        if w.as_ref().is_some_and(|(_, _, at)| now.duration_since(*at) > HANDOFF_FOR) {
+            *w = None;
+        }
+        if w.as_ref().is_some_and(|(held, _, _)| *held == id) {
+            return w.take().map(|(_, pcm, _)| pcm);
+        }
+        None
+    }
+
+    /// Drop whatever waits: his window, and its page, are gone.
+    pub(crate) fn clear(&self) {
+        *self.waiting.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// The app's one hand-off.
+static HANDOFF: Handoff = Handoff::new();
+
+/// Hold a clip for his page: its number, and whether one was dropped.
+pub fn hold_for_page(pcm: Vec<u8>) -> (u64, bool) {
+    HANDOFF.hold(pcm, Instant::now())
+}
+
+/// The page takes clip `id`.
+pub fn take_for_page(id: u64) -> Option<Vec<u8>> {
+    HANDOFF.take(id, Instant::now())
+}
+
+/// His page is gone: nothing waits for it.
+pub fn forget_for_page() {
+    HANDOFF.clear();
 }
 
 /// A clip's file name in that folder.
@@ -440,13 +514,28 @@ impl Ears {
 static EARS: Ears = Ears::new();
 
 /// Push-to-talk pressed: listen on `device` (`audio.inputDevice`'s name),
-/// or the default microphone.
+/// or the default microphone. `on_start` is called on the ears' thread just
+/// before the device is opened (never, if let go before that thread ran),
+/// so it comes before whatever `on_done` is given.
 pub fn press(
     device: Option<String>,
+    on_start: impl FnOnce() + Send + 'static,
     on_level: impl FnMut(f32) + Send + 'static,
     on_done: impl FnOnce(Result<Captured, String>) + Send + 'static,
 ) -> Pressed {
-    EARS.press(Instant::now(), move || Mic::open(device.as_deref()), on_level, on_done)
+    EARS.press(Instant::now(), started_then(on_start, move || Mic::open(device.as_deref())), on_level, on_done)
+}
+
+/// `open`, told first: `on_start` is called, then the source opened, so
+/// whoever is told hears it before anything the clip comes to.
+pub(crate) fn started_then<S>(
+    on_start: impl FnOnce() + Send + 'static,
+    open: impl FnOnce() -> Result<S, String> + Send + 'static,
+) -> impl FnOnce() -> Result<S, String> + Send + 'static {
+    move || {
+        on_start();
+        open()
+    }
 }
 
 /// Push-to-talk let go.
@@ -997,10 +1086,66 @@ mod tests {
 
     #[test]
     fn the_microphone_opens_only_on_a_press_with_somewhere_to_put_the_clip() {
-        assert_eq!(on_edge(false, Some("C:\\clips".into())), Edge::LetGo);
-        assert_eq!(on_edge(false, None), Edge::LetGo);
-        assert_eq!(on_edge(true, None), Edge::StayClosed);
-        assert_eq!(on_edge(true, Some("C:\\clips".into())), Edge::Listen(PathBuf::from("C:\\clips")));
+        let deaf = Err("His brain can't hear yet: type to him instead.");
+        for heard in [Ok(()), deaf] {
+            assert_eq!(on_edge(false, Some("C:\\clips".into()), heard), Edge::LetGo);
+            assert_eq!(on_edge(false, None, heard), Edge::LetGo);
+            // The debug folder first: a live check of his ears needs no brain.
+            assert_eq!(on_edge(true, Some("C:\\clips".into()), heard), Edge::Save(PathBuf::from("C:\\clips")));
+        }
+        assert_eq!(on_edge(true, None, Ok(())), Edge::Send);
+        assert_eq!(on_edge(true, None, deaf), Edge::StayClosed("His brain can't hear yet: type to him instead."));
+    }
+
+    /// Whoever is told he listens is told before the device opens, so
+    /// before whatever the clip comes to; let go before the ears' thread
+    /// ran, nobody is told and nothing opened.
+    #[test]
+    fn listening_is_told_before_the_device_opens() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (a, b) = (order.clone(), order.clone());
+        let open = started_then(move || a.lock().unwrap().push("told"), move || {
+            b.lock().unwrap().push("opened");
+            Err::<Watched, _>("There's no microphone for him to listen with.".to_owned())
+        });
+        let stop = AtomicBool::new(false);
+        let _ = listen(&stop, open, &mut |_| {});
+        assert_eq!(*order.lock().unwrap(), ["told", "opened"]);
+        let quiet = Arc::new(Mutex::new(Vec::new()));
+        let q = quiet.clone();
+        let open = started_then(move || q.lock().unwrap().push("told"), || -> Result<Watched, String> { panic!("opened") });
+        let stop = AtomicBool::new(true);
+        assert_eq!(listen(&stop, open, &mut |_| {}).unwrap().ended, Ended::NeverStarted);
+        assert!(quiet.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_clip_waits_for_the_page_once_and_not_for_long() {
+        let h = Handoff::new();
+        let t = Instant::now();
+        let (one, dropped) = h.hold(vec![1, 0], t);
+        assert!(!dropped);
+        assert_eq!(h.take(one + 1, t), None, "not the one waiting");
+        assert_eq!(h.take(one, t), Some(vec![1, 0]));
+        assert_eq!(h.take(one, t), None, "taken once");
+        // A newer clip replaces one never taken.
+        let (two, _) = h.hold(vec![2, 0], t);
+        let (three, dropped) = h.hold(vec![3, 0], t);
+        assert!(dropped && three > two);
+        assert_eq!(h.take(two, t), None);
+        assert_eq!(h.take(three, t), Some(vec![3, 0]));
+        // Too long a wait: gone, whichever is asked for.
+        let (four, _) = h.hold(vec![4, 0], t);
+        assert_eq!(h.take(four, t + HANDOFF_FOR), Some(vec![4, 0]), "just in time");
+        let (five, _) = h.hold(vec![5, 0], t);
+        assert_eq!(h.take(999, t + HANDOFF_FOR + Duration::from_millis(1)), None);
+        assert_eq!(h.take(five, t), None, "dropped by the late look");
+        let (own, _) = h.hold(vec![7, 0], t);
+        assert_eq!(h.take(own, t + HANDOFF_FOR + Duration::from_millis(1)), None, "its own id, too late");
+        assert_eq!(h.take(own, t), None, "and gone");
+        let (six, _) = h.hold(vec![6, 0], t);
+        h.clear();
+        assert_eq!(h.take(six, t), None, "his page gone");
     }
 
     #[test]

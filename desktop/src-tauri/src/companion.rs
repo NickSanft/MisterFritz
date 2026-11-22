@@ -137,7 +137,15 @@ pub struct CompanionStatus {
     pub identity: Option<String>,
     pub display_name: Option<String>,
     pub thread_id: Option<String>,
+    /// The welcome's `server_caps`, while online: what the brain can take
+    /// (`audio-in`: it can hear). Only the protocol's caps are kept.
+    #[serde(default)]
+    pub server_caps: Vec<String>,
 }
+
+/// The protocol's caps (companion_protocol.py's `Cap`): anything else a
+/// page reports is dropped.
+pub const KNOWN_CAPS: [&str; 6] = ["text", "audio-in", "audio-out", "speak-local", "vrm", "widgets"];
 
 impl CompanionStatus {
     /// Before the page has said anything: unconfigured without a token,
@@ -150,7 +158,13 @@ impl CompanionStatus {
             identity: None,
             display_name: None,
             thread_id: None,
+            server_caps: Vec::new(),
         }
+    }
+
+    /// Online, to a brain that can hear (its welcome offered `audio-in`).
+    pub fn hears(&self) -> bool {
+        self.link == Link::Online && self.server_caps.iter().any(|c| c == "audio-in")
     }
 
     /// What changed enough to log: the link, and why.
@@ -187,13 +201,39 @@ fn printable(s: Option<String>) -> Option<String> {
 pub fn status_from(report: serde_json::Value) -> Result<CompanionStatus, String> {
     let s: CompanionStatus =
         serde_json::from_value(report).map_err(|e| format!("that isn't a companion report: {e}"))?;
+    let mut caps: Vec<String> = Vec::new();
+    for c in &s.server_caps {
+        if KNOWN_CAPS.contains(&c.as_str()) && !caps.contains(c) {
+            caps.push(c.clone());
+        }
+    }
     Ok(CompanionStatus {
         retry_in: s.retry_in.map(|n| n.min(RETRY_MAX_S)),
         identity: printable(s.identity),
         display_name: printable(s.display_name),
         thread_id: printable(s.thread_id),
+        server_caps: caps,
         ..s
     })
+}
+
+/// Why push-to-talk can't be heard: his brain can't hear yet.
+pub const BRAIN_CANT_HEAR: &str = "His brain can't hear yet: type to him instead.";
+
+/// Why push-to-talk can't be heard now, in the owner's words; `None` when it
+/// can. As `say_refusal`: his window first (the page holds the session),
+/// then the link, then whether the brain can hear at all.
+pub fn ptt_refusal(last: &CompanionStatus, avatar_open: bool) -> Option<&'static str> {
+    if !avatar_open {
+        return Some("His window is closed: show him first.");
+    }
+    if last.link != Link::Online {
+        return Some(NOT_CONNECTED);
+    }
+    if !last.hears() {
+        return Some(BRAIN_CANT_HEAR);
+    }
+    None
 }
 
 /// The longest turn he can be asked, in characters once trimmed: the
@@ -353,7 +393,7 @@ mod tests {
     #[test]
     fn the_pages_report_is_checked() {
         let ok = json!({"link": "online", "reason": null, "retryIn": null, "identity": "desktop-nick-pc",
-                        "displayName": "Nick", "threadId": "desktop-nick-pc#desktop"});
+                        "displayName": "Nick", "threadId": "desktop-nick-pc#desktop", "serverCaps": ["text", "audio-in"]});
         let s = status_from(ok.clone()).unwrap();
         assert_eq!(s.link, Link::Online);
         assert_eq!(s.describe(), "companion: online as desktop-nick-pc (desktop-nick-pc#desktop)");
@@ -380,6 +420,31 @@ mod tests {
         assert_eq!(s.display_name, None, "blank is none");
         assert_eq!(s.thread_id.as_deref(), Some("tx"));
         assert_eq!(s.retry_in, Some(RETRY_MAX_S));
+        // Only the protocol's caps, each once, in the order given.
+        let caps = status_from(json!({"link": "online", "serverCaps": ["audio-in", "x", "text", "audio-in", "AUDIO-IN", ""]})).unwrap();
+        assert_eq!(caps.server_caps, ["audio-in", "text"]);
+        assert!(status_from(json!({"link": "online", "serverCaps": "audio-in"})).is_err(), "a list, or nothing");
+        assert!(status_from(json!({"link": "online", "serverCaps": [1]})).is_err());
+    }
+
+    /// He hears only online, to a brain whose welcome offered `audio-in`;
+    /// push-to-talk's refusal says which of those isn't so, his window first.
+    #[test]
+    fn push_to_talk_is_heard_only_by_a_brain_that_can_hear() {
+        let hearing = CompanionStatus { link: Link::Online, server_caps: vec!["text".into(), "audio-in".into()],
+                                        ..CompanionStatus::before_any_report(true) };
+        assert!(hearing.hears());
+        assert_eq!(ptt_refusal(&hearing, true), None);
+        let deaf = CompanionStatus { server_caps: vec!["text".into()], ..hearing.clone() };
+        assert!(!deaf.hears());
+        assert_eq!(ptt_refusal(&deaf, true), Some(BRAIN_CANT_HEAR));
+        for link in [Link::Unconfigured, Link::Connecting, Link::Offline, Link::Refused] {
+            let s = CompanionStatus { link, ..hearing.clone() };
+            assert!(!s.hears(), "{link:?}");
+            assert_eq!(ptt_refusal(&s, true), Some(NOT_CONNECTED), "{link:?}");
+        }
+        assert!(ptt_refusal(&hearing, false).unwrap().contains("window is closed"));
+        assert!(ptt_refusal(&CompanionStatus::before_any_report(true), false).unwrap().contains("window"));
     }
 
     #[test]
