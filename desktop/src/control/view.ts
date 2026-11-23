@@ -135,6 +135,7 @@ export const HOTKEY_DOES: Record<HotkeyAction, string> = {
   prompt: "Opens the prompt, to ask him something from any app.",
   arrange: "Lets you move and resize him; Esc locks him there.",
   park: "Hides him, or brings him back.",
+  ptt: "Hold it while you speak, and he hears you, once his brain can hear.",
 };
 
 export interface HotkeyLine {

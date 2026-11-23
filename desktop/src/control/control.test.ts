@@ -154,13 +154,15 @@ describe("the control window's wire", () => {
     expect(c.hotkeysBound.args).toEqual([]);
     expect([...HOTKEY_ACTIONS].sort()).toEqual(fixture.hotkeyActions);
     expect(HOTKEY_DEFAULTS).toEqual(fixture.hotkeyDefaults);
-    const bound = { prompt: "Ctrl+Alt+F", arrange: null, park: "Ctrl+Alt+H" };
+    const bound = { prompt: "Ctrl+Alt+F", arrange: null, park: "Ctrl+Alt+H", ptt: "Ctrl+Alt+V" };
     expect(parseHotkeysBound(bound)).toEqual(bound);
     for (const bad of [
       null,
       [bound],
       { ...bound, prompt: 3 },
-      { ...bound, ptt: "Ctrl+Alt+Space" },
+      { ...bound, ptt: 3 },
+      { prompt: "Ctrl+Alt+F", arrange: null, park: "Ctrl+Alt+H" },
+      { ...bound, mute: "Ctrl+Alt+M" },
       { arrange: null, park: null },
       { ...bound, park: undefined },
     ]) {
@@ -204,7 +206,7 @@ describe("the control window's wire", () => {
     version: 1,
     brain: { url: "ws://127.0.0.1:8001/companion", clientId: "nick-pc", clientName: "NICK-PC" },
     avatar: { rect: null, scale: 1, parked: false, vrmPath: null, lookatCursor: true, clicks: true },
-    hotkeys: { prompt: "Ctrl+Alt+F", ptt: "Ctrl+Alt+Space", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" },
+    hotkeys: { prompt: "Ctrl+Alt+F", ptt: "Ctrl+Alt+V", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" },
     diagnostics: { foregroundLog: false },
     theme: { theme: "dark", mood: "ink", accent: "brand", motion: 0.6, grain: true, motionUser: false },
   };
@@ -213,12 +215,15 @@ describe("the control window's wire", () => {
     expect(parseSettings(settings)).toEqual({
       brain: { url: "ws://127.0.0.1:8001/companion", clientId: "nick-pc", clientName: "NICK-PC" },
       avatar: { lookatCursor: true, clicks: true, vrmPath: null },
-      hotkeys: { prompt: "Ctrl+Alt+F", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" },
+      hotkeys: { prompt: "Ctrl+Alt+F", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H", ptt: "Ctrl+Alt+V" },
       diagnostics: { foregroundLog: false },
       theme: { theme: "dark", mood: "ink", accent: "brand", motion: 0.6, grain: true, motionUser: false },
     });
     const { prompt: _p, ...noPrompt } = settings.hotkeys;
     expect(parseSettings({ ...settings, hotkeys: noPrompt })).toBeNull();
+    const { ptt: _t, ...noPtt } = settings.hotkeys;
+    expect(parseSettings({ ...settings, hotkeys: noPtt })).toBeNull();
+    expect(parseSettings({ ...settings, hotkeys: { ...settings.hotkeys, ptt: null } })).toBeNull();
     expect(parseSettings({ ...settings, hotkeys: { ...settings.hotkeys, prompt: 7 } })).toBeNull();
     expect(parseSettings({ ...settings, avatar: { ...settings.avatar, vrmPath: "D:/m/fritz.vrm" } })?.avatar.vrmPath)
       .toBe("D:/m/fritz.vrm");
@@ -474,7 +479,7 @@ describe("what Settings › Hotkeys says", () => {
       text: `${why} Working on Ctrl+Alt+F: Ctrl+Alt+K couldn't be used. Pick another, or press Default.`,
       alert: true,
     });
-    expect(new Set(Object.values(HOTKEY_DOES)).size).toBe(3);
+    expect(new Set(Object.values(HOTKEY_DOES)).size).toBe(4);
   });
 
   /** The settings and the shell say Super; the owner's keycap says Win. */

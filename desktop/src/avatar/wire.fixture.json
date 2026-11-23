@@ -22,8 +22,8 @@
   "hotkeys": {
     "arrange": "avatar:arrange"
   },
-  "hotkeyActions": ["arrange", "park", "prompt"],
-  "hotkeyDefaults": { "prompt": "Ctrl+Alt+F", "arrange": "Ctrl+Alt+A", "park": "Ctrl+Alt+H" },
+  "hotkeyActions": ["arrange", "park", "prompt", "ptt"],
+  "hotkeyDefaults": { "prompt": "Ctrl+Alt+F", "arrange": "Ctrl+Alt+A", "park": "Ctrl+Alt+H", "ptt": "Ctrl+Alt+V" },
   "handshakeStages": [
     "ready",
     "painted"

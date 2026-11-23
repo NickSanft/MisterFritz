@@ -1,6 +1,6 @@
 /**
- * Settings › Hotkeys: his three keys (plan 14 build § 4.8, DivoraVoice's
- * Hotkeys rows; push-to-talk's row comes with PR 8). A key is captured with
+ * Settings › Hotkeys: his four keys (plan 14 build § 4.8, DivoraVoice's
+ * Hotkeys rows; push-to-talk's came with PR 8). A key is captured with
  * DivoraVoice's HotkeyCapture and handed to the shell's `set_hotkey`, which
  * checks it, takes it from Windows, saves it, and only then lets the old
  * one go. A refusal is said on its row, the old key still showing and
@@ -18,6 +18,7 @@ export const HOTKEY_TITLES: Record<HotkeyAction, string> = {
   prompt: "Ask Fritz",
   arrange: "Arrange him",
   park: "Hide or show him",
+  ptt: "Talk to him",
 };
 
 export interface HotkeysProps {

@@ -31,7 +31,7 @@ export const CMD = {
 
 /** The actions a key may be set for, in the order Settings shows them
  * (the shell's hotkeys::ACTIONS; the fixture's hotkeyActions holds both). */
-export const HOTKEY_ACTIONS = ["prompt", "arrange", "park"] as const;
+export const HOTKEY_ACTIONS = ["prompt", "arrange", "park", "ptt"] as const;
 export type HotkeyAction = (typeof HOTKEY_ACTIONS)[number];
 
 /** Each action's key by default (the shell's `Hotkeys::default()`). */
@@ -39,6 +39,7 @@ export const HOTKEY_DEFAULTS: Record<HotkeyAction, string> = {
   prompt: "Ctrl+Alt+F",
   arrange: "Ctrl+Alt+A",
   park: "Ctrl+Alt+H",
+  ptt: "Ctrl+Alt+V",
 };
 
 /** Each action's key as Windows holds it now, or null when it has none. */
@@ -111,14 +112,12 @@ export function parseSettings(v: unknown): ControlSettings | null {
   if (!brain || !avatar || !hotkeys || !diagnostics || !theme) return null;
   if (typeof avatar.lookatCursor !== "boolean" || typeof avatar.clicks !== "boolean") return null;
   if (avatar.vrmPath !== null && typeof avatar.vrmPath !== "string") return null;
-  if (typeof hotkeys.prompt !== "string" || typeof hotkeys.arrange !== "string" || typeof hotkeys.park !== "string") {
-    return null;
-  }
+  if (!HOTKEY_ACTIONS.every((a) => typeof hotkeys[a] === "string")) return null;
   if (typeof diagnostics.foregroundLog !== "boolean") return null;
   return {
     brain,
     avatar: { lookatCursor: avatar.lookatCursor, clicks: avatar.clicks, vrmPath: avatar.vrmPath as string | null },
-    hotkeys: { prompt: hotkeys.prompt, arrange: hotkeys.arrange, park: hotkeys.park },
+    hotkeys: Object.fromEntries(HOTKEY_ACTIONS.map((a) => [a, hotkeys[a] as string])) as Record<HotkeyAction, string>,
     diagnostics: { foregroundLog: diagnostics.foregroundLog },
     theme,
   };
@@ -184,7 +183,7 @@ export function parseHookStatus(v: unknown): HookStatus | null {
   return o as unknown as HookStatus;
 }
 
-/** `hotkeys_bound`'s answer, or null when it isn't one: exactly the three
+/** `hotkeys_bound`'s answer, or null when it isn't one: exactly the
  * actions, each a key or null. */
 export function parseHotkeysBound(v: unknown): HotkeysBound | null {
   const o = obj(v);
@@ -192,7 +191,7 @@ export function parseHotkeysBound(v: unknown): HotkeysBound | null {
   for (const a of HOTKEY_ACTIONS) {
     if (o[a] !== null && typeof o[a] !== "string") return null;
   }
-  return { prompt: o.prompt as string | null, arrange: o.arrange as string | null, park: o.park as string | null };
+  return Object.fromEntries(HOTKEY_ACTIONS.map((a) => [a, o[a] as string | null])) as HotkeysBound;
 }
 
 /** The argument objects, by the keys the shell's commands take. */

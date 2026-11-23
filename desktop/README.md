@@ -28,19 +28,19 @@ opens it):
 | `avatar\fritz.vrm` | The owner's model, if there is one (or `avatar.vrmPath`) |
 
 The hotkeys are `hotkeys.arrange` (Ctrl+Alt+A), `hotkeys.park`
-(Ctrl+Alt+H) and `hotkeys.prompt` (Ctrl+Alt+F), registered at start and
-set in Settings › Hotkeys: click a key's field and press the new chord (Esc
-cancels). It is bound the moment it is saved: checked (Ctrl and Alt
-together, or Win, or F13 to F24 alone; no other action's key, nor
-push-to-talk's Ctrl+Alt+V), taken from Windows, saved, and only then is
-the old key let go, so a key another app holds is refused on its row with
-the old one still working. A chord Fritz or another app already holds does
-its job instead of reaching the field. Each row says when the key set isn't
-the one working (it fell back to its default at start, or Windows wouldn't
-give it), and *Default* puts the default back. A key edited into
-`settings.json` by hand takes effect at the next start. Push-to-talk's,
-`hotkeys.ptt` (Ctrl+Alt+V), is registered at start too, but set only
-that way for now: its row in Settings comes later in PR 8. It was
+(Ctrl+Alt+H), `hotkeys.prompt` (Ctrl+Alt+F) and push-to-talk's
+`hotkeys.ptt` (Ctrl+Alt+V), registered at start and set in Settings ›
+Hotkeys: click a key's field and press the new chord (Esc cancels). It is
+bound the moment it is saved: checked (Ctrl and Alt together, or Win, or
+F13 to F24 alone; no other action's key), taken from Windows, saved, and
+only then is the old key let go, so a key another app holds is refused on
+its row with the old one still working. A chord Fritz or another app
+already holds does its job instead of reaching the field. Each row says
+when the key set isn't the one working (it fell back to its default at
+start, or Windows wouldn't give it), and *Default* puts the default back.
+Push-to-talk moved to a new key lets go of the microphone if it was open,
+since the old key's release no longer reaches Fritz. A key edited into
+`settings.json` by hand takes effect at the next start. Push-to-talk's was
 Ctrl+Alt+Space until another app turned out to hold that: a
 `settings.json` from before (its `version` 1) still saying Ctrl+Alt+Space
 is moved to Ctrl+Alt+V once, at the first start; any other key is kept. His eyes follow the cursor while

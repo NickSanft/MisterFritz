@@ -40,15 +40,15 @@ describe("Settings › Hotkeys", () => {
       .toBeInTheDocument();
   });
 
-  it("has a row for each of his three keys, and none for push-to-talk yet", () => {
+  it("has a row for each of his four keys, push-to-talk's among them", () => {
     const { view, capture } = mount();
     for (const [action, title] of Object.entries(HOTKEY_TITLES) as [HotkeyAction, string][]) {
       expect(view.getByText(title)).toBeInTheDocument();
       expect(capture(action)).toHaveAccessibleName(`${title} hotkey: ${HOTKEY_DEFAULTS[action].split("+").join(" ")}`);
       expect(view.getByText(HOTKEY_DOES[action])).toBeInTheDocument();
     }
-    expect(view.queryByText(/push-to-talk/i)).toBeNull();
-    expect(view.getAllByRole("button", { name: / hotkey: / })).toHaveLength(3);
+    expect(view.getAllByRole("button", { name: / hotkey: / })).toHaveLength(4);
+    expect(capture("ptt")).toHaveAccessibleName("Talk to him hotkey: Ctrl Alt V");
   });
 
   it("a captured key is bound to its row's action", async () => {

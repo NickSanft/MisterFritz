@@ -1,8 +1,7 @@
 //! The global hotkeys, from `settings.hotkeys`: Arrange, Hide/Show, the
 //! prompt and push-to-talk. Registered at start; a key set with
 //! `set_hotkey` is bound the moment it is saved, and one edited into
-//! settings.json by hand takes effect on the next start. Push-to-talk's is
-//! set only by hand for now: its Settings row comes later in PR 8.
+//! settings.json by hand takes effect on the next start.
 //!
 //! At start, a binding that doesn't parse, or that another of ours already
 //! has, falls back to its default (and says so) rather than leaving the
@@ -32,15 +31,14 @@ pub const PROMPT: &str = "prompt:toggle";
 /// The id push-to-talk is handled under: held, not pressed (its release
 /// matters as much as its press).
 pub const PTT: &str = "ptt:hold";
-/// What push-to-talk does, for a refusal naming it.
-const PTT_DOES: &str = "talk to him";
 
 /// The actions a key may be set for: the setting's name, the id its press
 /// is handled under, and what it does (for a refusal naming it).
-pub const ACTIONS: [(&str, &str, &str); 3] = [
+pub const ACTIONS: [(&str, &str, &str); 4] = [
     ("prompt", PROMPT, "ask him something"),
     ("arrange", HOTKEY_ARRANGE, "arrange him"),
     ("park", PARK, "hide or show him"),
+    ("ptt", PTT, "talk to him"),
 ];
 
 /// A key held: `(shortcut, id, accelerator)`, the accelerator as it was
@@ -78,9 +76,6 @@ pub fn id_for(action: &str) -> Option<&'static str> {
 
 /// What the action an id belongs to does.
 fn does(id: &str) -> &'static str {
-    if id == PTT {
-        return PTT_DOES;
-    }
     ACTIONS.iter().find(|(_, i, _)| *i == id).map_or("do something else", |(_, _, d)| *d)
 }
 
@@ -90,6 +85,7 @@ fn setting<'a>(h: &'a Hotkeys, action: &str) -> Option<&'a str> {
         "prompt" => Some(&h.prompt),
         "arrange" => Some(&h.arrange),
         "park" => Some(&h.park),
+        "ptt" => Some(&h.ptt),
         _ => None,
     }
 }
@@ -121,7 +117,7 @@ pub fn chord_problem(s: &Shortcut) -> Option<&'static str> {
 
 /// The key `accel` would be for `action`, or why it can't be: it must
 /// parse, pass `chord_problem`, and be no other action's (as set, or as
-/// bound), nor push-to-talk's. The action's own key, however it is spelled, passes.
+/// bound). The action's own key, however it is spelled, passes.
 /// Pure: `bound` is a copy of what is registered.
 pub fn check(h: &Hotkeys, action: &str, accel: &str, bound: &[Entry]) -> Result<Shortcut, String> {
     let id = id_for(action).ok_or_else(|| format!("Fritz has no hotkey {action:?}."))?;
@@ -134,10 +130,6 @@ pub fn check(h: &Hotkeys, action: &str, accel: &str, bound: &[Entry]) -> Result<
         if other_id != id && setting(h, other).and_then(|a| parse(a).ok()) == Some(s) {
             return Err(format!("{accel} is already Fritz's key to {other_does}."));
         }
-    }
-    // Before the bound keys, which hold push-to-talk's too: its own words.
-    if parse(&h.ptt).ok() == Some(s) {
-        return Err(format!("{accel} is kept for push-to-talk."));
     }
     if let Some((_, other_id, _)) = bound.iter().find(|(b, i, _)| *i != id && *b == s) {
         return Err(format!("{accel} is already Fritz's key to {}.", does(other_id)));
@@ -260,9 +252,10 @@ fn bound_in(store: &Mutex<Vec<Entry>>) -> BTreeMap<&'static str, Option<String>>
     })
 }
 
-/// Bind `accel` to `action` and save it. From a command's worker thread
-/// only (the plugin waits on the main thread), one rebind at a time.
-pub fn rebind(app: &AppHandle, action: &str, accel: &str) -> Result<Settings, String> {
+/// Bind `accel` to `action` and save it: the settings saved, and whether
+/// the action moved to a new key (`rebind_with`). From a command's worker
+/// thread only (the plugin waits on the main thread), one rebind at a time.
+pub fn rebind(app: &AppHandle, action: &str, accel: &str) -> Result<(Settings, bool), String> {
     let _one = REBINDING.lock().unwrap_or_else(|e| e.into_inner());
     let h = crate::settings::get().hotkeys;
     rebind_with(&Plugin(app), &BOUND, &h, action, accel, |path, accel| {
@@ -274,7 +267,10 @@ pub fn rebind(app: &AppHandle, action: &str, accel: &str) -> Result<Settings, St
 /// new key is registered, then saved, then swapped into `store`, and only
 /// then is the old one let go. A key Windows refuses is never saved; a
 /// failed save lets the new key go again. The same key spelled anew is only
-/// saved. `save` is given the setting's path and the accelerator.
+/// saved. `save` is given the setting's path and the accelerator. Answers
+/// what `save` did, and whether the action moved to a new key (false for
+/// the same key respelled): push-to-talk moved must be let go, as its old
+/// key's release no longer reaches Fritz.
 pub(crate) fn rebind_with(
     keys: &impl Keys,
     store: &Mutex<Vec<Entry>>,
@@ -282,7 +278,7 @@ pub(crate) fn rebind_with(
     action: &str,
     accel: &str,
     save: impl FnOnce(&str, &str) -> Result<Settings, String>,
-) -> Result<Settings, String> {
+) -> Result<(Settings, bool), String> {
     let accel = accel.trim();
     let bound = with_bound(store, |b| b.clone());
     let new = check(h, action, accel, &bound)?;
@@ -295,7 +291,7 @@ pub(crate) fn rebind_with(
         let after = save(&path, accel)?;
         put(store, id, new, accel);
         tracing::info!(action, accel, "hotkey saved; it was already bound");
-        return Ok(after);
+        return Ok((after, false));
     }
     keys.register(new).map_err(|e| refusal(&e, accel))?;
     let after = match save(&path, accel) {
@@ -314,7 +310,7 @@ pub(crate) fn rebind_with(
         }
     }
     tracing::info!(action, accel, "hotkey rebound");
-    Ok(after)
+    Ok((after, true))
 }
 
 /// `id`'s entry in `store`, replaced or added.
@@ -536,13 +532,13 @@ mod tests {
             ("prompt", "Ctrl+Alt+A", "Ctrl+Alt+A is already Fritz's key to arrange him."),
             ("arrange", "Ctrl+Alt+H", "Ctrl+Alt+H is already Fritz's key to hide or show him."),
             ("park", " Ctrl+Alt+F ", "Ctrl+Alt+F is already Fritz's key to ask him something."),
-            ("prompt", "Ctrl+Alt+V", "Ctrl+Alt+V is kept for push-to-talk."),
+            ("prompt", "Ctrl+Alt+V", "Ctrl+Alt+V is already Fritz's key to talk to him."),
+            ("ptt", "Ctrl+Alt+F", "Ctrl+Alt+F is already Fritz's key to ask him something."),
             ("prompt", "F", NEEDS_A_MODIFIER),
             ("prompt", "Shift+F", NEEDS_A_MODIFIER),
             ("prompt", "Ctrl+S", APPS_OWN_KEYS),
             ("prompt", "Ctrl+Alt+Nope", "Fritz can't use \"Ctrl+Alt+Nope\" as a key: "),
             ("prompt", "", "Fritz can't use \"\" as a key: "),
-            ("ptt", "Ctrl+Alt+Shift+F13", "Fritz has no hotkey \"ptt\"."),
             ("nope", "Ctrl+Alt+Shift+F13", "Fritz has no hotkey \"nope\"."),
         ] {
             let err = check(&d, action, accel, &bound).unwrap_err();
@@ -571,6 +567,7 @@ mod tests {
                 "prompt" => h.prompt = spare.into(),
                 "arrange" => h.arrange = spare.into(),
                 "park" => h.park = spare.into(),
+                "ptt" => h.ptt = spare.into(),
                 _ => unreachable!("{name}"),
             }
             let bound: Vec<Entry> = bindings(&h).into_iter().filter(|(_, i, _)| *i != id).collect();
@@ -750,6 +747,36 @@ mod tests {
         assert_eq!(bound_in(&store)["prompt"].as_deref(), Some("alt+ctrl+f"));
     }
 
+    /// A rebind says whether the action moved to a new key (`set_hotkey`
+    /// lets go of push-to-talk moved): not when the key is respelled, and
+    /// a refused one is an error, push-to-talk kept on its old key.
+    #[test]
+    fn a_rebind_says_whether_the_key_moved() {
+        let store = store();
+        let d = Hotkeys::default();
+        let moved = |r: Result<(Settings, bool), String>| r.map(|(_, moved)| moved);
+        let keys = FakeKeys::default();
+        assert_eq!(moved(rebind_with(&keys, &store, &d, "ptt", "alt+ctrl+v", saver(&keys.calls, true))), Ok(false), "respelled");
+        assert_eq!(keys.calls(), ["save hotkeys.ptt=alt+ctrl+v"]);
+        let keys = FakeKeys::holding(&["Ctrl+Alt+Shift+F13"]);
+        assert!(rebind_with(&keys, &store, &d, "ptt", "Ctrl+Alt+Shift+F13", saver(&keys.calls, true)).is_err());
+        assert_eq!(id_in(&store, &key("Ctrl+Alt+V")), Some(PTT), "refused, it keeps its key");
+        let keys = FakeKeys::default();
+        assert!(rebind_with(&keys, &store, &d, "ptt", "Ctrl+Alt+Shift+F13", saver(&keys.calls, false)).is_err());
+        assert_eq!(id_in(&store, &key("Ctrl+Alt+V")), Some(PTT), "unsaved, it keeps its key");
+        let keys = FakeKeys::default();
+        assert_eq!(moved(rebind_with(&keys, &store, &d, "ptt", "Ctrl+Alt+Shift+F13", saver(&keys.calls, true))), Ok(true));
+        assert_eq!(keys.calls(), ["register Ctrl+Alt+Shift+F13", "save hotkeys.ptt=Ctrl+Alt+Shift+F13", "unregister Ctrl+Alt+V"]);
+        assert_eq!(id_in(&store, &key("Ctrl+Alt+Shift+F13")), Some(PTT));
+        let keys = FakeKeys::default();
+        assert_eq!(moved(rebind_with(&keys, &store, &d, "prompt", "Ctrl+Alt+Shift+F14", saver(&keys.calls, true))), Ok(true));
+        // An action that had no key gets one: moved, with nothing let go.
+        let store = Mutex::new(defaults_bound().into_iter().filter(|(_, id, _)| *id != PTT).collect());
+        let keys = FakeKeys::default();
+        assert_eq!(moved(rebind_with(&keys, &store, &d, "ptt", "Ctrl+Alt+Shift+F13", saver(&keys.calls, true))), Ok(true));
+        assert_eq!(keys.calls(), ["register Ctrl+Alt+Shift+F13", "save hotkeys.ptt=Ctrl+Alt+Shift+F13"]);
+    }
+
     /// An action that had no key (Windows refused it at start) gets one,
     /// with nothing to let go.
     #[test]
@@ -789,12 +816,13 @@ mod tests {
             ["register Ctrl+Alt+A", "register Ctrl+Alt+H", "register Ctrl+Alt+F", "register Ctrl+Alt+V"]
         );
         let now = bound_in(&store);
-        assert_eq!(now.keys().copied().collect::<Vec<_>>(), ["arrange", "park", "prompt"]);
+        assert_eq!(now.keys().copied().collect::<Vec<_>>(), ["arrange", "park", "prompt", "ptt"]);
         assert_eq!(now["arrange"], None);
         assert_eq!(now["park"].as_deref(), Some("Ctrl+Alt+H"));
         assert_eq!(now["prompt"].as_deref(), Some("Ctrl+Alt+F"));
         assert_eq!(id_in(&store, &key("Ctrl+Alt+A")), None);
-        assert_eq!(id_in(&store, &key("Ctrl+Alt+V")), Some(PTT), "push-to-talk is bound, though no row shows it yet");
+        assert_eq!(id_in(&store, &key("Ctrl+Alt+V")), Some(PTT));
+        assert_eq!(now["ptt"].as_deref(), Some("Ctrl+Alt+V"), "push-to-talk's row shows its key");
     }
 
     /// The actions a window may name are the fixture's, and each is handled
@@ -810,12 +838,12 @@ mod tests {
         let d = Hotkeys::default();
         assert_eq!(
             fixture["hotkeyDefaults"],
-            serde_json::json!({ "prompt": d.prompt, "arrange": d.arrange, "park": d.park })
+            serde_json::json!({ "prompt": d.prompt, "arrange": d.arrange, "park": d.park, "ptt": d.ptt })
         );
         assert_eq!(super::id_for("prompt"), Some(PROMPT));
         assert_eq!(super::id_for("arrange"), Some(HOTKEY_ARRANGE));
         assert_eq!(super::id_for("park"), Some(PARK));
-        assert_eq!(super::id_for("ptt"), None, "push-to-talk's row, and set_hotkey for it, come later in PR 8");
+        assert_eq!(super::id_for("ptt"), Some(PTT));
     }
 
     /// This module's code, without its tests.
@@ -875,6 +903,23 @@ mod tests {
         let at = src.find("pub fn rebind(").unwrap();
         let body = &src[at..at + src[at..].find("\n}\n").unwrap()];
         assert!(body.contains("let _one = REBINDING.lock()"), "{body}");
+    }
+
+    /// What the app binds, reads and rebinds is the one list the handler
+    /// finds its keys in: each of the app's calls hands its pure half `BOUND`.
+    #[test]
+    fn the_app_s_calls_use_the_one_bound_list() {
+        let src = code(include_str!("hotkeys.rs"));
+        for (call, inner) in [
+            ("pub fn register(", "register_with(&Plugin(app), &BOUND, h);"),
+            ("pub fn id_of(", "id_in(&BOUND, shortcut)"),
+            ("pub fn bound_now(", "bound_in(&BOUND)"),
+            ("pub fn rebind(", "rebind_with(&Plugin(app), &BOUND, &h, action, accel,"),
+        ] {
+            let at = src.find(call).unwrap_or_else(|| panic!("{call}"));
+            let body = &src[at..at + src[at..].find("\n}\n").unwrap()];
+            assert!(body.contains(inner), "{body}");
+        }
     }
 
     /// The handler never rebinds or calls the plugin: it runs on the main

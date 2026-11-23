@@ -10,7 +10,7 @@ const WEARING: ModelInfo = {
   from: "folder", path: "C:\\data\\avatar\\fritz.vrm", found: true, bytes: 1, tooBig: false,
   wearing: "export", loadError: null, changed: false,
 };
-const HELD = { prompt: "Ctrl+Alt+F", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" };
+const HELD = { prompt: "Ctrl+Alt+F", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H", ptt: "Ctrl+Alt+V" };
 
 describe("the first run's steps", () => {
   it("are his brain, his look, his keys, then summoning him", () => {

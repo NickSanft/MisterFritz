@@ -15,7 +15,7 @@ const SETTINGS = {
   version: 1,
   brain: { url: "ws://127.0.0.1:8001/companion", clientId: "nick-pc", clientName: "NICK-PC" },
   avatar: { rect: null, scale: 1, parked: false, vrmPath: null, lookatCursor: true, clicks: true },
-  hotkeys: { prompt: "Ctrl+Alt+F", ptt: "Ctrl+Alt+Space", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" },
+  hotkeys: { prompt: "Ctrl+Alt+F", ptt: "Ctrl+Alt+V", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" },
   diagnostics: { foregroundLog: false },
   theme: fixture.themeDefaults,
 };
@@ -49,7 +49,7 @@ beforeEach(() => {
     avatar_model: () => MODEL,
     get_token_present: () => true,
     companion_status: () => fixture.companionStatusSamples.online,
-    hotkeys_bound: () => ({ prompt: "Ctrl+Alt+F", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" }),
+    hotkeys_bound: () => ({ prompt: "Ctrl+Alt+F", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H", ptt: "Ctrl+Alt+V" }),
     control_opening: () => null,
     mouse_hook_status: () => HOOK_OUT,
     "plugin:event|listen": (a) => {
@@ -149,7 +149,7 @@ describe("the control window", () => {
 
   it("names the key Windows holds, not the one set, and none when it holds none", async () => {
     answers.get_settings = () => ({ ...SETTINGS, hotkeys: { ...SETTINGS.hotkeys, arrange: "Ctrl+Alt+Nope" } });
-    answers.hotkeys_bound = () => ({ prompt: "Ctrl+Alt+F", arrange: "Ctrl+Alt+A", park: null });
+    answers.hotkeys_bound = () => ({ prompt: "Ctrl+Alt+F", arrange: "Ctrl+Alt+A", park: null, ptt: "Ctrl+Alt+V" });
     const view = render(() => <App />);
     await waitFor(() => expect(view.getByText(/Esc locks him there\. Or press Ctrl\+Alt\+A\.$/)).toBeInTheDocument());
     expect(view.queryByText(/Or press Ctrl\+Alt\+Nope/)).toBeNull();
@@ -164,7 +164,7 @@ describe("the control window", () => {
     const view = render(() => <App />);
     const capture = await waitFor(() => view.getByRole("button", { name: "Ask Fritz hotkey: Ctrl Alt F" }));
     const boundBefore = asked("hotkeys_bound").length;
-    answers.hotkeys_bound = () => ({ prompt: "Ctrl+Alt+K", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" });
+    answers.hotkeys_bound = () => ({ prompt: "Ctrl+Alt+K", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H", ptt: "Ctrl+Alt+V" });
     fireEvent.click(capture, { detail: 1 });
     press("k", { ctrlKey: true, altKey: true });
     await waitFor(() => expect(view.getByRole("button", { name: "Ask Fritz hotkey: Ctrl Alt K" })).toBeInTheDocument());
@@ -193,7 +193,7 @@ describe("the control window", () => {
   });
 
   it("names the prompt's key in Brain's Ask line, as Windows holds it", async () => {
-    answers.hotkeys_bound = () => ({ prompt: "Ctrl+Super+F", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" });
+    answers.hotkeys_bound = () => ({ prompt: "Ctrl+Super+F", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H", ptt: "Ctrl+Alt+V" });
     const view = render(() => <App />);
     await waitFor(() => expect(view.getByText(/Anywhere else, press Ctrl\+Win\+F\.$/)).toBeInTheDocument());
   });

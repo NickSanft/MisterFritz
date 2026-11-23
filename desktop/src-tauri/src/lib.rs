@@ -457,10 +457,11 @@ fn from_the_control(label: &str) -> Result<(), String> {
     }
 }
 
-/// Set one of Fritz's keys (`prompt`, `arrange` or `park`): checked, taken
-/// from Windows, saved, and only then is the old key let go. Refused with
-/// the reason, the old key still working. On a blocking worker: the plugin
-/// waits on the main thread.
+/// Set one of Fritz's keys (`prompt`, `arrange`, `park` or `ptt`): checked,
+/// taken from Windows, saved, and only then is the old key let go. Refused
+/// with the reason, the old key still working. Push-to-talk moved to a new
+/// key is let go too. On a blocking worker: the plugin waits on the main
+/// thread.
 #[tauri::command]
 async fn set_hotkey(
     app: AppHandle,
@@ -469,9 +470,17 @@ async fn set_hotkey(
     accelerator: String,
 ) -> Result<Settings, String> {
     from_the_control(webview.label())?;
-    tauri::async_runtime::spawn_blocking(move || hotkeys::rebind(&app, &action, &accelerator))
+    let ptt = action == "ptt";
+    let (after, moved) = tauri::async_runtime::spawn_blocking(move || hotkeys::rebind(&app, &action, &accelerator))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+    // Push-to-talk on a new key: the old one was let go of, so a release
+    // coming for it now is no key of ours, and push-to-talk is let go here
+    // (the microphone closes). Kept on the same key, it still lets go itself.
+    if ptt && moved {
+        audio_in::release();
+    }
+    Ok(after)
 }
 
 /// Each action's key as Windows holds it now, or null: a setting that fell
@@ -2098,6 +2107,24 @@ mod tests {
         assert!(handler.contains("} else if id == hotkeys::PTT {\n            push_to_talk(app, pressed);"), "{handler}");
         let ptt = handler.find("hotkeys::PTT").unwrap();
         assert!(!handler[..ptt].contains("if pressed"), "not only on a press");
+    }
+
+    /// Push-to-talk moved to a new key: its old key's release is no key of
+    /// ours, so it is let go here, once the rebind has succeeded. Refused, or
+    /// kept on the same key, the old key still lets go itself; whether it
+    /// moved is the rebind's own answer, under its lock
+    /// (`hotkeys::tests::a_rebind_says_whether_the_key_moved`).
+    #[test]
+    fn moving_push_to_talk_lets_go_of_it() {
+        let all = include_str!("lib.rs").replace("\r\n", "\n");
+        let cmd = &all[all.find("async fn set_hotkey(").unwrap()..];
+        let cmd = &cmd[..cmd.find("\n}\n").unwrap()];
+        let ptt = cmd.find("let ptt = action == \"ptt\";").expect("which action");
+        let rebind = cmd.find("let (after, moved) = ").expect("the rebind's answer");
+        let failed = cmd.find(".map_err(|e| e.to_string())??;").expect("a failed rebind returns first");
+        let release = cmd.find("if ptt && moved {\n        audio_in::release();\n    }").expect("push-to-talk let go");
+        assert!(ptt < rebind && rebind < failed && failed < release, "{cmd}");
+        assert_eq!(cmd.matches("audio_in::").count(), 1, "let go there alone: {cmd}");
     }
 
     /// Push-to-talk is let go when Fritz quits, so the microphone is never
