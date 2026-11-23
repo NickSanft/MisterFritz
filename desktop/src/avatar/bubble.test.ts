@@ -354,6 +354,16 @@ describe("the bubble's colours", () => {
     expect(rules).toMatch(/background:\s*var\(--surface-2\)/);
   });
 
+  it("give the muted sign the panel's own plate, a colour that passes on it, and no input", () => {
+    const rules = CSS.replace(/\/\*[\s\S]*?\*\//g, "");
+    const sign = rules.match(/\.bubble-muted,\s*\.muted-sign \{[^}]*\}/)?.[0] ?? "";
+    expect(sign).toMatch(/background:\s*var\(--surface-2\)/);
+    expect(sign).toMatch(/color:\s*var\(--text-mid\)/);
+    expect(sign).toMatch(/pointer-events:\s*none/);
+    expect(sign).toMatch(/display:\s*none/);
+    expect(rules).toMatch(/\.muted-sign \{[^}]*width:\s*26px[^}]*height:\s*26px/);
+  });
+
   it("are set as text only, never as markup", () => {
     const code = VIEW_TS.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
     expect(code).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);

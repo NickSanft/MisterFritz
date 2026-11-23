@@ -22,7 +22,7 @@ function mount(more: Partial<WizardProps> = {}) {
       ask: vi.fn(async () => true),
     },
     model: { model: null, openFolder: vi.fn(), reload: vi.fn() },
-    hotkeys: { keys: { ...HOTKEY_DEFAULTS }, bound: { ...HOTKEY_DEFAULTS }, set: vi.fn(async () => null) },
+    hotkeys: { keys: { ...HOTKEY_DEFAULTS }, bound: { ...HOTKEY_DEFAULTS }, muted: false, set: vi.fn(async () => null) },
     link: fixture.companionStatusSamples.online as LinkStatus,
     modelInfo: null,
     bound: { ...HOTKEY_DEFAULTS },

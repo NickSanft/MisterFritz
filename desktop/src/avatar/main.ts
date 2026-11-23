@@ -57,6 +57,7 @@ import {
 } from "./companionLink";
 import { BubbleClock, anchorAbove, charCount, plainText } from "./bubble";
 import { createBubble } from "./BubbleView";
+import { watchMuted } from "./muted";
 import { INITIAL, cancelFirst, pressOf, reduce, type TurnEvent, type TurnView } from "./state";
 import { HitPublisher, shapeNow, stamped } from "./hitShape";
 import { fetchPage, hitArgs, sendHitRects } from "./hitWire";
@@ -130,6 +131,8 @@ const companion = new CompanionClient();
 /** The turn the bubble shows, the bubble, and its clock (moved only by the
  * tick, so it waits while he is parked). */
 let turn: TurnView = INITIAL;
+/** Push-to-talk muted (`audio.muted`): the sign over his head. */
+let muted = false;
 const bubble = createBubble(document);
 const bubbleClock = new BubbleClock();
 let wasOnline = false;
@@ -283,7 +286,7 @@ function paintBubble(dt: number): void {
   const anchor = actor
     ? actor.headScreen(camera, view.width, view.height, anchorAbove(actor.crownAboveHead))
     : { x: view.width / 2, y: view.height * HEADROOM };
-  bubble.paint(turn, env, anchor, view);
+  bubble.paint(turn, env, anchor, view, muted);
 }
 
 const loop = new PacedLoop((dt) => {
@@ -433,6 +436,11 @@ async function main(): Promise<void> {
     theme = t;
     motionFactor = motion.factor;
     if (actor) dress(actor);
+  });
+  // Push-to-talk muted from the tray: the sign over his head, from the
+  // next tick.
+  await watchMuted((m) => {
+    muted = m;
   });
   // Where it is now: a cursor that hasn't moved since he opened sends
   // nothing, and an event before this page listened was lost.

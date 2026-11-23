@@ -409,6 +409,8 @@ pub enum Pressed {
     StartedAfterALostRelease,
     /// Couldn't start a thread to listen on.
     Failed(String),
+    /// Push-to-talk is muted (the tray's Mute push-to-talk): nothing opens.
+    Muted,
 }
 
 /// Push-to-talk held: since when, and the stop flag of its clip while that
@@ -422,14 +424,17 @@ struct Held {
 /// Whether push-to-talk is held, and its clip. A held level, as plan 14's
 /// build § 4.2 has it: a press while held changes nothing, so a clip ended
 /// at 30 seconds isn't started again until the key is let go and pressed.
+/// Muted, a press opens nothing; `muted` is only written under `held`'s
+/// lock, so no press can start once muting has let go of the last.
 pub(crate) struct Ears {
     held: Mutex<Option<Held>>,
     gen: AtomicU64,
+    muted: AtomicBool,
 }
 
 impl Ears {
     pub(crate) const fn new() -> Self {
-        Self { held: Mutex::new(None), gen: AtomicU64::new(0) }
+        Self { held: Mutex::new(None), gen: AtomicU64::new(0), muted: AtomicBool::new(false) }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<Held>> {
@@ -451,6 +456,9 @@ impl Ears {
         let gen = self.gen.fetch_add(1, Ordering::SeqCst) + 1;
         let after_lost = {
             let mut held = self.lock();
+            if self.muted.load(Ordering::SeqCst) {
+                return Pressed::Muted;
+            }
             let lost = match held.as_ref() {
                 Some(h) if h.stop.is_some() || now.duration_since(h.at) < STALE => return Pressed::AlreadyHeld,
                 Some(_) => true,
@@ -492,7 +500,11 @@ impl Ears {
     /// Let go: its clip, if still being gathered, ends. `false` if it wasn't
     /// held.
     pub(crate) fn release(&self) -> bool {
-        match self.lock().take() {
+        Self::let_go(self.lock().take())
+    }
+
+    fn let_go(held: Option<Held>) -> bool {
+        match held {
             Some(h) => {
                 if let Some(stop) = h.stop {
                     stop.store(true, Ordering::SeqCst);
@@ -501,6 +513,23 @@ impl Ears {
             }
             None => false,
         }
+    }
+
+    /// Muted or unmuted. Muting lets go of push-to-talk if it is held (its
+    /// clip ends, and goes on as a release's would); `true` if it was.
+    pub(crate) fn set_muted(&self, on: bool) -> bool {
+        let mut held = self.lock();
+        self.muted.store(on, Ordering::SeqCst);
+        if on {
+            Self::let_go(held.take())
+        } else {
+            false
+        }
+    }
+
+    /// Whether push-to-talk is muted.
+    pub(crate) fn muted(&self) -> bool {
+        self.muted.load(Ordering::SeqCst)
     }
 
     /// Whether push-to-talk is held.
@@ -541,6 +570,17 @@ pub(crate) fn started_then<S>(
 /// Push-to-talk let go.
 pub fn release() -> bool {
     EARS.release()
+}
+
+/// Push-to-talk muted (a press opens nothing, and one held is let go) or
+/// unmuted; `true` if muting let go of a held one.
+pub fn set_muted(on: bool) -> bool {
+    EARS.set_muted(on)
+}
+
+/// Whether push-to-talk is muted.
+pub fn muted() -> bool {
+    EARS.muted()
 }
 
 /// The microphone, through WASAPI.
@@ -1227,6 +1267,42 @@ mod tests {
         assert_eq!(clip.ended, Ended::Released);
         assert_eq!(clip.pcm, vec![1, 0, 2, 0]);
         assert!(!e.release(), "let go twice is once");
+    }
+
+    /// Muting lets go of a held press, its clip handed on as a release's
+    /// would be; muted, a press opens nothing and nothing comes of it;
+    /// unmuted, a press listens again.
+    #[test]
+    fn muted_ears_let_go_of_a_held_press_and_open_nothing() {
+        let e = ears();
+        let (feed, fed) = mpsc::channel();
+        let (there_tx, there) = mpsc::channel();
+        let (done, clips) = done_channel();
+        feed.send(vec![3, 0, 4, 0]).unwrap();
+        assert_eq!(e.press(Instant::now(), move || Ok(Fed { fed, there: Some(there_tx) }), |_| {}, done), Pressed::Started);
+        there.recv_timeout(LONG).unwrap();
+        assert!(e.set_muted(true), "it was held");
+        assert!(e.muted() && !e.held());
+        let clip = clips.recv_timeout(LONG).unwrap().unwrap();
+        assert_eq!((clip.ended, clip.pcm), (Ended::Released, vec![3, 0, 4, 0]));
+        let opened = Arc::new(AtomicBool::new(false));
+        let o = opened.clone();
+        let (muted_done, muted_clips) = done_channel();
+        let open = move || {
+            o.store(true, Ordering::SeqCst);
+            Err::<Fed, _>("never".into())
+        };
+        assert_eq!(e.press(Instant::now(), open, |_| {}, muted_done), Pressed::Muted);
+        assert!(!e.held() && !e.release(), "nothing is held");
+        assert!(muted_clips.recv_timeout(Duration::from_millis(100)).is_err(), "nothing comes of it");
+        assert!(!opened.load(Ordering::SeqCst), "nothing opened");
+        assert!(!e.set_muted(true), "muted again, with nothing held");
+        assert!(!e.set_muted(false) && !e.muted());
+        let (_feed, fed) = mpsc::channel::<Vec<u8>>();
+        let (done, clips) = done_channel();
+        assert_eq!(e.press(Instant::now(), move || Ok(Fed::new(fed)), |_| {}, done), Pressed::Started);
+        assert!(e.release());
+        clips.recv_timeout(LONG).unwrap().unwrap();
     }
 
     #[test]

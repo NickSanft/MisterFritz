@@ -150,22 +150,31 @@ export function winNamed(text: string): string {
   return text.replace(/\b(?:Super|Cmd|Command)(?=\+)/gi, "Win");
 }
 
+/** Push-to-talk's row while it is muted: its key is let go of. */
+export const PTT_MUTED_LINE =
+  "Muted from the tray: its key is left to other apps until you unmute it there (Mute push-to-talk).";
+
 /**
  * A hotkey row's line: the shell's refusal of the key just tried, as an
  * alert, followed by whether the key set is the one working; else that
- * alone, if it isn't (the default it fell back to at start, or none at
- * all); else what the key does. `active` is the key the shell holds for
- * it, null for none, undefined until it has said.
+ * alone, if it isn't (the default it fell back to, or none at all); else
+ * what the key does. `active` is the key the shell holds for it, null for
+ * none, undefined until it has said. Push-to-talk's, while `muted`, says
+ * so instead (the shell's refusal alone, as the alert, if a key was tried).
  */
 export function hotkeyLine(
   action: HotkeyAction,
   setting: string,
   active: string | null | undefined,
   refusal: string | null,
+  muted = false,
 ): HotkeyLine {
+  if (action === "ptt" && muted) {
+    return refusal ? { text: winNamed(refusal), alert: true } : { text: PTT_MUTED_LINE, alert: false };
+  }
   const status =
     active === null
-      ? `Not working: he couldn't have ${setting} when he started (another app may hold it). Pick another.`
+      ? `Not working: he couldn't have ${setting} (another app may hold it). Pick another.`
       : active !== undefined && active.trim() !== setting.trim()
         ? `Working on ${active}: ${setting} couldn't be used. Pick another, or press Default.`
         : null;

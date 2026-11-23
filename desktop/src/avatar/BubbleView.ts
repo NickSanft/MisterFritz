@@ -12,8 +12,16 @@
  *   window's width changes), so a held bubble costs the page nothing.
  * - It takes no input: `pointer-events: none`, nothing focusable, so Arrange
  *   drags through it and it never steals a click from the desktop.
+ * - While push-to-talk is muted (the tray's Mute push-to-talk), the muted
+ *   sign shows over his head the whole time: in the bubble's corner while
+ *   it shows, else on its own where the bubble's tail would point.
+ *
+ * Lifted in part from DivoraVoiceMod (MIT, Copyright (c) 2026 Divora
+ * Contributors), src/components/Sigil.tsx at 62ed6a5: the `muted` sigil's
+ * marks, in `mutedSigil`. See desktop/LICENSES/DivoraVoiceMod.txt. The rest
+ * is Fritz's own.
  */
-import { layout, plainText, type Envelope } from "./bubble";
+import { EDGE, GAP, layout, plainText, type Envelope } from "./bubble";
 import type { TurnView } from "./state";
 
 /** What the bubble shows, worked out from the turn (pure, for the tests). */
@@ -51,9 +59,56 @@ export function bubbleText(v: TurnView): BubbleText {
 
 export interface Bubble {
   readonly element: HTMLElement;
+  /** The muted sign shown on its own, while no bubble shows. */
+  readonly sign: HTMLElement;
   /** Draw `v` as `env` says, over his head at `anchor`, in a window `view`
-   * big (CSS pixels). */
-  paint(v: TurnView, env: Envelope, anchor: { x: number; y: number }, view: { width: number; height: number }): void;
+   * big (CSS pixels), with the muted sign while `muted`. */
+  paint(
+    v: TurnView,
+    env: Envelope,
+    anchor: { x: number; y: number },
+    view: { width: number; height: number },
+    muted?: boolean,
+  ): void;
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/** DivoraVoice's `muted` sigil (src/divora/sigils/Sigil.tsx), a circle
+ * struck through, built as DOM: his page has no Solid. Its marks are the
+ * Sigil's own (mutedSign.test.tsx). */
+export function mutedSigil(doc: Document, size: number): SVGSVGElement {
+  const make = (tag: string, attrs: Record<string, string>): SVGElement => {
+    const e = doc.createElementNS(SVG_NS, tag) as SVGElement;
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+    return e;
+  };
+  const svg = make("svg", {
+    width: String(size),
+    height: String(size),
+    viewBox: "0 0 24 24",
+    class: "sigil",
+    "aria-hidden": "true",
+  }) as SVGSVGElement;
+  const g = make("g", { fill: "none", stroke: "currentColor", "stroke-width": "1.5", "stroke-linecap": "round" });
+  g.appendChild(make("circle", { cx: "12", cy: "12", r: "7" }));
+  g.appendChild(make("path", { d: "M7 7 L17 17" }));
+  svg.appendChild(g);
+  return svg;
+}
+
+/** The sign on its own: its plate's side (CSS pixels; bubble.css's
+ * `.muted-sign`). */
+export const SIGN_SIZE = 26;
+
+/** Where the sign stands on its own: centred over `anchor`, its bottom
+ * `GAP` above it, where the bubble's tail would end, and `EDGE` inside the
+ * window, as the bubble keeps (pure, for the tests). */
+export function signAt(anchor: { x: number; y: number }, view: { width: number; height: number }): { left: number; top: number } {
+  const ax = Number.isFinite(anchor.x) ? anchor.x : view.width / 2;
+  const ay = Number.isFinite(anchor.y) ? anchor.y : 0;
+  const within = (v: number, room: number) => Math.min(Math.max(v, EDGE), Math.max(EDGE, room - SIGN_SIZE - EDGE));
+  return { left: within(ax - SIGN_SIZE / 2, view.width), top: within(ay - GAP - SIGN_SIZE, view.height) };
 }
 
 const round = (v: number, places = 0): string => {
@@ -79,6 +134,10 @@ export function createBubble(doc: Document, parent: HTMLElement = doc.body): Bub
   el("span", "orb warn", apology);
   const apologyText = el("span", "bubble-apology-text", apology);
   const note = el("div", "bubble-note", content);
+  const corner = el("div", "bubble-muted", root);
+  corner.appendChild(mutedSigil(doc, 14));
+  const sign = el("div", "muted-sign", parent);
+  sign.appendChild(mutedSigil(doc, 16));
 
   const written = new Map<string, string>();
   const style = (e: HTMLElement, name: string, prop: string, value: string): void => {
@@ -105,14 +164,25 @@ export function createBubble(doc: Document, parent: HTMLElement = doc.body): Bub
   let width = 0;
   let clipFor = "";
   style(root, "root", "display", "none");
+  style(corner, "corner", "display", "none");
+  style(sign, "sign", "display", "none");
 
   return {
     element: root,
-    paint(v, env, anchor, view) {
+    sign,
+    paint(v, env, anchor, view, muted = false) {
       if (!env.visible) {
         style(root, "root", "display", "none");
+        style(sign, "sign", "display", muted ? "flex" : "none");
+        if (muted) {
+          const at = signAt(anchor, view);
+          style(sign, "sign", "left", `${round(at.left)}px`);
+          style(sign, "sign", "top", `${round(at.top)}px`);
+        }
         return;
       }
+      style(sign, "sign", "display", "none");
+      style(corner, "corner", "display", muted ? "flex" : "none");
       style(root, "root", "display", "flex");
       const fresh = v.revision !== revision;
       if (fresh) {

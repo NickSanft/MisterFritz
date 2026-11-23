@@ -78,6 +78,8 @@ export interface ControlSettings {
   brain: Brain;
   avatar: { lookatCursor: boolean; clicks: boolean; vrmPath: string | null };
   hotkeys: Record<HotkeyAction, string>;
+  /** Push-to-talk muted, from the tray's Mute push-to-talk only. */
+  audio: { muted: boolean };
   diagnostics: { foregroundLog: boolean };
   theme: Theme;
 }
@@ -106,18 +108,21 @@ export function parseSettings(v: unknown): ControlSettings | null {
   const o = obj(v);
   const avatar = obj(o?.avatar);
   const hotkeys = obj(o?.hotkeys);
+  const audio = obj(o?.audio);
   const diagnostics = obj(o?.diagnostics);
   const theme = parseTheme(o?.theme);
   const brain = parseBrain(o?.brain);
-  if (!brain || !avatar || !hotkeys || !diagnostics || !theme) return null;
+  if (!brain || !avatar || !hotkeys || !audio || !diagnostics || !theme) return null;
   if (typeof avatar.lookatCursor !== "boolean" || typeof avatar.clicks !== "boolean") return null;
   if (avatar.vrmPath !== null && typeof avatar.vrmPath !== "string") return null;
   if (!HOTKEY_ACTIONS.every((a) => typeof hotkeys[a] === "string")) return null;
+  if (typeof audio.muted !== "boolean") return null;
   if (typeof diagnostics.foregroundLog !== "boolean") return null;
   return {
     brain,
     avatar: { lookatCursor: avatar.lookatCursor, clicks: avatar.clicks, vrmPath: avatar.vrmPath as string | null },
     hotkeys: Object.fromEntries(HOTKEY_ACTIONS.map((a) => [a, hotkeys[a] as string])) as Record<HotkeyAction, string>,
+    audio: { muted: audio.muted },
     diagnostics: { foregroundLog: diagnostics.foregroundLog },
     theme,
   };

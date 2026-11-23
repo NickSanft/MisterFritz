@@ -104,6 +104,39 @@
   box-shadow: 0 0 6px var(--warning);
 }
 
+/* Push-to-talk muted (the tray's Mute push-to-talk): DivoraVoice's muted
+   sigil on a round plate of the panel's own, the whole time. In the
+   bubble's top corner while it shows (within the EDGE it keeps from the
+   window's edge); on its own, where its tail would point, while it doesn't
+   (the page sets its place). Static, like the bubble. */
+.bubble-muted,
+.muted-sign {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  border-radius: 50%;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  color: var(--text-mid);
+  pointer-events: none;
+  user-select: none;
+}
+.bubble-muted {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  width: 20px;
+  height: 20px;
+}
+.muted-sign {
+  position: fixed;
+  z-index: 1;
+  width: 26px;
+  height: 26px;
+  box-shadow: var(--shadow-2);
+}
+
 /* Interrupted, or pictures it can't show yet. */
 .bubble-note {
   display: none;

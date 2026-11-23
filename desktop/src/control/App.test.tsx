@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fireEvent, render, waitFor } from "@solidjs/testing-library";
 import fixture from "../avatar/wire.fixture.json";
 import { App } from "./App";
-import { HOTKEY_DOES } from "./view";
+import { HOTKEY_DOES, PTT_MUTED_LINE } from "./view";
 
 type Args = Record<string, unknown>;
 
@@ -16,6 +16,7 @@ const SETTINGS = {
   brain: { url: "ws://127.0.0.1:8001/companion", clientId: "nick-pc", clientName: "NICK-PC" },
   avatar: { rect: null, scale: 1, parked: false, vrmPath: null, lookatCursor: true, clicks: true },
   hotkeys: { prompt: "Ctrl+Alt+F", ptt: "Ctrl+Alt+V", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" },
+  audio: { inputDevice: null, outputDevice: null, muted: false, ttsVoice: "bm_george" },
   diagnostics: { foregroundLog: false },
   theme: fixture.themeDefaults,
 };
@@ -190,6 +191,24 @@ describe("the control window", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(document.documentElement.dataset.mood).toBe("midnight");
     expect(view.getByRole("alert")).toHaveTextContent(why);
+  });
+
+  it("asks again what is held when push-to-talk is muted or unmuted, and only then", async () => {
+    const view = render(() => <App />);
+    await waitFor(() => view.getByRole("button", { name: "Talk to him hotkey: Ctrl Alt V" }));
+    const before = asked("hotkeys_bound").length;
+    answers.hotkeys_bound = () => ({ prompt: "Ctrl+Alt+F", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H", ptt: null });
+    emit("settings:changed", { ...SETTINGS, audio: { ...SETTINGS.audio, muted: true } });
+    await waitFor(() => expect(asked("hotkeys_bound").length).toBe(before + 1));
+    await waitFor(() => expect(view.getByText(PTT_MUTED_LINE)).toBeInTheDocument());
+    expect(view.queryByText(/^Not working/)).toBeNull();
+    emit("settings:changed", { ...SETTINGS, audio: { ...SETTINGS.audio, muted: true }, theme: { ...SETTINGS.theme, mood: "midnight" } });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(asked("hotkeys_bound").length, "still muted: nothing to ask").toBe(before + 1);
+    answers.hotkeys_bound = () => ({ prompt: "Ctrl+Alt+F", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H", ptt: "Ctrl+Alt+V" });
+    emit("settings:changed", SETTINGS);
+    await waitFor(() => expect(asked("hotkeys_bound").length).toBe(before + 2));
+    await waitFor(() => expect(view.getByText(HOTKEY_DOES.ptt)).toBeInTheDocument());
   });
 
   it("names the prompt's key in Brain's Ask line, as Windows holds it", async () => {

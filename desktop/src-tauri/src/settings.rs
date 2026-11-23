@@ -71,9 +71,10 @@ pub fn migrate(s: &mut Settings) -> Vec<String> {
 }
 
 /// Paths a window may not set: the shell owns where Fritz stands and whether
-/// he is hidden (it saves them as they change), and the version is the
-/// file's, not a preference.
-const READ_ONLY: [&str; 3] = ["version", "avatar.rect", "avatar.parked"];
+/// he is hidden (it saves them as they change), and whether push-to-talk is
+/// muted (the tray's Mute, which lets go of its key, or takes it again); the
+/// version is the file's, not a preference.
+const READ_ONLY: [&str; 4] = ["version", "avatar.rect", "avatar.parked", "audio.muted"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -1202,7 +1203,7 @@ mod tests {
         DELAY_NEXT_WRITE_MS.store(300, Ordering::SeqCst);
         let slow = thread::spawn(|| set("avatar.lookatCursor", json!(false), |_| {}).unwrap());
         thread::sleep(Duration::from_millis(60));
-        let other = thread::spawn(|| set("audio.muted", json!(true), |_| {}).unwrap());
+        let other = thread::spawn(|| set("audio.ttsVoice", json!("af_heart"), |_| {}).unwrap());
         let saver = thread::spawn(|| {
             update(|s| s.avatar.rect = Some(SavedRect { x: 1, y: 2, width: 3, height: 4 }))
         });
@@ -1210,7 +1211,7 @@ mod tests {
             assert!(t);
         }
         for s in [get(), read(&d.join(FILE)).0] {
-            assert!(!s.avatar.lookat_cursor && s.audio.muted, "{s:?}");
+            assert!(!s.avatar.lookat_cursor && s.audio.tts_voice == "af_heart", "{s:?}");
             assert_eq!(s.avatar.rect, Some(SavedRect { x: 1, y: 2, width: 3, height: 4 }));
         }
     }
@@ -1335,6 +1336,8 @@ mod tests {
             ("avatar.rect", Value::Null, "kept by Fritz"),
             ("avatar.rect.x", json!(5), "kept by Fritz"),
             ("avatar.parked", json!(true), "kept by Fritz"),
+            ("audio.muted", json!(true), "kept by Fritz"),
+            ("audio", serde_json::to_value(Audio::default()).unwrap(), "Fritz keeps himself"),
             ("avatar.nonsense", json!(1), "no setting"),
             ("avatar.lookatCursor", json!("yes"), "avatar.lookatCursor"),
             ("avatar.clicks", json!("yes"), "avatar.clicks"),

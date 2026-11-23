@@ -1,5 +1,7 @@
-//! The tray: Ask Fritz…, Show / Hide Fritz, Arrange / Lock, Appearance ▸,
-//! Settings, Fritz's logs, Quit. The menu is rebuilt when Arrange starts or ends (the
+//! The tray: Ask Fritz…, Show / Hide Fritz, Arrange / Lock, Mute
+//! push-to-talk, Appearance ▸, Settings, Fritz's logs, Quit. Mute
+//! push-to-talk is a check item built once and held, as Ask Fritz… is; its
+//! tick follows `audio.muted`. The menu is rebuilt when Arrange starts or ends (the
 //! machine's `RefreshTray`) and when Fritz is parked or shown, since its
 //! items follow both. Show and Hide are separate ids, so a click does what
 //! the label it showed said, whatever the state is by the time it lands.
@@ -41,6 +43,8 @@ const ASK_LABEL: &str = "Ask Fritz…";
 const SHOW: &str = "show";
 const HIDE: &str = "hide";
 const ARRANGE: &str = "arrange";
+const MUTE: &str = "mute";
+const MUTE_LABEL: &str = "Mute push-to-talk";
 const SETTINGS: &str = "settings";
 const LOGS: &str = "logs";
 const QUIT: &str = "quit";
@@ -138,6 +142,19 @@ fn build_ask(app: &AppHandle) -> tauri::Result<Ask> {
     })
 }
 
+/// Mute push-to-talk, built once and held by every rebuilt menu.
+struct Mute {
+    item: CheckMenuItem<Wry>,
+}
+
+fn build_mute(app: &AppHandle) -> tauri::Result<Mute> {
+    Ok(Mute {
+        item: CheckMenuItemBuilder::with_id(MUTE, MUTE_LABEL)
+            .checked(settings::get().audio.muted)
+            .build(app)?,
+    })
+}
+
 /// The Appearance submenu, built once, and its items by id.
 struct Look {
     submenu: Submenu<Wry>,
@@ -182,6 +199,13 @@ pub fn retick(app: &AppHandle) {
         .map(|(id, _)| *id)
         .collect();
     tracing::info!(?ticked, "the tray's Appearance ticks follow the theme");
+    if let Some(mute) = app.try_state::<Mute>() {
+        let muted = settings::get().audio.muted;
+        if let Err(e) = mute.item.set_checked(muted) {
+            tracing::warn!(error = %e, "couldn't tick the tray's Mute push-to-talk");
+        }
+        tracing::info!(muted, "the tray's Mute push-to-talk follows the setting");
+    }
 }
 
 /// The state-dependent items: (id, label) for Show / Hide, and for Arrange /
@@ -224,6 +248,10 @@ fn menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     if let Some((id, label)) = arrange {
         m = m.text(id, label);
     }
+    // The held Mute push-to-talk, never built here.
+    if let Some(mute) = app.try_state::<Mute>() {
+        m = m.item(&mute.item);
+    }
     m = m.separator();
     // The one Appearance submenu: a menu dropped for the next only detaches
     // it (muda removes a child submenu before destroying its parent).
@@ -239,6 +267,7 @@ fn menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
     app.manage(build_ask(app)?);
+    app.manage(build_mute(app)?);
     app.manage(build_look(app)?);
     let held = menu(app)?;
     HMENU.store(held.hpopupmenu().unwrap_or(0), Ordering::SeqCst);
@@ -332,6 +361,13 @@ fn on_menu_item(app: &AppHandle, id: &str) {
         TRAY_LOCK_ID => {
             let _ = overlay_windows::set_mode(app, ModeRequest::Locked);
         }
+        // The other of what its tick showed, which is the setting; the tick
+        // is put back where the setting says once it has changed. Nothing
+        // else in the menu follows it: no rebuild.
+        MUTE => {
+            crate::set_muted(app, !settings::get().audio.muted);
+            return;
+        }
         SETTINGS => crate::show_control(app),
         LOGS => {
             let _ = std::process::Command::new("explorer")
@@ -358,7 +394,7 @@ fn on_menu_item(app: &AppHandle, id: &str) {
 mod tests {
     use super::{
         appearance, appearance_change, follows, items, ACCENTS, ARRANGE, ASK, ASK_LABEL, HIDE, LIGHT, LOGS,
-        MOODS, MOTIONS, QUIT, SETTINGS, SHOW, TRAY_ID,
+        MOODS, MOTIONS, MUTE, MUTE_LABEL, QUIT, SETTINGS, SHOW, TRAY_ID,
     };
     use crate::overlay_machine::{TRAY_LOCK_ID, TRAY_LOCK_LABEL};
     use crate::settings::{self, Theme};
@@ -489,7 +525,7 @@ mod tests {
     /// another item, or another's for one of them.
     #[test]
     fn every_menu_id_is_unique() {
-        let mut ids: Vec<&str> = vec![ASK, SHOW, HIDE, ARRANGE, TRAY_LOCK_ID, SETTINGS, LOGS, QUIT, TRAY_ID];
+        let mut ids: Vec<&str> = vec![ASK, SHOW, HIDE, ARRANGE, TRAY_LOCK_ID, MUTE, SETTINGS, LOGS, QUIT, TRAY_ID];
         ids.extend(appearance(&Theme::default()).iter().flatten().map(|i| i.id));
         let n = ids.len();
         ids.sort_unstable();
@@ -571,6 +607,42 @@ mod tests {
         for other in [SHOW, HIDE, ARRANGE, TRAY_LOCK_ID, SETTINGS, LOGS, QUIT, LIGHT.0, MOODS[0].1] {
             assert!(super::closes_wait(other), "{other}");
         }
+    }
+
+    /// Mute push-to-talk is built once, at the tray's build, ticked as the
+    /// setting stands, and held by every menu after Show / Hide and Arrange;
+    /// retick moves its tick to the setting.
+    #[test]
+    fn mute_is_built_once_and_held_after_show_and_arrange() {
+        let src = include_str!("tray.rs").replace("\r\n", "\n");
+        let code = &src[..src.find("#[cfg(test)]").unwrap()];
+        let body = |sig: &str| {
+            let at = code.find(sig).unwrap_or_else(|| panic!("no {sig}"));
+            &code[at..at + code[at..].find("\n}\n").unwrap()]
+        };
+        let built = "CheckMenuItemBuilder::with_id(MUTE, MUTE_LABEL)\n            .checked(settings::get().audio.muted)";
+        assert_eq!(code.matches("CheckMenuItemBuilder::with_id(MUTE").count(), 1);
+        assert!(body("fn build_mute(").contains(built));
+        assert_eq!(code.matches("build_mute(").count(), 2, "its definition, and the one call, in build");
+        let build = body("pub fn build(");
+        assert!(build.find("app.manage(build_mute(app)?);").unwrap() < build.find("let held = menu(app)?;").unwrap());
+        let menu = body("fn menu(");
+        let held = menu.find("m = m.item(&mute.item);").expect("held, appended");
+        assert!(held > menu.find("m = m.text(id, label);").unwrap(), "after Arrange");
+        assert!(held < menu.find("m = m.separator();").unwrap(), "before Appearance");
+        assert!(body("pub fn retick(").contains("mute.item.set_checked(muted)"));
+        assert_eq!(MUTE_LABEL, "Mute push-to-talk");
+    }
+
+    /// A click on it sets the other of what the setting says, and rebuilds
+    /// nothing; it closes a waiting prompt as any choice but Ask does.
+    #[test]
+    fn mute_sets_the_other_and_never_rebuilds() {
+        let src = include_str!("tray.rs").replace("\r\n", "\n");
+        let at = src.find("fn on_menu_item(").unwrap();
+        let f = &src[at..at + src[at..].find("\n}\n").unwrap()];
+        assert!(f.contains("        MUTE => {\n            crate::set_muted(app, !settings::get().audio.muted);\n            return;\n        }"), "{f}");
+        assert!(super::closes_wait(MUTE));
     }
 
     #[test]

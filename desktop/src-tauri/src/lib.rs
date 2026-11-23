@@ -223,6 +223,12 @@ fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutEvent) {
 /// `audio-in`), and his page is told why when it doesn't; a debug build
 /// given `FRITZ_SAVE_CLIPS` saves each clip there instead, for a live check.
 fn push_to_talk(app: &AppHandle, pressed: bool) {
+    // Muted, its key is let go of: a press still coming for it opens
+    // nothing, and says nothing (his sign over his head says he's muted).
+    if pressed && audio_in::muted() {
+        tracing::debug!("push-to-talk: pressed while muted; nothing opens");
+        return;
+    }
     let save_to = audio_in::save_clips_dir(cfg!(debug_assertions), std::env::var_os(audio_in::SAVE_CLIPS_ENV));
     let heard = if pressed { ptt_heard(app) } else { Ok(()) };
     let device = settings::get().audio.input_device;
@@ -258,7 +264,37 @@ fn push_to_talk(app: &AppHandle, pressed: bool) {
             tracing::warn!("push-to-talk: pressed, though it was never let go; listening anew");
         }
         audio_in::Pressed::Failed(e) => tracing::warn!("push-to-talk: {e}"),
+        audio_in::Pressed::Muted => tracing::debug!("push-to-talk: muted as it was pressed; nothing opens"),
     }
+}
+
+/// One mute or unmute at a time, so the ears, the setting and the key end
+/// as the last one asked.
+static MUTING: Mutex<()> = Mutex::new(());
+
+/// Mute push-to-talk, or unmute it (the tray's Mute push-to-talk). His ears
+/// are told first (muting lets go of a held press, and a press opens
+/// nothing from then on), then it is saved, then its key let go of, so
+/// other apps get the chord, or taken from Windows again; only then is
+/// every window told, so one that asks which keys are held hears it as it
+/// now is. On a worker: the plugin waits on the main thread, where the
+/// tray's click arrives.
+pub(crate) fn set_muted(app: &AppHandle, on: bool) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _one = MUTING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if audio_in::set_muted(on) {
+            tracing::info!("push-to-talk muted while held: let go");
+        }
+        let (_, after) = settings::update(|s| s.audio.muted = on);
+        let key = hotkeys::mute(&app, on);
+        tracing::info!(muted = on, key = key.as_deref().unwrap_or("none"), "push-to-talk's mute");
+        if let Err(e) = app.emit(SETTINGS_EVENT, &after) {
+            tracing::warn!(error = %e, "couldn't tell the windows push-to-talk was muted or unmuted");
+        }
+        let h = app.clone();
+        let _ = app.run_on_main_thread(move || tray::retick(&h));
+    });
 }
 
 /// Whether a clip would be heard now (`companion::ptt_refusal`). The page's
@@ -1294,10 +1330,13 @@ pub fn run() {
             if s.avatar.parked {
                 overlay_windows::set_parked(&handle, true);
             }
+            // Muted at the last quit, muted still: told before any key is
+            // taken, so no press can open the microphone first.
+            audio_in::set_muted(s.audio.muted);
             tray::build(&handle)?;
             // His menu is the tray's, shown on its window.
             popup::adopt(&handle);
-            hotkeys::register(&handle, &s.hotkeys);
+            hotkeys::register(&handle, &s.hotkeys, s.audio.muted);
             if let Some(path) = foreground_log_path(&s) {
                 foreground_log::start(handle.clone(), path);
             } else {
@@ -2125,6 +2164,50 @@ mod tests {
         let release = cmd.find("if ptt && moved {\n        audio_in::release();\n    }").expect("push-to-talk let go");
         assert!(ptt < rebind && rebind < failed && failed < release, "{cmd}");
         assert_eq!(cmd.matches("audio_in::").count(), 1, "let go there alone: {cmd}");
+    }
+
+    /// Mute push-to-talk, in its order, on a worker (the plugin waits on the
+    /// main thread, where the tray's click comes), one at a time: his ears
+    /// first, so nothing opens from then on and a held press is let go;
+    /// then the setting; then the key; then the windows, told once the key
+    /// is as it will be; then the tray's tick. Only set_muted mutes.
+    #[test]
+    fn muting_tells_his_ears_first_and_the_windows_last() {
+        let all = include_str!("lib.rs").replace("\r\n", "\n");
+        let code = &all[..all.find("#[cfg(test)]").unwrap()];
+        let f = &code[code.find("pub(crate) fn set_muted(").unwrap()..];
+        let f = &f[..f.find("\n}\n").unwrap()];
+        let steps = [
+            "tauri::async_runtime::spawn_blocking(move || {",
+            "let _one = MUTING.lock()",
+            "if audio_in::set_muted(on) {",
+            "let (_, after) = settings::update(|s| s.audio.muted = on);",
+            "let key = hotkeys::mute(&app, on);",
+            "app.emit(SETTINGS_EVENT, &after)",
+            "tray::retick(&h)",
+        ];
+        let at: Vec<usize> = steps.iter().map(|s| f.find(s).unwrap_or_else(|| panic!("{s}: {f}"))).collect();
+        assert!(at.windows(2).all(|w| w[0] < w[1]), "{f}");
+        for (name, src) in [("lib.rs", code), ("tray.rs", include_str!("tray.rs")), ("hotkeys.rs", include_str!("hotkeys.rs"))] {
+            let src = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+            let mutes = src.matches("hotkeys::mute(").count() + src.matches("audio_in::set_muted(").count();
+            let expected = if name == "lib.rs" { 3 } else { 0 };
+            assert_eq!(mutes, expected, "{name}: set_muted's two, and the start's ears");
+        }
+        let start = &code[code.find("audio_in::set_muted(s.audio.muted);").expect("his ears told at start")..];
+        assert!(start.find("hotkeys::register(&handle, &s.hotkeys, s.audio.muted);").is_some(), "before the keys");
+    }
+
+    /// A press while muted opens nothing and says nothing: it returns before
+    /// the brain is asked, or anything is told.
+    #[test]
+    fn a_press_while_muted_opens_nothing() {
+        let all = include_str!("lib.rs").replace("\r\n", "\n");
+        let f = &all[all.find("fn push_to_talk(").unwrap()..];
+        let f = &f[..f.find("\n}\n").unwrap()];
+        let guard = f.find("if pressed && audio_in::muted() {").expect("the guard");
+        assert!(f[guard..].starts_with("if pressed && audio_in::muted() {\n        tracing::debug!(\"push-to-talk: pressed while muted; nothing opens\");\n        return;\n    }"));
+        assert!(guard < f.find("ptt_heard(app)").unwrap() && guard < f.find("audio_in::on_edge(").unwrap());
     }
 
     /// Push-to-talk is let go when Fritz quits, so the microphone is never

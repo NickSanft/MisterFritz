@@ -3,7 +3,7 @@ import { createSignal } from "solid-js";
 import { fireEvent, render } from "@solidjs/testing-library";
 import fixture from "../../avatar/wire.fixture.json";
 import { HOTKEY_DEFAULTS, type HotkeyAction, type HotkeysBound } from "../api";
-import { HOTKEY_DOES } from "../view";
+import { HOTKEY_DOES, PTT_MUTED_LINE } from "../view";
 import { Hotkeys, HOTKEY_TITLES, type HotkeysProps } from "./Hotkeys";
 
 const DEFAULTS = { ...HOTKEY_DEFAULTS };
@@ -14,13 +14,14 @@ const BOUND: HotkeysBound = { ...HOTKEY_DEFAULTS };
 function mount(more: Partial<HotkeysProps> = {}, keys: Record<HotkeyAction, string> | null = DEFAULTS) {
   const [k, setKeys] = createSignal(keys);
   const [b, setBound] = createSignal<HotkeysBound | null>(more.bound === undefined ? BOUND : more.bound);
+  const [m, setMuted] = createSignal(more.muted ?? false);
   const set = vi.fn(more.set ?? (async (_a: HotkeyAction, _k: string): Promise<string | null> => null));
-  const view = render(() => <Hotkeys keys={k()} bound={b()} set={set} />);
+  const view = render(() => <Hotkeys keys={k()} bound={b()} muted={m()} set={set} />);
   const capture = (action: HotkeyAction) =>
     view.getByRole("button", { name: new RegExp(`^${HOTKEY_TITLES[action]} hotkey:`) });
   const reset = (action: HotkeyAction) =>
     view.getByRole("button", { name: `${HOTKEY_TITLES[action]}: Default (${HOTKEY_DEFAULTS[action]})` }) as HTMLButtonElement;
-  return { view, set, setKeys, setBound, capture, reset };
+  return { view, set, setKeys, setBound, setMuted, capture, reset };
 }
 
 /** A key pressed anywhere in the window, as the capture listens for it. */
@@ -207,9 +208,26 @@ describe("Settings › Hotkeys", () => {
     expect(reset("prompt").disabled).toBe(true);
   });
 
+  it("says push-to-talk is muted on its row, and the shell's refusal of a key tried there", async () => {
+    const why = "Push-to-talk is muted: unmute it from the tray first.";
+    const { view, set, capture, setMuted, setBound } = mount({ muted: true, bound: { ...BOUND, ptt: null }, set: async () => why });
+    expect(view.getByText(PTT_MUTED_LINE)).toBeInTheDocument();
+    expect(view.queryByText(/^Not working/)).toBeNull();
+    expect(view.getByText(HOTKEY_DOES.prompt)).toBeInTheDocument();
+    fireEvent.click(capture("ptt"), { detail: 1 });
+    press("j", { ctrlKey: true, altKey: true });
+    await settle();
+    expect(set.mock.calls).toEqual([["ptt", "Ctrl+Alt+J"]]);
+    expect(view.getByRole("alert")).toHaveTextContent(why);
+    expect(capture("ptt")).toHaveAccessibleName("Talk to him hotkey: Ctrl Alt V");
+    setMuted(false);
+    setBound({ ...BOUND });
+    expect(view.getByText(HOTKEY_DOES.ptt)).toBeInTheDocument();
+  });
+
   it("says when the key set isn't the one working", () => {
     const { view } = mount({ bound: { ...BOUND, prompt: null, park: "Ctrl+Alt+H" } }, { ...DEFAULTS, park: "Ctrl+Alt+Nope" });
-    expect(view.getByText(/^Not working: he couldn't have Ctrl\+Alt\+F when he started/)).toBeInTheDocument();
+    expect(view.getByText(/^Not working: he couldn't have Ctrl\+Alt\+F \(another app/)).toBeInTheDocument();
     expect(view.getByText(/^Working on Ctrl\+Alt\+H: Ctrl\+Alt\+Nope couldn't be used/)).toBeInTheDocument();
     expect(view.getByText(HOTKEY_DOES.arrange)).toBeInTheDocument();
   });

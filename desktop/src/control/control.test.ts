@@ -9,8 +9,8 @@ import {
   parseSection, parseSettings, type HookStatus, type ModelInfo,
 } from "./api";
 import {
-  CLICKS_DESC, HOTKEY_DOES, connectionLines, hookLine, hotkeyLine, identityLine, megabytes, modelLines, onThisPc, orPress,
-  standing, winNamed,
+  CLICKS_DESC, HOTKEY_DOES, PTT_MUTED_LINE, connectionLines, hookLine, hotkeyLine, identityLine, megabytes, modelLines,
+  onThisPc, orPress, standing, winNamed,
 } from "./view";
 import { COMBOS, contrast, token } from "../shared/testContrast";
 import { readFileSync } from "node:fs";
@@ -207,6 +207,7 @@ describe("the control window's wire", () => {
     brain: { url: "ws://127.0.0.1:8001/companion", clientId: "nick-pc", clientName: "NICK-PC" },
     avatar: { rect: null, scale: 1, parked: false, vrmPath: null, lookatCursor: true, clicks: true },
     hotkeys: { prompt: "Ctrl+Alt+F", ptt: "Ctrl+Alt+V", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" },
+    audio: { inputDevice: null, outputDevice: null, muted: false, ttsVoice: "bm_george" },
     diagnostics: { foregroundLog: false },
     theme: { theme: "dark", mood: "ink", accent: "brand", motion: 0.6, grain: true, motionUser: false },
   };
@@ -216,6 +217,7 @@ describe("the control window's wire", () => {
       brain: { url: "ws://127.0.0.1:8001/companion", clientId: "nick-pc", clientName: "NICK-PC" },
       avatar: { lookatCursor: true, clicks: true, vrmPath: null },
       hotkeys: { prompt: "Ctrl+Alt+F", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H", ptt: "Ctrl+Alt+V" },
+      audio: { muted: false },
       diagnostics: { foregroundLog: false },
       theme: { theme: "dark", mood: "ink", accent: "brand", motion: 0.6, grain: true, motionUser: false },
     });
@@ -236,6 +238,12 @@ describe("the control window's wire", () => {
     expect(parseSettings({ ...settings, avatar: { ...settings.avatar, vrmPath: 3 } })).toBeNull();
     expect(parseSettings({ ...settings, hotkeys: { ...settings.hotkeys, park: null } })).toBeNull();
     expect(parseSettings({ ...settings, diagnostics: {} })).toBeNull();
+    expect(parseSettings({ ...settings, audio: { ...settings.audio, muted: true } })?.audio.muted).toBe(true);
+    expect(parseSettings({ ...settings, audio: { ...settings.audio, muted: "yes" } })).toBeNull();
+    const { muted: _m, ...noMuted } = settings.audio;
+    expect(parseSettings({ ...settings, audio: noMuted })).toBeNull();
+    const { audio: _a, ...noAudio } = settings;
+    expect(parseSettings(noAudio)).toBeNull();
     expect(parseSettings({ ...settings, theme: { ...settings.theme, mood: 1 } })).toBeNull();
     expect(parseSettings({ ...settings, theme: { ...settings.theme, mood: "violet" } })).toBeNull();
     const { avatar: _, ...noAvatar } = settings;
@@ -458,7 +466,7 @@ describe("what Settings › Hotkeys says", () => {
     // Until the shell says what it holds, the key set is taken to work.
     expect(hotkeyLine("arrange", set, undefined, null)).toEqual({ text: HOTKEY_DOES.arrange, alert: false });
     expect(hotkeyLine("prompt", set, null, null)).toEqual({
-      text: "Not working: he couldn't have Ctrl+Alt+K when he started (another app may hold it). Pick another.",
+      text: "Not working: he couldn't have Ctrl+Alt+K (another app may hold it). Pick another.",
       alert: false,
     });
     expect(hotkeyLine("prompt", "Ctrl+Alt+Nope", "Ctrl+Alt+F", null)).toEqual({
@@ -472,7 +480,7 @@ describe("what Settings › Hotkeys says", () => {
       expect(hotkeyLine("prompt", set, active, why)).toEqual({ text: why, alert: true });
     }
     expect(hotkeyLine("prompt", set, null, why)).toEqual({
-      text: `${why} Not working: he couldn't have Ctrl+Alt+K when he started (another app may hold it). Pick another.`,
+      text: `${why} Not working: he couldn't have Ctrl+Alt+K (another app may hold it). Pick another.`,
       alert: true,
     });
     expect(hotkeyLine("prompt", set, "Ctrl+Alt+F", why)).toEqual({
@@ -482,12 +490,25 @@ describe("what Settings › Hotkeys says", () => {
     expect(new Set(Object.values(HOTKEY_DOES)).size).toBe(4);
   });
 
+  it("push-to-talk's row, muted: says so, or the shell's refusal alone", () => {
+    const set = "Ctrl+Alt+V";
+    for (const active of [null, set, undefined]) {
+      expect(hotkeyLine("ptt", set, active, null, true)).toEqual({ text: PTT_MUTED_LINE, alert: false });
+    }
+    const why = "Push-to-talk is muted: unmute it from the tray first.";
+    expect(hotkeyLine("ptt", set, null, why, true)).toEqual({ text: why, alert: true });
+    expect(hotkeyLine("ptt", set, set, null, false)).toEqual({ text: HOTKEY_DOES.ptt, alert: false });
+    // Only push-to-talk's row is muted.
+    expect(hotkeyLine("prompt", "Ctrl+Alt+F", "Ctrl+Alt+F", null, true)).toEqual({ text: HOTKEY_DOES.prompt, alert: false });
+    expect(PTT_MUTED_LINE).toContain("Mute push-to-talk");
+  });
+
   /** The settings and the shell say Super; the owner's keycap says Win. */
   it("calls the Windows key Win", () => {
     expect(winNamed("Ctrl+Super+P is already Fritz's key to arrange him.")).toBe("Ctrl+Win+P is already Fritz's key to arrange him.");
     expect(winNamed("Super+F9, cmd+K and Command+J")).toBe("Win+F9, Win+K and Win+J");
     expect(winNamed("A Superb key: Super")).toBe("A Superb key: Super");
-    expect(hotkeyLine("park", "Ctrl+Super+P", null, null).text).toContain("he couldn't have Ctrl+Win+P when");
+    expect(hotkeyLine("park", "Ctrl+Super+P", null, null).text).toContain("he couldn't have Ctrl+Win+P (another app");
     expect(hotkeyLine("park", "Ctrl+Super+P", "Super+J", null).text).toBe(
       "Working on Win+J: Ctrl+Win+P couldn't be used. Pick another, or press Default.",
     );

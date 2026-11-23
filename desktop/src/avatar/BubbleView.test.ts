@@ -4,8 +4,8 @@
  * written (and measured) only when something changed.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { HIDDEN, type Envelope } from "./bubble";
-import { LISTENING, NOTHING_TO_SAY, THINKING, bubbleText, createBubble } from "./BubbleView";
+import { EDGE, GAP, HIDDEN, type Envelope } from "./bubble";
+import { LISTENING, NOTHING_TO_SAY, SIGN_SIZE, THINKING, bubbleText, createBubble, signAt } from "./BubbleView";
 import { INITIAL, type TurnView } from "./state";
 
 const SHOWN: Envelope = { visible: true, opacity: 1, scale: 1, blurPx: 0 };
@@ -181,5 +181,48 @@ describe("the bubble in the page", () => {
     b.paint(turn({ reply: "Hi" }), SHOWN, HEAD, VIEW);
     expect(root.style.display).toBe("flex");
     expect(q(".bubble-text").textContent).toBe("Hi");
+  });
+});
+
+describe("the muted sign", () => {
+  it("shows on its own over his head while no bubble shows, and in the bubble's corner while one does", () => {
+    const { b, root, q } = mount();
+    const corner = q(".bubble-muted");
+    b.paint(turn(), HIDDEN, HEAD, VIEW, true);
+    expect(root.style.display).toBe("none");
+    expect(b.sign.style.display).toBe("flex");
+    expect(b.sign.parentElement).toBe(document.body);
+    expect(signAt(HEAD, VIEW)).toEqual({ left: HEAD.x - SIGN_SIZE / 2, top: HEAD.y - GAP - SIGN_SIZE });
+    expect([b.sign.style.left, b.sign.style.top]).toEqual([`${HEAD.x - SIGN_SIZE / 2}px`, `${HEAD.y - GAP - SIGN_SIZE}px`]);
+    b.paint(turn(), SHOWN, HEAD, VIEW, true);
+    expect(b.sign.style.display).toBe("none");
+    expect(corner.style.display).toBe("flex");
+    expect(corner.parentElement).toBe(root);
+    b.paint(turn(), SHOWN, HEAD, VIEW, false);
+    expect(corner.style.display).toBe("none");
+    b.paint(turn(), HIDDEN, HEAD, VIEW, false);
+    expect(b.sign.style.display).toBe("none");
+    // Unmuted is the default: a page that never says so shows none.
+    b.paint(turn(), HIDDEN, HEAD, VIEW);
+    expect(b.sign.style.display).toBe("none");
+  });
+
+  it("follows his head on its own, kept inside the window as the bubble is", () => {
+    const { b } = mount();
+    b.paint(turn(), HIDDEN, HEAD, VIEW, true);
+    b.paint(turn(), HIDDEN, { x: 100, y: 300 }, VIEW, true);
+    expect([b.sign.style.left, b.sign.style.top]).toEqual([`${100 - SIGN_SIZE / 2}px`, `${300 - GAP - SIGN_SIZE}px`]);
+    expect(signAt({ x: 0, y: 0 }, VIEW)).toEqual({ left: EDGE, top: EDGE });
+    expect(signAt({ x: 9999, y: 9999 }, VIEW)).toEqual({ left: VIEW.width - SIGN_SIZE - EDGE, top: VIEW.height - SIGN_SIZE - EDGE });
+    expect(signAt({ x: Number.NaN, y: Number.NaN }, VIEW)).toEqual({ left: VIEW.width / 2 - SIGN_SIZE / 2, top: EDGE });
+  });
+
+  it("is a picture only: no text, nothing a reader is told, no input", () => {
+    const { b, q } = mount();
+    for (const sign of [b.sign, q(".bubble-muted")]) {
+      expect(sign.textContent).toBe("");
+      expect(sign.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+      expect(sign.querySelector("button, a, input, [tabindex]")).toBeNull();
+    }
   });
 });

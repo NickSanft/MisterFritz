@@ -26,6 +26,9 @@ export interface HotkeysProps {
   keys: Record<HotkeyAction, string> | null;
   /** The keys the shell holds now; null until it has said. */
   bound: HotkeysBound | null;
+  /** Push-to-talk muted from the tray: its row says so, and a key tried
+   * on it is refused by the shell until it is unmuted. */
+  muted: boolean;
   /** Bind a key and save it: null once done, else the shell's refusal.
    * It settles only once what the shell holds has been asked again. */
   set: (action: HotkeyAction, accelerator: string) => Promise<string | null>;
@@ -77,7 +80,7 @@ export function Hotkeys(props: HotkeysProps): JSX.Element {
             const s = setting();
             if (s === null) return null;
             const active = busy() ? undefined : props.bound?.[action];
-            return hotkeyLine(action, s, active, refusals()[action] ?? null);
+            return hotkeyLine(action, s, active, refusals()[action] ?? null, props.muted);
           };
           const name = HOTKEY_TITLES[action];
           return (

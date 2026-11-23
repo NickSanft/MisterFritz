@@ -48,7 +48,10 @@ type Entry = (Shortcut, &'static str, String);
 /// The keys registered, for the handler to tell which fired.
 static BOUND: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
 
-/// Taken by `rebind` alone, so two rebinds never interleave.
+/// Taken by `rebind` and `mute` alone, so two rebinds never interleave, and
+/// a mute never comes between a rebind's look at the keys and its swap.
+/// Both run on a worker thread, never the main one, where the plugin's
+/// calls inside them wait.
 static REBINDING: Mutex<()> = Mutex::new(());
 
 /// Refused: no Ctrl, Alt or Win at all, and not a key that may stand alone.
@@ -208,15 +211,21 @@ pub fn bindings(h: &Hotkeys) -> Vec<Entry> {
     out
 }
 
-/// Register the settings' hotkeys. A key another app holds is logged, not
-/// fatal: the tray or Settings does everything the hotkeys do.
-pub fn register(app: &AppHandle, h: &Hotkeys) {
-    register_with(&Plugin(app), &BOUND, h);
+/// Register the settings' hotkeys, all but push-to-talk's while it is muted
+/// (`audio.muted`): its chord is left to other apps. A key another app
+/// holds is logged, not fatal: the tray or Settings does everything the
+/// hotkeys do.
+pub fn register(app: &AppHandle, h: &Hotkeys, muted: bool) {
+    register_with(&Plugin(app), &BOUND, h, muted);
 }
 
-fn register_with(keys: &impl Keys, store: &Mutex<Vec<Entry>>, h: &Hotkeys) {
+fn register_with(keys: &impl Keys, store: &Mutex<Vec<Entry>>, h: &Hotkeys, muted: bool) {
     let mut held = Vec::new();
     for (shortcut, id, accel) in bindings(h) {
+        if muted && id == PTT {
+            tracing::info!(accel, "push-to-talk is muted: its key is left to other apps");
+            continue;
+        }
         match keys.register(shortcut) {
             Ok(()) => {
                 tracing::info!(id, accel, "hotkey registered");
@@ -257,10 +266,77 @@ fn bound_in(store: &Mutex<Vec<Entry>>) -> BTreeMap<&'static str, Option<String>>
 /// thread only (the plugin waits on the main thread), one rebind at a time.
 pub fn rebind(app: &AppHandle, action: &str, accel: &str) -> Result<(Settings, bool), String> {
     let _one = REBINDING.lock().unwrap_or_else(|e| e.into_inner());
-    let h = crate::settings::get().hotkeys;
-    rebind_with(&Plugin(app), &BOUND, &h, action, accel, |path, accel| {
+    let s = crate::settings::get();
+    muted_refusal(action, s.audio.muted)?;
+    rebind_with(&Plugin(app), &BOUND, &s.hotkeys, action, accel, |path, accel| {
         crate::change_setting(app, path, serde_json::json!(accel))
     })
+}
+
+/// Setting push-to-talk's key while it is muted, refused: the owner's call,
+/// so nothing is saved or taken from Windows until it is unmuted.
+pub const PTT_MUTED: &str = "Push-to-talk is muted: unmute it from the tray first.";
+
+/// Whether `action`'s key may be set now: push-to-talk's not while muted.
+pub fn muted_refusal(action: &str, muted: bool) -> Result<(), String> {
+    if muted && action == "ptt" {
+        Err(PTT_MUTED.to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+/// Push-to-talk muted: its key let go of, so other apps get the chord. Or
+/// unmuted: its key taken from Windows again, the setting's or, as at
+/// start, the default when that one can't be used. In a rebind's turn, from
+/// a worker thread only (the plugin waits on the main thread). Answers the
+/// key push-to-talk holds now, if any.
+pub fn mute(app: &AppHandle, on: bool) -> Option<String> {
+    let _one = REBINDING.lock().unwrap_or_else(|e| e.into_inner());
+    let h = crate::settings::get().hotkeys;
+    mute_with(&Plugin(app), &BOUND, &h, on)
+}
+
+/// `mute`'s work. Muting takes push-to-talk's entry out of `store` before
+/// letting go of its key, so a press or release still coming for it is no
+/// key of ours; one Windows won't let go of is only logged (muted, it
+/// opens nothing).
+pub(crate) fn mute_with(keys: &impl Keys, store: &Mutex<Vec<Entry>>, h: &Hotkeys, on: bool) -> Option<String> {
+    let bound = with_bound(store, |b| b.clone());
+    let held = bound.iter().find(|(_, id, _)| *id == PTT).cloned();
+    if on {
+        if let Some((s, _, accel)) = held {
+            with_bound(store, |b| b.retain(|(_, id, _)| *id != PTT));
+            if let Err(e) = keys.unregister(s) {
+                tracing::warn!(accel, error = %e, "couldn't let go of push-to-talk's key; muted, it opens nothing");
+            }
+            tracing::info!(accel, "push-to-talk muted: its key let go of");
+        }
+        return None;
+    }
+    if let Some((_, _, accel)) = held {
+        return Some(accel);
+    }
+    let taken = |s: &Shortcut| bound.iter().any(|(b, _, _)| b == s);
+    let defaults = Hotkeys::default();
+    let chosen = [h.ptt.as_str(), defaults.ptt.as_str()]
+        .into_iter()
+        .find_map(|a| parse(a).ok().filter(|s| !taken(s)).map(|s| (s, a.trim().to_owned())));
+    let Some((s, accel)) = chosen else {
+        tracing::warn!(accel = h.ptt.as_str(), "unmuted, but push-to-talk's key is another of Fritz's; the tray still works");
+        return None;
+    };
+    match keys.register(s) {
+        Ok(()) => {
+            put(store, PTT, s, &accel);
+            tracing::info!(accel, "push-to-talk unmuted: its key taken again");
+            Some(accel)
+        }
+        Err(e) => {
+            tracing::warn!(accel, error = %e, "unmuted, but couldn't take push-to-talk's key from Windows");
+            None
+        }
+    }
 }
 
 /// The rebind, in an order that never leaves the action without a key: the
@@ -327,8 +403,8 @@ mod tests {
     use std::sync::Mutex;
 
     use super::{
-        bindings, bound_in, check, chord_problem, id_in, parse, rebind_with, refusal, register_with, Entry, Keys,
-        ACTIONS, APPS_OWN_KEYS, NEEDS_A_MODIFIER, PARK, PROMPT, PTT,
+        bindings, bound_in, check, chord_problem, id_in, muted_refusal, mute_with, parse, rebind_with, refusal,
+        register_with, Entry, Keys, ACTIONS, APPS_OWN_KEYS, NEEDS_A_MODIFIER, PARK, PROMPT, PTT, PTT_MUTED,
     };
     use crate::overlay_machine::HOTKEY_ARRANGE;
     use crate::settings::{Hotkeys, Settings};
@@ -597,13 +673,13 @@ mod tests {
 
     /// Windows, as a test sees it: every call logged; keys in `held` are
     /// another app's, and `stuck` keys can't be let go. With `watch`, each
-    /// call also logs what that list held as it was made.
+    /// call also logs what that list held for that action as it was made.
     #[derive(Default)]
     struct FakeKeys<'a> {
         calls: RefCell<Vec<String>>,
         held: Vec<Shortcut>,
         stuck: Vec<Shortcut>,
-        watch: Option<&'a Mutex<Vec<Entry>>>,
+        watch: Option<(&'a Mutex<Vec<Entry>>, &'static str)>,
     }
 
     impl FakeKeys<'_> {
@@ -624,10 +700,11 @@ mod tests {
             self.calls.borrow().clone()
         }
 
-        /// What the watched list held for the prompt, as a call was made.
+        /// What the watched list held for the watched action, as a call was
+        /// made.
         fn seen(&self) -> String {
-            self.watch.map_or_else(String::new, |store| {
-                format!(" (the prompt's then: {})", bound_in(store)["prompt"].as_deref().unwrap_or("none"))
+            self.watch.map_or_else(String::new, |(store, action)| {
+                format!(" (the {action}'s then: {})", bound_in(store)[action].as_deref().unwrap_or("none"))
             })
         }
     }
@@ -690,7 +767,7 @@ mod tests {
     #[test]
     fn the_old_key_is_let_go_only_once_the_new_one_is_bound() {
         let store = store();
-        let keys = FakeKeys { watch: Some(&store), ..FakeKeys::default() };
+        let keys = FakeKeys { watch: Some((&store, "prompt")), ..FakeKeys::default() };
         rebind_with(&keys, &store, &Hotkeys::default(), "prompt", "Ctrl+Alt+Shift+F13", saver(&keys.calls, true)).unwrap();
         assert_eq!(
             keys.calls(),
@@ -810,7 +887,7 @@ mod tests {
     fn at_start_a_refused_key_is_left_out() {
         let keys = FakeKeys::holding(&["Ctrl+Alt+A"]);
         let store = Mutex::new(Vec::new());
-        register_with(&keys, &store, &Hotkeys::default());
+        register_with(&keys, &store, &Hotkeys::default(), false);
         assert_eq!(
             keys.calls(),
             ["register Ctrl+Alt+A", "register Ctrl+Alt+H", "register Ctrl+Alt+F", "register Ctrl+Alt+V"]
@@ -823,6 +900,93 @@ mod tests {
         assert_eq!(id_in(&store, &key("Ctrl+Alt+A")), None);
         assert_eq!(id_in(&store, &key("Ctrl+Alt+V")), Some(PTT));
         assert_eq!(now["ptt"].as_deref(), Some("Ctrl+Alt+V"), "push-to-talk's row shows its key");
+    }
+
+    /// Muted at start, push-to-talk's key is left to other apps; the others
+    /// are taken as ever.
+    #[test]
+    fn muted_at_start_push_to_talk_s_key_is_left_alone() {
+        let keys = FakeKeys::default();
+        let store = Mutex::new(Vec::new());
+        register_with(&keys, &store, &Hotkeys::default(), true);
+        assert_eq!(keys.calls(), ["register Ctrl+Alt+A", "register Ctrl+Alt+H", "register Ctrl+Alt+F"]);
+        assert_eq!(bound_in(&store)["ptt"], None);
+        assert_eq!(id_in(&store, &key("Ctrl+Alt+V")), None);
+    }
+
+    /// Muting lets go of push-to-talk's key, out of the bound list first;
+    /// unmuting takes it again, into the list once Windows has given it;
+    /// each twice is once.
+    #[test]
+    fn muting_lets_go_of_push_to_talk_s_key_and_unmuting_takes_it_again() {
+        let store = store();
+        let d = Hotkeys::default();
+        let keys = FakeKeys { watch: Some((&store, "ptt")), ..FakeKeys::default() };
+        assert_eq!(mute_with(&keys, &store, &d, true), None);
+        assert_eq!(keys.calls(), ["unregister Ctrl+Alt+V (the ptt's then: none)"], "out of the list before");
+        assert_eq!(id_in(&store, &key("Ctrl+Alt+V")), None);
+        assert_eq!(bound_in(&store)["prompt"].as_deref(), Some("Ctrl+Alt+F"), "the others are untouched");
+        let keys = FakeKeys { watch: Some((&store, "ptt")), ..FakeKeys::default() };
+        assert_eq!(mute_with(&keys, &store, &d, true), None);
+        assert!(keys.calls().is_empty(), "muted again: {:?}", keys.calls());
+        assert_eq!(mute_with(&keys, &store, &d, false).as_deref(), Some("Ctrl+Alt+V"));
+        assert_eq!(keys.calls(), ["register Ctrl+Alt+V (the ptt's then: none)"], "into the list after");
+        assert_eq!(id_in(&store, &key("Ctrl+Alt+V")), Some(PTT));
+        let keys = FakeKeys::default();
+        assert_eq!(mute_with(&keys, &store, &d, false).as_deref(), Some("Ctrl+Alt+V"), "unmuted again");
+        assert!(keys.calls().is_empty(), "{:?}", keys.calls());
+    }
+
+    /// Unmuted, push-to-talk takes the setting's key, or, as at start, the
+    /// default when the setting's can't be used; none when neither can, and
+    /// none when Windows refuses it. A key Windows won't let go of at mute is
+    /// only logged: it is no key of ours.
+    #[test]
+    fn unmuting_takes_the_key_the_start_would() {
+        let unbound = || Mutex::new(defaults_bound().into_iter().filter(|(_, id, _)| *id != PTT).collect::<Vec<_>>());
+        let with_ptt = |ptt: &str| Hotkeys { ptt: ptt.into(), ..Hotkeys::default() };
+        let keys = FakeKeys::default();
+        let list = unbound();
+        assert_eq!(mute_with(&keys, &list, &with_ptt(" Ctrl+Alt+J "), false).as_deref(), Some("Ctrl+Alt+J"));
+        assert_eq!(id_in(&list, &key("Ctrl+Alt+J")), Some(PTT));
+        for (ptt, why) in [("Ctrl+Alt+Nope", "unparsed"), ("Ctrl+Alt+F", "the prompt's")] {
+            let keys = FakeKeys::default();
+            let list = unbound();
+            assert_eq!(mute_with(&keys, &list, &with_ptt(ptt), false).as_deref(), Some("Ctrl+Alt+V"), "{why}");
+            assert_eq!(keys.calls(), ["register Ctrl+Alt+V"], "{why}");
+        }
+        let both = Mutex::new(vec![
+            (key("Ctrl+Alt+F"), PROMPT, "Ctrl+Alt+F".to_owned()),
+            (key("Ctrl+Alt+V"), PARK, "Ctrl+Alt+V".to_owned()),
+        ]);
+        let keys = FakeKeys::default();
+        assert_eq!(mute_with(&keys, &both, &with_ptt("Ctrl+Alt+F"), false), None);
+        assert!(keys.calls().is_empty(), "{:?}", keys.calls());
+        let keys = FakeKeys::holding(&["Ctrl+Alt+V"]);
+        let list = unbound();
+        assert_eq!(mute_with(&keys, &list, &Hotkeys::default(), false), None);
+        assert_eq!(bound_in(&list)["ptt"], None, "refused, it has no key");
+        let keys = FakeKeys { stuck: vec![key("Ctrl+Alt+V")], ..FakeKeys::default() };
+        let list = store();
+        assert_eq!(mute_with(&keys, &list, &Hotkeys::default(), true), None);
+        assert_eq!(id_in(&list, &key("Ctrl+Alt+V")), None, "stuck in Windows, but no key of ours");
+    }
+
+    /// Push-to-talk's key isn't set while it is muted; the others' are.
+    #[test]
+    fn push_to_talk_s_key_is_not_set_while_muted() {
+        assert_eq!(muted_refusal("ptt", true), Err(PTT_MUTED.to_owned()));
+        assert_eq!(muted_refusal("ptt", false), Ok(()));
+        for other in ["prompt", "arrange", "park"] {
+            assert_eq!(muted_refusal(other, true), Ok(()), "{other}");
+        }
+        let src = code(include_str!("hotkeys.rs"));
+        let at = src.find("pub fn rebind(").unwrap();
+        let body = &src[at..at + src[at..].find("\n}\n").unwrap()];
+        let lock = body.find("let _one = REBINDING.lock()").unwrap();
+        let refusal = body.find("muted_refusal(action, s.audio.muted)?;").expect("refused in rebind");
+        let work = body.find("rebind_with(").unwrap();
+        assert!(lock < refusal && refusal < work, "{body}");
     }
 
     /// The actions a window may name are the fixture's, and each is handled
@@ -879,7 +1043,7 @@ mod tests {
         let def = src.find("fn with_bound<").unwrap();
         let body = &src[def..def + src[def..].find("\n}\n").unwrap()];
         let locks: Vec<usize> = src.match_indices(".lock()").map(|(i, _)| i).collect();
-        assert_eq!(locks.len(), 2, "one in with_bound, one for REBINDING");
+        assert_eq!(locks.len(), 3, "one in with_bound, and REBINDING's for rebind and mute");
         for at in locks {
             let in_with_bound = at > def && at < def + body.len();
             assert!(in_with_bound || src[..at].ends_with("REBINDING"), "a lock outside with_bound: {}", &src[at - 40..at]);
@@ -894,15 +1058,18 @@ mod tests {
         }
     }
 
-    /// One rebind at a time, and only `rebind` takes that turn.
+    /// One rebind at a time, and only `rebind` and `mute` take that turn:
+    /// a mute can't come between a rebind's look at the keys and its swap.
     #[test]
-    fn only_rebind_takes_the_rebinding_lock() {
+    fn only_rebind_and_mute_take_the_rebinding_lock() {
         let src = code(include_str!("hotkeys.rs"));
         let uses = src.lines().filter(|l| !l.trim_start().starts_with("//")).filter(|l| l.contains("REBINDING"));
-        assert_eq!(uses.count(), 2, "its static, and rebind");
-        let at = src.find("pub fn rebind(").unwrap();
-        let body = &src[at..at + src[at..].find("\n}\n").unwrap()];
-        assert!(body.contains("let _one = REBINDING.lock()"), "{body}");
+        assert_eq!(uses.count(), 3, "its static, rebind and mute");
+        for call in ["pub fn rebind(", "pub fn mute("] {
+            let at = src.find(call).unwrap();
+            let body = &src[at..at + src[at..].find("\n}\n").unwrap()];
+            assert!(body.contains("let _one = REBINDING.lock()"), "{body}");
+        }
     }
 
     /// What the app binds, reads and rebinds is the one list the handler
@@ -911,10 +1078,11 @@ mod tests {
     fn the_app_s_calls_use_the_one_bound_list() {
         let src = code(include_str!("hotkeys.rs"));
         for (call, inner) in [
-            ("pub fn register(", "register_with(&Plugin(app), &BOUND, h);"),
+            ("pub fn register(", "register_with(&Plugin(app), &BOUND, h, muted);"),
             ("pub fn id_of(", "id_in(&BOUND, shortcut)"),
             ("pub fn bound_now(", "bound_in(&BOUND)"),
-            ("pub fn rebind(", "rebind_with(&Plugin(app), &BOUND, &h, action, accel,"),
+            ("pub fn rebind(", "rebind_with(&Plugin(app), &BOUND, &s.hotkeys, action, accel,"),
+            ("pub fn mute(", "mute_with(&Plugin(app), &BOUND, &h, on)"),
         ] {
             let at = src.find(call).unwrap_or_else(|| panic!("{call}"));
             let body = &src[at..at + src[at..].find("\n}\n").unwrap()];

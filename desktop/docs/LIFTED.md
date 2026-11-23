@@ -25,6 +25,7 @@ not touched these files since.
 | `src/divora/components/HotkeyCapture.tsx`, `Kbd.tsx` and `HotkeyCapture.test.tsx` | `src/components/` | Verbatim |
 | `src/divora/hotkeys.ts` and its test | `src/data/hotkeys.ts`, lines 1-15 and 45-82; `hotkeys.test.ts`, lines 1-61 | The three converters (`keysToAccelerator`, `acceleratorToKeys`, `normalizeAccelerator`) and their tests, verbatim; DivoraVoice's actions and the reading of its saved bindings left out, and the test's import cut to match |
 | `src/divora/sigils/Sigil.tsx` and its test | `src/components/Sigil.tsx`, `Sigil.test.tsx` | `github` removed (GitHub's own mark); Fritz's own glyphs (`butler`, `desk`, `calendar`, `inbox`, `weather`, `listening`, `thinking`, `speaking`) added in the same hand, with a test of their own |
+| `src/avatar/BubbleView.ts` (part) | `src/components/Sigil.tsx` (`muted`) | The `muted` sigil's marks only, built as DOM in `mutedSigil` (his page has no Solid); `src/avatar/mutedSign.test.tsx` holds them to the lifted Sigil's |
 | `src/test-setup.ts` | `src/test-setup.ts` | Verbatim; vitest's "dom" project follows DivoraVoice's config (jsdom, the Solid plugin), without hot reload |
 
 Not lifted, but following DivoraVoice: `src/divora/theme.ts` maps `theme.motion` to a motion level as its `src/App.tsx` (lines 168-177) and `src/overlay.tsx` (lines 111-124) do; the rest of that file is Fritz's own.

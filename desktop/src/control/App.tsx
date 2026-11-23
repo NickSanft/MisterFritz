@@ -114,7 +114,16 @@ export function App(): JSX.Element {
       const s = parseStatus(e.payload);
       if (s) setStatus(s);
     }));
-    unlisten.push(listen<unknown>(SETTINGS_EVENT, (e) => took(parseSettings(e.payload))));
+    unlisten.push(listen<unknown>(SETTINGS_EVENT, (e) => {
+      const s = parseSettings(e.payload);
+      const was = settings()?.audio.muted;
+      took(s);
+      // Muted or unmuted from the tray: push-to-talk's key was let go of,
+      // or taken again, before this was said, so what is held is asked anew.
+      if (s && was !== undefined && s.audio.muted !== was) {
+        void hotkeysBound().then((b) => b && setBound(b), () => {});
+      }
+    }));
     // The mouse hook went in or out.
     unlisten.push(listen<unknown>(HOOK_STATUS_EVENT, (e) => {
       const h = parseHookStatus(e.payload);
@@ -194,7 +203,12 @@ export function App(): JSX.Element {
     reconnect: () => void attempt("reconnect", companionConnect),
     ask: (text) => attempt("ask him", () => companionSay(text)),
   });
-  const hotkeysProps = (): HotkeysProps => ({ keys: settings()?.hotkeys ?? null, bound: bound(), set: rebind });
+  const hotkeysProps = (): HotkeysProps => ({
+    keys: settings()?.hotkeys ?? null,
+    bound: bound(),
+    muted: settings()?.audio.muted ?? false,
+    set: rebind,
+  });
   const modelProps = (): ModelRowsProps => ({
     model: model(),
     openFolder: () => void attempt("open the folder", () => openFolder("avatar")),

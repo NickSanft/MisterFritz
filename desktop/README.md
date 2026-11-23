@@ -196,6 +196,15 @@ which opens the microphone whatever the brain says and keeps each clip in
 that folder as a WAV until you delete it, sending nothing; outside that
 switch, a clip is never kept.
 
+The tray's *Mute push-to-talk* (in his menu too) mutes it: the microphone
+closes if it was open, its key is let go of, so other apps get the chord,
+and a small muted sign, DivoraVoice's struck-through circle, shows over his
+head the whole time (in the bubble's corner while one shows). It is kept in
+`audio.muted` across restarts, and only the tray sets it. Settings ›
+Hotkeys says so on push-to-talk's row, where a new key is refused until it
+is unmuted. Unmuted, its key is taken from Windows again: the setting's, or
+its default when that one can't be used, as at start.
+
 ## His speech bubble
 
 His replies show in a bubble over his head, on its own panel in the mood's
