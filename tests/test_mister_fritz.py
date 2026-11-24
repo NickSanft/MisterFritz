@@ -1651,6 +1651,48 @@ class TestATurnThatHitsItsBoundEndsInWords(unittest.TestCase):
         self.assertIn("agent.recursion_limit", [c.args[0] for c in counted.call_args_list])
         self.assertIn("super-step bound", " ".join(logs.output))
 
+    class _StreamedThenLooping:
+        """Streams `said` as tokens (if any), then hits the bound."""
+
+        def __init__(self, said):
+            self.said = said
+
+        def stream(self, inputs, config=None, stream_mode=None):
+            from langgraph.errors import GraphRecursionError
+            if self.said:
+                yield ("messages", (_chunk(self.said, "t1"), {}))
+            yield ("values", {"messages": [AIMessage(content=self.said)]})
+            raise GraphRecursionError("Recursion limit of 40 reached")
+
+    def _streamed(self, said):
+        calls = []
+        state = {"messages": [HumanMessage(content="do the thing", id="h1")],
+                 "image_paths": [], "user_image_paths": []}
+        metadata = {"user_id": "tester", "streaming_callback": lambda d, a, r: calls.append((d, a, r))}
+        with patch.object(mister_fritz, "_get_conversation_agent", return_value=self._StreamedThenLooping(said)), \
+             patch.object(mister_fritz, "search_memories_internal", return_value="{}"), \
+             patch.object(mister_fritz, "get_user_profile", return_value={}), \
+             self.assertLogs(mister_fritz.logger, "WARNING"):
+            out = executor(state, config={"metadata": metadata})
+        return calls, out["messages"][-1].content
+
+    def test_why_it_stopped_is_streamed_too(self):
+        """A consumer that reads only the stream (the web chat, the desk's
+        voice) hears why, not just the last preamble."""
+        calls, reply = self._streamed("Let me try that again, sir.")
+        delta, accumulated, restart = calls[-1]
+        self.assertTrue(delta.startswith("\n\n") and "round in circles" in delta, delta)
+        self.assertFalse(restart, "more of the same segment")
+        self.assertEqual(accumulated, reply, "the note follows what was streamed, as it does the reply here")
+        # With nothing streamed before, it is the whole of a new segment.
+        calls, reply = self._streamed("")
+        self.assertEqual(calls, [(reply, reply, True)])
+        self.assertIn("round in circles", reply)
+        # Sent at once, however short a delta the emitter would hold back.
+        with patch.object(mister_fritz, "STREAM_MIN_CHARS", 999):
+            calls, reply = self._streamed("Let me try that again, sir.")
+        self.assertEqual([a for _d, a, _r in calls][-1], reply)
+
     def test_a_turn_that_does_not_hit_it_says_nothing_about_circles(self):
         state = {"messages": [HumanMessage(content="hello", id="h1")],
                  "image_paths": [], "user_image_paths": []}

@@ -28,7 +28,10 @@ What runs, compared with main_discord:
 - The relay's retention purge does run, at startup and hourly. The relay is a
   Discord feature, but its retention is a privacy promise about message bodies
   stored in plaintext, and it must not lapse because Discord is not running.
-- TTS does not load. Nothing on the web surfaces speaks yet (plan 14, PR 9).
+- TTS does not load. With COMPANION_TTS=local the brain sends a spoken turn's
+  sentences to a desk that voices text itself, which the desktop app will
+  from plan 14's PR 10; until then nothing is sent and nothing is voiced.
+  The brain's own speech (xtts) is not built.
 
 Stopping: the first Ctrl+C or SIGTERM asks it to stop, and it exits once
 nothing is left running. A turn caught in the middle of a model call finishes

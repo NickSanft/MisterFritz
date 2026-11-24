@@ -691,6 +691,17 @@ class _DeltaEmitter:
             # A broken UI consumer must not kill the turn.
             logger.warning("streaming_callback raised (non-fatal): %s", e)
 
+    def end_with(self, text: str) -> None:
+        """`text` as a paragraph after what the current segment said (all of
+        it, if nothing was said), emitted at once: words the reply gains
+        after the model's stream, which a consumer that reads only the
+        stream (the web chat, the desk's voice) would otherwise never get."""
+        if self._segment is _SEGMENT_UNSET:
+            self.feed(text)
+        else:
+            self.feed(f"\n\n{text}" if self._accumulated.strip() else text, segment_id=self._segment)
+        self.flush()
+
 
 def _until_the_bound(stream, on_bound):
     """The agent's stream, stopping cleanly if the turn hits its super-step bound.
@@ -1035,6 +1046,9 @@ def executor(state: EnhancedState, config: RunnableConfig):
         stopped = ("I found myself going round in circles with my own tools, so I "
                    "stopped. Do ask again, more narrowly if you can.")
         resp = f"{resp.rstrip()}\n\n{stopped}" if str(resp).strip() else stopped
+        # Streamed as well, or a spoken turn's voice stops on the last
+        # preamble ("Let me try that again") and never says why.
+        emitter.end_with(stopped)
 
     image_paths = state.get("image_paths", []).copy()
     if final_state and "messages" in final_state:

@@ -54,6 +54,17 @@ ends it with `stt_failed`; a clip that is no clip (empty, half a sample, not
 16 kHz mono, too long) with `bad_frame`. What was said is never logged at INFO
 or above, only how long it was (stt.transcribe keeps the words to DEBUG).
 
+Speech (PR 9): a spoken turn's reply is spoken back, a typed one's is not (the
+owner's call). With COMPANION_TTS=local the welcome offers `speak-local`, and
+a desk whose hello says `speak-local` (it voices text itself) is sent the
+reply a sentence at a time as it streams: `state speaking`, then `speak`
+frames in order, the last marked final, all before `done`
+(companion_tts.SentenceChunker cuts them, and speakable leaves out Markdown's
+marks, fences and item numbers, and a link's address). A cancel stops them at the next sentence, and an
+interrupted reply ends without its tail; a sentence said before a tool call
+can't be unsaid when the client clears it. COMPANION_TTS=xtts (the brain
+speaking) is not built yet, and `off` sends no speech.
+
 Widgets (Phase 3) are not served: a `subscribe` is answered `bad_frame`.
 """
 from __future__ import annotations
@@ -75,13 +86,14 @@ from dataclasses import dataclass, field
 from starlette.routing import WebSocketRoute
 from starlette.websockets import WebSocket
 
+import companion_tts
 import fritz_utils
 import identity_store
 from bot_adapters import fritz_error, run_blocking
 from companion_protocol import (CLOSE_BAD_FRAME, CLOSE_BAD_TOKEN, CLOSE_FULL, CLOSE_GONE_QUIET,
                                 CLOSE_NO_HELLO, CLOSE_UNSUPPORTED, PROTOCOL_VERSION, AudioEnd, BadFrame,
-                                Cancel, Done, Error, Hello, Ping, Pong, Progress, Say, State, Stt,
-                                Subscribe, Token, Welcome, parse_client_frame)
+                                Cancel, Done, Error, Hello, Ping, Pong, Progress, Say, Speak, State,
+                                Stt, Subscribe, Token, Welcome, parse_client_frame)
 from fritz_utils import MessageSource, canonical_user_id, resolve_identity
 from observability import audit_log
 
@@ -101,8 +113,15 @@ AUDIO_MAX_BYTES = 30 * AUDIO_RATE * 2
 
 
 def server_caps() -> list[str]:
-    """What this server does: text, and audio-in once it can transcribe."""
-    return ["text", "audio-in"] if _can_transcribe() else ["text"]
+    """What this server does: text; audio-in once it can transcribe; and
+    speak-local with COMPANION_TTS=local, a spoken turn's reply sent for the
+    desk to voice itself."""
+    caps = ["text"]
+    if _can_transcribe():
+        caps.append("audio-in")
+    if fritz_utils.COMPANION_TTS == "local":
+        caps.append("speak-local")
+    return caps
 
 
 def _can_transcribe() -> bool:
@@ -575,6 +594,48 @@ async def _transcribe(session: _Session, turn: _Turn, pcm: bytes) -> str | None:
     return said if result == "ok" else None
 
 
+def _speaks(session: _Session, source: MessageSource) -> bool:
+    """Whether a turn's reply is spoken: a spoken turn's (a typed one is
+    answered in the bubble alone), with COMPANION_TTS=local, to a desk that
+    voices text itself (its hello's speak-local)."""
+    return (source == MessageSource.DESKTOP_VOICE and fritz_utils.COMPANION_TTS == "local"
+            and "speak-local" in session.caps)
+
+
+class _Speaker:
+    """A spoken turn's reply as speak frames, a sentence at a time, from the
+    turn's pool thread: `state speaking` before the first, and the last
+    marked final, an empty one if the reply's end left nothing more to say.
+    A cancel stops them at the next sentence; an interrupted reply ends with
+    none of its tail and no final (its `done` says it was interrupted)."""
+
+    def __init__(self, session: _Session, turn: _Turn):
+        self.session, self.turn = session, turn
+        self.chunker = companion_tts.SentenceChunker()
+        self.seq = 0
+
+    def heard(self, delta: str, restart: bool) -> None:
+        if self.turn.cancel.is_set():
+            return
+        for sentence in self.chunker.feed(delta, restart):
+            self._say(sentence, final=False)
+
+    def ended(self, interrupted: bool) -> None:
+        if interrupted or self.turn.cancel.is_set():
+            return
+        rest = self.chunker.flush()
+        for i, sentence in enumerate(rest):
+            self._say(sentence, final=i == len(rest) - 1)
+        if not rest and self.seq:
+            self._say("", final=True)
+
+    def _say(self, text: str, final: bool) -> None:
+        if self.seq == 0:
+            self.session.send_from_thread(State(turn_id=self.turn.turn_id, state="speaking"))
+        self.session.send_from_thread(Speak(turn_id=self.turn.turn_id, seq=self.seq, text=text, final=final))
+        self.seq += 1
+
+
 def _transcribe_clip(pcm: bytes) -> str | None:
     """On a pool thread: the clip written to a WAV of its own, transcribed,
     and the WAV gone. stt.transcribe answers "" when it heard no speech and
@@ -608,8 +669,12 @@ def _ask(session: _Session, turn: _Turn, text: str, source: MessageSource) -> tu
 
     from mister_fritz import ask_stuff   # heavy; and imported late, as the web chat does
 
+    speaker = _Speaker(session, turn) if _speaks(session, source) else None
+
     def streaming_callback(delta: str, accumulated: str, restart: bool = False) -> None:
         session.send_from_thread(Token(turn_id=turn.turn_id, delta=delta, restart=restart))
+        if speaker is not None:
+            speaker.heard(delta, restart)
 
     def progress_callback(notice: str) -> None:
         session.send_from_thread(Progress(turn_id=turn.turn_id, text=notice))
@@ -629,6 +694,9 @@ def _ask(session: _Session, turn: _Turn, text: str, source: MessageSource) -> tu
     if not isinstance(reply, str):
         reply = str(reply)
     interrupted = bool(result.get("interrupted", False))
+    if speaker is not None:
+        # Before done: these are queued from this thread, as the tokens are.
+        speaker.ended(interrupted)
     images = _data_urls(result.get("image_paths") or [])
     audit_log("companion_turn", user_id=session.identity, client=session.canonical_id,
               chars=len(text), result="interrupted" if interrupted else "ok",

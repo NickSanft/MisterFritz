@@ -472,14 +472,14 @@ class TestDesktopCompanionKnobs(unittest.TestCase):
     """Plan 14: six knobs, declared by P4 ahead of the code that reads them.
 
     Three refusals hold whatever is built, because each describes a
-    configuration no build should allow. PR 1 made three knobs live; the rest
-    follow the RELAY_AGENT_TOOL_ENABLED convention: a knob nothing reads says
-    so, and a scan of the tree keeps that true, as another keeps the live ones
-    read.
+    configuration no build should allow. PR 1 made three knobs live and PR 9
+    a fourth, COMPANION_TTS, whose unbuilt xtts says so. The rest follow the
+    RELAY_AGENT_TOOL_ENABLED convention: a knob nothing reads says so, and a
+    scan of the tree keeps that true, as another keeps the live ones read.
     """
 
-    LIVE = ("COMPANION_ENABLED", "COMPANION_TOKEN", "COMPANION_MAX_CLIENTS")
-    RESERVED = ("COMPANION_BIND", "COMPANION_TTS", "GOOGLE_MCP_ENABLED")
+    LIVE = ("COMPANION_ENABLED", "COMPANION_TOKEN", "COMPANION_MAX_CLIENTS", "COMPANION_TTS")
+    RESERVED = ("COMPANION_BIND", "GOOGLE_MCP_ENABLED")
     TOKEN = "t" * 43
 
     def _patched(self, **knobs):
@@ -618,9 +618,19 @@ class TestDesktopCompanionKnobs(unittest.TestCase):
         out = parse(COMPANION_BIND=" 0.0.0.0 ")
         self.assertIn("every network interface", out["started"])
 
+    def test_xtts_says_it_is_not_built_and_the_built_modes_say_nothing(self):
+        """PR 9 built local and off; xtts, the brain's own speech, is still to
+        come, and an operator who sets it must hear that nothing is spoken."""
+        said = self._warnings(COMPANION_TTS="xtts")
+        self.assertIn("COMPANION_TTS=xtts does nothing yet", said)
+        self.assertIn("not built", said)
+        self.assertIn("no speech at all", said)
+        for mode in ("local", "off"):
+            with self.subTest(mode=mode):
+                self.assertEqual(self._logged(COMPANION_TTS=mode), "")
+
     def test_every_reserved_knob_says_it_does_nothing_when_set(self):
-        for name, value, why in (("COMPANION_BIND", "100.64.0.7", "Phase 5"),
-                                 ("COMPANION_TTS", "xtts", "not built")):
+        for name, value, why in (("COMPANION_BIND", "100.64.0.7", "Phase 5"),):
             with self.subTest(knob=name):
                 said = self._warnings(**{name: value})
                 self.assertIn(f"{name}={value} does nothing yet", said)
@@ -698,7 +708,7 @@ class TestDesktopCompanionKnobs(unittest.TestCase):
     def test_the_documentation_says_which_are_reserved(self):
         blocks = self._env_example_blocks()
         self.assertEqual(sorted(blocks), sorted(self.LIVE + self.RESERVED))
-        # Its header says "the first three are live".
+        # Its header says "the first four are live".
         self.assertEqual(list(blocks)[:len(self.LIVE)], list(self.LIVE))
         # Decision 32: the token is its own secret.
         self.assertIn("deliberately separate from", blocks["COMPANION_TOKEN"])
@@ -720,7 +730,8 @@ class TestDesktopCompanionKnobs(unittest.TestCase):
         # The section's own sentence counts the live ones off the top of the table.
         section = readme[readme.index("### Desktop companion and Google"):]
         section = section[:section.index("\n### ", 1)]
-        self.assertIn(f"The first {len(self.LIVE)} are live", section.replace("three", "3"))
+        words = section.replace("three", "3").replace("four", "4")
+        self.assertIn(f"The first {len(self.LIVE)} are live", words)
         rows = re.findall(r"^\| `([A-Z_]+)` \|", section, flags=re.M)
         self.assertEqual(rows[:len(self.LIVE)], list(self.LIVE))
         self.assertEqual(sorted(rows[len(self.LIVE):]), sorted(self.RESERVED))

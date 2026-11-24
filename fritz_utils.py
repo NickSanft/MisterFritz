@@ -332,13 +332,14 @@ CHAT_COOKIE_SECURE: bool = os.environ.get("CHAT_COOKIE_SECURE", "").lower() in (
 # P4 of plans/14-desktop-companion-build.md declared these in one batch, ahead
 # of the code that reads them, so each PR after it is reviewed for behaviour
 # rather than plumbing. COMPANION_ENABLED, COMPANION_TOKEN and
-# COMPANION_MAX_CLIENTS are live since PR 1: companion_api and admin_panel read
-# them at call time. The rest are still RESERVED, and validate_config says so
-# whenever one is set, as it does for RELAY_AGENT_TOOL_ENABLED: believing a
-# capability is live is the failure mode. What makes each one real:
+# COMPANION_MAX_CLIENTS are live since PR 1, and COMPANION_TTS since PR 9:
+# companion_api and admin_panel read them at call time. COMPANION_TTS's "xtts"
+# is not built, and validate_config says so when it is chosen. The rest are
+# still RESERVED, and validate_config says so whenever one is set, as it does
+# for RELAY_AGENT_TOOL_ENABLED: believing a capability is live is the failure
+# mode. What makes each one real:
 #   COMPANION_BIND       Phase 5, a second device (until then /companion is
 #                        served with the panel, on 127.0.0.1)
-#   COMPANION_TTS        PR 9
 #   GOOGLE_MCP_ENABLED   PR 15
 # The checks that are about safety rather than capability run whatever is
 # built: see validate_config.
@@ -356,8 +357,9 @@ COMPANION_TOKEN: str | None = os.environ.get("COMPANION_TOKEN") or None
 # refuses one.
 COMPANION_BIND: str = os.environ.get("COMPANION_BIND", "127.0.0.1").strip()
 COMPANION_MAX_CLIENTS: int = _at_least_one("COMPANION_MAX_CLIENTS", "2")
-# Who speaks the desk's replies: "local" (the desktop app synthesises them),
-# "xtts" (the brain does, with the /voice engine) or "off".
+# Who speaks the desk's replies to what it said aloud: "local" (the desktop
+# app voices the sentences companion_api sends it), "xtts" (the brain, with
+# the /voice engine: not built yet) or "off" (nothing spoken).
 COMPANION_TTS: str = os.environ.get("COMPANION_TTS", "local").strip().lower()
 GOOGLE_MCP_ENABLED: bool = os.environ.get("GOOGLE_MCP_ENABLED", "false").lower() in ("1", "true", "yes")
 
@@ -1326,12 +1328,11 @@ def _validate_companion_knobs() -> None:
             "reserved so the switch exists before the capability does.",
             COMPANION_BIND,
         )
-    if COMPANION_TTS != "local":
+    if COMPANION_TTS == "xtts":
         log.warning(
-            "COMPANION_TTS=%s does nothing yet: the desk's speech is not built "
-            "(plan 14, PR 9), and no code reads this setting. It is reserved so "
-            "the switch exists before the capability does.",
-            COMPANION_TTS,
+            "COMPANION_TTS=xtts does nothing yet: the brain's own speech is not "
+            "built (plan 14, PR 9 left it for later), so the desk is sent no "
+            "speech at all. Use local to have the desk voice its replies."
         )
     if GOOGLE_MCP_ENABLED:
         log.warning(

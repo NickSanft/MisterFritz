@@ -39,6 +39,7 @@ CORE = [
     "chat_auth",
     "companion_api",
     "companion_protocol",
+    "companion_tts",
     "document_engine",
     "file_tools",
     "fritz_utils",

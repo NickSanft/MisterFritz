@@ -309,7 +309,7 @@ class TestHandshake(CompanionTest):
         _ws, welcome = self.desk()
         self.assertEqual(welcome, {
             "type": "welcome", "protocol": 1, "identity": "desktop-nick-pc",
-            "display_name": "Nick's PC", "server_caps": ["text", "audio-in"],
+            "display_name": "Nick's PC", "server_caps": ["text", "audio-in", "speak-local"],
             "thread_id": "desktop-nick-pc#desktop",
         })
         self.audit.assert_any_call("companion_connect", result="ok", user_id="desktop-nick-pc",
@@ -886,10 +886,10 @@ class TestTheAudioTurn(CompanionTest):
 
     def test_the_welcome_offers_audio_in_only_once_it_can_transcribe(self):
         _ws, welcome = self.desk()
-        self.assertEqual(welcome["server_caps"], ["text", "audio-in"])
+        self.assertIn("audio-in", welcome["server_caps"])
         with patch.object(companion_api, "_can_transcribe", lambda: False):
             ws, welcome = self.desk()
-            self.assertEqual(welcome["server_caps"], ["text"])
+            self.assertNotIn("audio-in", welcome["server_caps"])
             self.speak(ws)       # its binary frames dropped unread
             error = receive(ws)
         self.assertEqual((error["type"], error["code"], error["turn_id"], error["text"]),
@@ -1084,6 +1084,167 @@ class TestTheAudioTurn(CompanionTest):
         self.assertEqual(self.fake.calls, [])
         self.audit.assert_any_call("companion_audio", user_id="desktop-nick-pc", client="desktop-nick-pc",
                                    audio_seconds=1.0, chars=15, result="cancelled", seconds=ANY)
+
+
+class ScriptedAskStuff(FakeAskStuff):
+    """A FakeAskStuff whose stream is `script`, a list of (delta, restart),
+    so a test can restart the reply where it likes."""
+
+    def __init__(self, script, interrupted=False):
+        super().__init__(deltas=[d for d, _ in script])
+        self.script, self.interrupted = script, interrupted
+
+    def __call__(self, base_prompt, source, user_id, progress_callback=None, streaming_callback=None,
+                 user_image_paths=None, workspace_root=None, channel_id=None, schedule_manager=None, *,
+                 thread_id=None, display_name=None, channel_key=None, may_wait=False, cancel_event=None):
+        self.calls.append({"base_prompt": base_prompt, "source": source})
+        said = ""
+        for delta, restart in self.script:
+            said = delta if restart else said + delta
+            streaming_callback(delta, said, restart)
+        return self._result(said, interrupted=self.interrupted)
+
+
+SPEAKS = {"id": "nick-pc", "name": "Nick's PC", "caps": ["text", "audio-in", "speak-local"]}
+
+
+class TestSpokenReplies(CompanionTest):
+    """A spoken turn's reply, sent a sentence at a time for a desk that
+    voices text itself (COMPANION_TTS=local, its hello's speak-local)."""
+
+    REPLY = ("Good evening, sir. ", "It is half ", "past nine. Shall I", " draw the curtains?")
+
+    def speak(self, ws, turn_id="a1"):
+        ws.send_bytes(SECOND)
+        ws.send_json({"type": "audio_end", "turn_id": turn_id})
+        return self.until_idle(ws, turn_id)
+
+    @staticmethod
+    def spoken(frames):
+        return [(f["seq"], f["text"], f["final"]) for f in frames if f["type"] == "speak"]
+
+    def test_the_welcome_offers_speak_local_only_with_local_tts(self):
+        _ws, welcome = self.desk()
+        self.assertEqual(welcome["server_caps"], ["text", "audio-in", "speak-local"])
+        for mode in ("off", "xtts"):
+            with self.subTest(mode=mode), patch.object(fritz_utils, "COMPANION_TTS", mode):
+                ws, welcome = self.desk()
+                self.assertEqual(welcome["server_caps"], ["text", "audio-in"])
+                ws.close()
+                self.assertTrue(wait_for(lambda: len(companion_api._SESSIONS) < 2))
+
+    def test_a_spoken_turn_is_spoken_back_a_sentence_at_a_time(self):
+        self.use(FakeAskStuff(deltas=self.REPLY))
+        ws, _ = self.desk(client=SPEAKS)
+        frames = self.speak(ws)
+        self.assertEqual(self.spoken(frames), [(0, "Good evening, sir.", False),
+                                               (1, "It is half past nine.", False),
+                                               (2, "Shall I draw the curtains?", True)])
+        kinds = [(f["type"], f.get("state")) for f in frames]
+        speaking = kinds.index(("state", "speaking"))
+        first = kinds.index(("speak", None))
+        self.assertEqual(kinds.count(("state", "speaking")), 1)
+        self.assertLess(speaking, first, "speaking, then what is said")
+        self.assertLess(max(i for i, k in enumerate(kinds) if k[0] == "speak"), kinds.index(("done", None)),
+                        "every sentence before done")
+        # The first is let go as soon as the next has begun, while the reply
+        # is still being written: before the last token.
+        last_token = max(i for i, k in enumerate(kinds) if k[0] == "token")
+        self.assertLess(first, last_token)
+        # The bubble's tokens and done are as ever.
+        self.assertEqual(frames[kinds.index(("done", None))]["text"], "".join(self.REPLY))
+
+    def test_a_typed_turn_is_not_spoken(self):
+        self.use(FakeAskStuff(deltas=self.REPLY))
+        ws, _ = self.desk(client=SPEAKS)
+        frames = self.turn(ws)
+        self.assertEqual(self.spoken(frames), [])
+        self.assertNotIn({"type": "state", "turn_id": "t1", "state": "speaking"}, frames)
+
+    def test_a_desk_that_does_not_voice_text_is_sent_no_speech(self):
+        self.use(FakeAskStuff(deltas=self.REPLY))
+        ws, _ = self.desk()          # its caps: text and vrm
+        frames = self.speak(ws)
+        self.assertEqual(self.spoken(frames), [])
+        self.assertNotIn("speaking", [f.get("state") for f in frames])
+
+    def test_off_and_xtts_speak_nothing(self):
+        self.use(FakeAskStuff(deltas=self.REPLY))
+        for mode in ("off", "xtts"):
+            with self.subTest(mode=mode), patch.object(fritz_utils, "COMPANION_TTS", mode):
+                ws, _ = self.desk(client=SPEAKS)
+                frames = self.speak(ws, f"a-{mode}")
+                self.assertEqual(self.spoken(frames), [])
+                ws.close()
+                self.assertTrue(wait_for(lambda: not companion_api._SESSIONS))
+
+    def test_a_cancelled_reply_stops_and_ends_without_its_tail(self):
+        gate = threading.Event()
+        self.use(FakeAskStuff(deltas=("Good evening, sir. ", "It is", " nine. And more besides."),
+                              gate=gate, pause_after=2))
+        ws, _ = self.desk(client=SPEAKS)
+        ws.send_bytes(SECOND)
+        ws.send_json({"type": "audio_end", "turn_id": "a1"})
+        self.assertTrue(self.fake.in_flight.wait(10))
+        ws.send_json({"type": "cancel", "turn_id": "a1"})
+        gate.set()
+        frames = self.until_idle(ws, "a1")
+        self.assertEqual(self.spoken(frames), [(0, "Good evening, sir.", False)], "no tail, and no final")
+        done = next(f for f in frames if f["type"] == "done")
+        self.assertTrue(done["interrupted"])
+
+    def test_nothing_more_is_said_once_cancelled_though_the_model_writes_on(self):
+        """The model notices a cancel at its next token, or when a tool
+        returns; what it writes until then is not spoken."""
+        gate = threading.Event()
+
+        class WritesOn(ScriptedAskStuff):
+            def __call__(self, base_prompt, source, user_id, progress_callback=None, streaming_callback=None,
+                         user_image_paths=None, workspace_root=None, channel_id=None, schedule_manager=None, *,
+                         thread_id=None, display_name=None, channel_key=None, may_wait=False, cancel_event=None):
+                said = ""
+                for i, (delta, restart) in enumerate(self.script):
+                    said = delta if restart else said + delta
+                    streaming_callback(delta, said, restart)
+                    if i == 1:
+                        self.in_flight.set()
+                        gate.wait(10)
+                return self._result(said, interrupted=cancel_event.is_set())
+
+        self.use(WritesOn([("Good evening, sir. ", True), ("It is half past nine. ", False),
+                           ("And a great deal more. ", False), ("Still more.", False)]))
+        self.addCleanup(gate.set)
+        ws, _ = self.desk(client=SPEAKS)
+        ws.send_bytes(SECOND)
+        ws.send_json({"type": "audio_end", "turn_id": "a1"})
+        self.assertTrue(self.fake.in_flight.wait(10))
+        ws.send_json({"type": "cancel", "turn_id": "a1"})
+        self.assertTrue(wait_for(lambda: companion_api._SESSIONS and next(iter(companion_api._SESSIONS)).active
+                                 and next(iter(companion_api._SESSIONS)).active.cancel.is_set()))
+        gate.set()
+        frames = self.until_idle(ws, "a1")
+        self.assertEqual(self.spoken(frames), [(0, "Good evening, sir.", False)])
+
+    def test_a_sentence_said_before_a_restart_stays_said_and_the_last_is_final(self):
+        self.use(ScriptedAskStuff([("Let me look into it. ", True), ("Checking the", False),
+                                   ("It is **nine** o'clock, sir.", True)]))
+        ws, _ = self.desk(client=SPEAKS)
+        frames = self.speak(ws)
+        self.assertEqual(self.spoken(frames), [(0, "Let me look into it.", False),
+                                               (1, "It is nine o'clock, sir.", True)])
+
+    def test_a_reply_whose_end_leaves_nothing_more_to_say_still_ends_final(self):
+        self.use(ScriptedAskStuff([("Let me look into it. ", True), ("Checking the", False), ("", True)]))
+        ws, _ = self.desk(client=SPEAKS)
+        frames = self.speak(ws)
+        self.assertEqual(self.spoken(frames), [(0, "Let me look into it.", False), (1, "", True)])
+
+    def test_a_reply_with_nothing_to_say_is_not_spoken(self):
+        self.use(ScriptedAskStuff([("", True)]))
+        ws, _ = self.desk(client=SPEAKS)
+        frames = self.speak(ws)
+        self.assertEqual(self.spoken(frames), [])
+        self.assertNotIn("speaking", [f.get("state") for f in frames])
 
 
 class TestOverARealSocket(CompanionTest):

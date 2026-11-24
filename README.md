@@ -303,15 +303,15 @@ All settings can be set as environment variables or in a `.env` file. `.env.exam
 
 ### Desktop companion and Google
 
-For the desktop app of [plan 14](plans/14-desktop-companion.md); [Desktop companion](#desktop-companion) says how to set it up. The first three are live; the rest are **reserved**: declared ahead of the code that reads them, they do nothing yet, and Fritz warns at startup if you set one. Three rules are enforced whatever is built: a wildcard `COMPANION_BIND`, `COMPANION_ENABLED` without `COMPANION_TOKEN`, and an unknown `COMPANION_TTS` each refuse to start.
+For the desktop app of [plan 14](plans/14-desktop-companion.md); [Desktop companion](#desktop-companion) says how to set it up. The first four are live; the rest are **reserved**: declared ahead of the code that reads them, they do nothing yet, and Fritz warns at startup if you set one. Three rules are enforced whatever is built: a wildcard `COMPANION_BIND`, `COMPANION_ENABLED` without `COMPANION_TOKEN`, and an unknown `COMPANION_TTS` each refuse to start.
 
 | Variable | Default | Description |
 |---|---|---|
 | `COMPANION_ENABLED` | `false` | Serves the `/companion` WebSocket the desktop app talks to, at `ws://127.0.0.1:ADMIN_PANEL_PORT/companion`. It runs in the admin panel's web server, so it needs `ADMIN_PANEL_PASSWORD` set as well. |
 | `COMPANION_TOKEN` | — | The only gate on `/companion`: the panel's Basic auth and same-origin checks do not apply to a WebSocket. Deliberately separate from `CHAT_PASSWORD` and `ADMIN_PANEL_PASSWORD`. Whoever holds it can be any desk, and a desk `IDENTITY_LINKS` links to you is you: your memories, your name, your desk conversation. Required when `COMPANION_ENABLED` is true; use at least 32 random characters. |
 | `COMPANION_MAX_CLIENTS` | `2` | Desktop clients connected at once. One more is turned away (close code 4409). |
+| `COMPANION_TTS` | `local` | Who speaks his replies to what you said aloud (a typed question is answered in the bubble alone): `local`, the desktop app voicing the sentences the brain sends it, once it can (plan 14, PR 10); `xtts`, the brain with the `/voice` engine, not built yet, so nothing is spoken and Fritz warns at startup; or `off`. |
 | `COMPANION_BIND` | `127.0.0.1` | Reserved (plan 14, Phase 5). Where `/companion` will listen for a second device; until then it is served with the panel on `127.0.0.1`. Never a wildcard: any address meaning "every interface" (`0.0.0.0`, `::` and their other spellings) or an empty value is refused. |
-| `COMPANION_TTS` | `local` | Reserved (plan 14, PR 9). Who speaks the desk's replies: `local`, `xtts` or `off`. |
 | `GOOGLE_MCP_ENABLED` | `false` | Reserved (plan 14, PR 15). Read-only Gmail, Drive and Calendar for `ROOT_USER`. |
 
 ### Models and Ollama
@@ -721,7 +721,7 @@ Two ways of running the brain cannot serve the desk today: `main_telegram.py` ne
 
 Hold push-to-talk (Ctrl+Alt+V) and speak, and the brain hears you with the same Whisper speech to text a Discord voice note goes through (faster-whisper, set by the `WHISPER_*` settings). It needs faster-whisper installed in the brain's environment, `pip install ".[voice]"` or just `pip install -c requirements.txt faster-whisper` (about 48 MiB, no torch); until it is, the brain's welcome doesn't offer `audio-in`, so the desk keeps the microphone shut and says to type instead. The first clip loads the Whisper model, downloading it first if it isn't cached (`small` is about 464 MiB from Hugging Face), so that one takes a while; later ones are heard in a second or two on the CPU.
 
-What you said is answered as a spoken question (he keeps a spoken answer short), in the bubble as a typed one is; the brain also sends back what it heard (`stt`), which the bubble doesn't show yet. A clip with no speech in it, or one Whisper couldn't make out, is said in the bubble instead. Only how long a clip was is logged, never what was said (the words reach the log only at `LOG_LEVEL=DEBUG`), and its WAV is deleted once heard.
+What you said is answered as a spoken question (he keeps a spoken answer short), in the bubble as a typed one is; the brain also sends back what it heard (`stt`), which the bubble doesn't show yet. With `COMPANION_TTS=local` (the default) it will send the answer for the desk to say aloud as well, a sentence at a time as it is written, so he starts speaking before he has finished thinking; a typed question's answer is never spoken. It sends them only to a desk that says it voices text itself, which the desktop app will from plan 14's PR 10, so until then nothing is sent and nothing is said. A clip with no speech in it, or one Whisper couldn't make out, is said in the bubble instead. Only how long a clip was is logged, never what was said (the words reach the log only at `LOG_LEVEL=DEBUG`), and its WAV is deleted once heard.
 
 ### Who the desk is
 
