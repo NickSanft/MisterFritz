@@ -364,6 +364,21 @@ describe("the bubble's colours", () => {
     expect(rules).toMatch(/\.muted-sign \{[^}]*width:\s*26px[^}]*height:\s*26px/);
   });
 
+  it("draw the meter as DivoraVoice's, inside the panel's column, hidden until he listens", () => {
+    const rules = CSS.replace(/\/\*[\s\S]*?\*\//g, "");
+    expect(rules).toMatch(
+      /\.hmeter-level \{[^}]*background: linear-gradient\(90deg, var\(--success\) 0%, var\(--success\) 60%, var\(--warning\) 82%, var\(--danger\) 100%\)/,
+    );
+    expect(rules).toMatch(/\.hmeter-peak \{[^}]*background: var\(--text-hi\);[^}]*box-shadow: var\(--meter-peak-glow\)/);
+    expect(rules).toMatch(/\.hmeter \{[^}]*overflow: hidden/);
+    expect(rules).toMatch(/\.bubble-meter \{[^}]*display: none/);
+    // Never wider than its column, its border inside its width (his page has
+    // no box-sizing reset, as DivoraVoice's has): his window may be narrow.
+    expect(rules).toMatch(/\.bubble-meter \{[^}]*max-width: 100%/);
+    expect(rules).toMatch(/\.bubble-meter \{[^}]*box-sizing: border-box/);
+    expect(VIEW_TS).toMatch(/"hmeter bubble-meter", content\)/);
+  });
+
   it("are set as text only, never as markup", () => {
     const code = VIEW_TS.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
     expect(code).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);

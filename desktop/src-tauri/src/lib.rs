@@ -83,6 +83,10 @@ pub const PTT_REFUSED_EVENT: &str = "ptt:refused";
 /// Sent to the avatar's page with `{press, why}` when a clip came to
 /// nothing: too short, or the microphone failed.
 pub const PTT_NOTHING_EVENT: &str = "ptt:nothing";
+/// Sent to the avatar's page with `{press, level}` 20 times a second while
+/// he listens for the brain, from the ears' thread: the RMS of what came
+/// since the last, 0 to 1, for his bubble's meter.
+pub const PTT_LEVEL_EVENT: &str = "ptt:level";
 /// Sent to the avatar's page with `{id, millis, press}`: a clip waits for it. The
 /// page takes it (`ptt_take`), sends it to the brain, and says whether it
 /// went on (`ptt_sent`).
@@ -246,7 +250,7 @@ fn push_to_talk(app: &AppHandle, pressed: bool) {
         }
         audio_in::Edge::Save(dir) => audio_in::press(device, || {}, |_| {}, move |clip| audio_in::save_clip(&dir, clip)),
         audio_in::Edge::Send => {
-            let (h, k) = (app.clone(), app.clone());
+            let (h, k, m) = (app.clone(), app.clone(), app.clone());
             // A press that is AlreadyHeld leaves a gap: no outcome comes for it.
             let press = PRESSES.fetch_add(1, Ordering::SeqCst) + 1;
             // Told from the ears' thread, before it opens the microphone, so
@@ -254,7 +258,12 @@ fn push_to_talk(app: &AppHandle, pressed: bool) {
             let listening = move || {
                 let _ = h.emit_to(OVERLAY_LABEL, PTT_LISTENING_EVENT, ptt_listening_payload(press));
             };
-            audio_in::press(device, listening, |_| {}, move |clip| clip_heard(&k, press, clip))
+            // Each level as it is measured, on the same thread: after the
+            // listening, and before the clip's outcome.
+            let level = move |l: f32| {
+                let _ = m.emit_to(OVERLAY_LABEL, PTT_LEVEL_EVENT, ptt_level_payload(press, l));
+            };
+            audio_in::press(device, listening, level, move |clip| clip_heard(&k, press, clip))
         }
     };
     match outcome {
@@ -314,6 +323,14 @@ fn ptt_why_payload(why: &str) -> serde_json::Value {
 /// `{press}`, for `ptt:listening`.
 fn ptt_listening_payload(press: u64) -> serde_json::Value {
     serde_json::json!({ "press": press })
+}
+
+/// `{press, level}`, for `ptt:level`: the level as measured, 0 to 1 (a
+/// level that is no number as 0), kept to four places.
+fn ptt_level_payload(press: u64, level: f32) -> serde_json::Value {
+    let level = if level.is_finite() { level.clamp(0.0, 1.0) } else { 0.0 };
+    let level = (f64::from(level) * 10_000.0).round() / 10_000.0;
+    serde_json::json!({ "press": press, "level": level })
 }
 
 /// `{press, why}`, for `ptt:nothing`.
@@ -1458,7 +1475,8 @@ mod tests {
         assert_eq!(events["pttRefused"], super::PTT_REFUSED_EVENT);
         assert_eq!(events["pttNothing"], super::PTT_NOTHING_EVENT);
         assert_eq!(events["pttClip"], super::PTT_CLIP_EVENT);
-        assert_eq!(events.len(), 15, "an event with no Rust half: {events:?}");
+        assert_eq!(events["pttLevel"], super::PTT_LEVEL_EVENT);
+        assert_eq!(events.len(), 16, "an event with no Rust half: {events:?}");
         let sorted = |v: &Value| {
             let mut k: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
             k.sort_unstable();
@@ -1468,6 +1486,10 @@ mod tests {
         assert_eq!(sorted(&super::ptt_listening_payload(2)), fixture["pttListeningKeys"]);
         assert_eq!(sorted(&super::ptt_nothing_payload(2, "x")), fixture["pttNothingKeys"]);
         assert_eq!(sorted(&super::ptt_clip_payload(3, 2400, 2)), fixture["pttClipKeys"]);
+        assert_eq!(sorted(&super::ptt_level_payload(2, 0.5)), fixture["pttLevelKeys"]);
+        assert_eq!(super::ptt_level_payload(2, 0.123_456), serde_json::json!({ "press": 2, "level": 0.1235 }));
+        assert_eq!(super::ptt_level_payload(2, 1.5), serde_json::json!({ "press": 2, "level": 1.0 }));
+        assert_eq!(super::ptt_level_payload(2, f32::NAN)["level"], serde_json::json!(0.0), "never NaN on the wire");
         assert_eq!(super::ptt_clip_payload(3, 2400, 2), serde_json::json!({ "id": 3, "millis": 2400, "press": 2 }));
         assert_eq!(super::ptt_nothing_payload(2, "x"), serde_json::json!({ "press": 2, "why": "x" }));
         assert_eq!(super::ptt_listening_payload(2), serde_json::json!({ "press": 2 }));
@@ -2101,8 +2123,13 @@ mod tests {
         assert_eq!(src.matches("audio_in::press(").count(), 2, "two places open the microphone");
         let save = ptt.find("audio_in::Edge::Save(dir) => audio_in::press(").expect("one to save");
         let send = ptt.find("audio_in::Edge::Send => {").expect("one to send");
-        assert!(ptt[send..].contains("audio_in::press(device, listening, |_| {}, move |clip| clip_heard(&k, press, clip))"));
+        assert!(ptt[send..].contains("audio_in::press(device, listening, level, move |clip| clip_heard(&k, press, clip))"));
         assert!(ptt[send..].contains("ptt_listening_payload(press)"), "listening says which press");
+        // Its levels go to his page, each with its press; a clip only saved
+        // has no page to tell.
+        assert!(ptt[send..].contains("m.emit_to(OVERLAY_LABEL, PTT_LEVEL_EVENT, ptt_level_payload(press, l))"));
+        assert!(!ptt[save..send].contains("PTT_LEVEL_EVENT") && ptt[save..send].contains("|_| {}"), "{}", &ptt[save..send]);
+        assert_eq!(src.matches("PTT_LEVEL_EVENT").count(), 2, "its const, and the Send arm's");
         assert!(ptt[send..].contains("let press = PRESSES.fetch_add(1, Ordering::SeqCst) + 1;"), "each press its own number");
         let closed = ptt.find("audio_in::Edge::StayClosed(why) => {").unwrap();
         assert!(ptt[closed..save].contains("PTT_REFUSED_EVENT") && ptt[closed..save].contains("return;"));

@@ -183,8 +183,11 @@ to send it). Otherwise it stays closed and the bubble says why: "His brain
 can't hear yet: type to him instead." until the brain's audio turn (PR 9)
 lands, or that he isn't connected; over a reply still running, as that
 reply's notice, the reply kept. While it is open the bubble says
-*Listening…*, and a reply still running is cancelled, as asking anew
-cancels one. Let go, a clip of at least 0.3 s waits in the shell for his
+*Listening…* over DivoraVoice's level meter, which shows how loud the
+microphone hears you (the shell sends its level 20 times a second,
+`ptt:level`; the meter reads it in decibels, and its cap holds the
+loudest of the last second), and a reply still running is cancelled, as
+asking anew cancels one. Let go, a clip of at least 0.3 s waits in the shell for his
 page, which takes it (`ptt_take`, the raw bytes), sends it to the brain as
 one binary frame and its `audio_end`, and shows the brain's turn as a typed
 one is shown; a shorter one, or a microphone that failed, is said in the

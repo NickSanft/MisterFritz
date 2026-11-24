@@ -39,6 +39,7 @@ import {
   BRAIN_CANT_HEAR,
   NOT_CONNECTED,
   PTT_CLIP_EVENT,
+  PTT_LEVEL_EVENT,
   PTT_LISTENING_EVENT,
   PTT_NOTHING_EVENT,
   PTT_REFUSED_EVENT,
@@ -47,6 +48,7 @@ import {
   answerSay,
   onClip,
   onSay,
+  parseLevel,
   parseListening,
   parseNothing,
   parseWhy,
@@ -58,6 +60,7 @@ import {
 import { BubbleClock, anchorAbove, charCount, plainText } from "./bubble";
 import { createBubble } from "./BubbleView";
 import { watchMuted } from "./muted";
+import { LevelMeter } from "./meter";
 import { INITIAL, cancelFirst, pressOf, reduce, type TurnEvent, type TurnView } from "./state";
 import { HitPublisher, shapeNow, stamped } from "./hitShape";
 import { fetchPage, hitArgs, sendHitRects } from "./hitWire";
@@ -133,6 +136,8 @@ const companion = new CompanionClient();
 let turn: TurnView = INITIAL;
 /** Push-to-talk muted (`audio.muted`): the sign over his head. */
 let muted = false;
+/** The microphone's levels while he listens (`ptt:level`). */
+const meter = new LevelMeter();
 const bubble = createBubble(document);
 const bubbleClock = new BubbleClock();
 let wasOnline = false;
@@ -217,6 +222,11 @@ void listen<unknown>(PTT_CLIP_EVENT, (e) => {
     if (r.kind === "unsent") apply({ kind: "unheard", why: r.why, press: r.press });
   });
 });
+// The microphone's level while he listens, for the meter in his bubble.
+void listen<unknown>(PTT_LEVEL_EVENT, (e) => {
+  const l = parseLevel(e.payload);
+  if (l !== null) meter.hear(l.press, l.level, performance.now());
+});
 
 /** Tint `a` and set its motion from the theme (none heard yet: as he was). */
 function dress(a: VrmActor): void {
@@ -286,7 +296,8 @@ function paintBubble(dt: number): void {
   const anchor = actor
     ? actor.headScreen(camera, view.width, view.height, anchorAbove(actor.crownAboveHead))
     : { x: view.width / 2, y: view.height * HEADROOM };
-  bubble.paint(turn, env, anchor, view, muted);
+  const listening = turn.phase === "listening" && !turn.ended ? pressOf(turn.turnId) : null;
+  bubble.paint(turn, env, anchor, view, muted, listening === null ? null : meter.view(listening, performance.now()));
 }
 
 const loop = new PacedLoop((dt) => {

@@ -21,6 +21,7 @@ import {
   CLIP_GONE,
   NOT_CONNECTED,
   PTT_CLIP_EVENT,
+  PTT_LEVEL_EVENT,
   PTT_LISTENING_EVENT,
   PTT_NOTHING_EVENT,
   PTT_REFUSED_EVENT,
@@ -28,6 +29,7 @@ import {
   PTT_TAKE_CMD,
   onClip,
   parseClip,
+  parseLevel,
   parseListening,
   parseNothing,
   parseWhy,
@@ -281,6 +283,7 @@ describe("the companion link's wire", () => {
     expect(PTT_REFUSED_EVENT).toBe(fixture.events.pttRefused);
     expect(PTT_NOTHING_EVENT).toBe(fixture.events.pttNothing);
     expect(PTT_CLIP_EVENT).toBe(fixture.events.pttClip);
+    expect(PTT_LEVEL_EVENT).toBe(fixture.events.pttLevel);
     expect(PTT_TAKE_CMD).toBe(c.pttTake.name);
     expect(Object.keys(pttTakeArgs(3))).toEqual(c.pttTake.args);
     expect(PTT_SENT_CMD).toBe(c.pttSent.name);
@@ -316,6 +319,15 @@ describe("the companion link's wire", () => {
     expect(parseNothing(nothing)).toEqual(nothing);
     for (const bad of [{ why: "x" }, { press: 3 }, { press: 3, why: "" }, { press: 0, why: "x" }]) {
       expect(parseNothing(bad), JSON.stringify(bad)).toBeNull();
+    }
+    const level = { press: 3, level: 0.0312 };
+    expect(Object.keys(level).sort()).toEqual(fixture.pttLevelKeys);
+    expect(parseLevel(level)).toEqual(level);
+    expect(parseLevel({ press: 3, level: 0 })).toEqual({ press: 3, level: 0 });
+    expect(parseLevel({ press: 3, level: 1 })).toEqual({ press: 3, level: 1 });
+    for (const bad of [null, { press: 3 }, { level: 0.5 }, { press: 0, level: 0.5 }, { press: 3, level: -0.1 },
+                       { press: 3, level: 1.01 }, { press: 3, level: "0.5" }, { press: 3, level: null }]) {
+      expect(parseLevel(bad), JSON.stringify(bad)).toBeNull();
     }
   });
 

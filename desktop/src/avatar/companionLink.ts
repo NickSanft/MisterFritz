@@ -108,6 +108,9 @@ export const PTT_NOTHING_EVENT = "ptt:nothing";
  * the raw PCM16 as an ArrayBuffer), sends it to the brain, and says whether
  * it went on (`ptt_sent`). */
 export const PTT_CLIP_EVENT = "ptt:clip";
+/** `{press, level}`, 20 times a second while he listens: the RMS of what
+ * the microphone heard since the last, 0 to 1, for his bubble's meter. */
+export const PTT_LEVEL_EVENT = "ptt:level";
 export const PTT_TAKE_CMD = "ptt_take";
 export const PTT_SENT_CMD = "ptt_sent";
 
@@ -131,6 +134,14 @@ export function parseNothing(v: unknown): { press: number; why: string } | null 
   const why = parseWhy(v);
   const press = parseListening(v);
   return why === null || press === null ? null : { press, why };
+}
+
+/** A `ptt:level`, or null when it isn't one. */
+export function parseLevel(v: unknown): { press: number; level: number } | null {
+  const o = obj(v);
+  const press = parseListening(v);
+  if (!o || press === null || typeof o.level !== "number" || !(o.level >= 0 && o.level <= 1)) return null;
+  return { press, level: o.level };
 }
 
 /** A `{why}`'s words, or null when it isn't one. */

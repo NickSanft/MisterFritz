@@ -8,6 +8,11 @@
  * "AA contrast on the actual background"). Text is --text-hi, the secondary
  * line --text-mid; both pass AA on --surface-2 in every mood and theme
  * (bubble.test.ts), and the dimmer text tokens, which don't, are never used.
+ *
+ * Lifted in part from DivoraVoiceMod (MIT, Copyright (c) 2026 Divora
+ * Contributors), src/styles.css at 62ed6a5, lines 866-891: the horizontal
+ * meter (.hmeter, .hmeter-level, .hmeter-peak). See
+ * desktop/LICENSES/DivoraVoiceMod.txt. The rest is Fritz's own.
  */
 .bubble {
   position: fixed;
@@ -135,6 +140,48 @@
   width: 26px;
   height: 26px;
   box-shadow: var(--shadow-2);
+}
+
+/* The level meter while he listens, under "Listening…": DivoraVoice's
+   horizontal meter, its level emerald→gold→crimson with a cap in the text's
+   colour. From .hmeter to .hmeter-peak, verbatim but taken out of its
+   @layer (the lift is credited at the top). .bubble-meter, its width, never
+   past its column's (his window can be narrow), and its place in the
+   column, is Fritz's own; its border-box stands in for DivoraVoice's
+   `* { box-sizing: border-box }` reset, which his page hasn't, so its
+   border sits inside its width and its 8px height, as it does there. */
+.hmeter {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
+
+.hmeter-level {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--success) 0%, var(--success) 60%, var(--warning) 82%, var(--danger) 100%);
+}
+
+.hmeter-peak {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--text-hi);
+  box-shadow: var(--meter-peak-glow);
+}
+.bubble-meter {
+  display: none;
+  box-sizing: border-box;
+  width: 140px;
+  max-width: 100%;
+  flex: none;
 }
 
 /* Interrupted, or pictures it can't show yet. */

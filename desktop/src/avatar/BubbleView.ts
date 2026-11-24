@@ -15,13 +15,18 @@
  * - While push-to-talk is muted (the tray's Mute push-to-talk), the muted
  *   sign shows over his head the whole time: in the bubble's corner while
  *   it shows, else on its own where the bubble's tail would point.
+ * - While he listens, DivoraVoice's level meter shows under *Listening…*:
+ *   shown or hidden with the turn (so the bubble is measured as ever), its
+ *   level and cap moved at every paint (meter.ts).
  *
  * Lifted in part from DivoraVoiceMod (MIT, Copyright (c) 2026 Divora
- * Contributors), src/components/Sigil.tsx at 62ed6a5: the `muted` sigil's
- * marks, in `mutedSigil`. See desktop/LICENSES/DivoraVoiceMod.txt. The rest
- * is Fritz's own.
+ * Contributors) at 62ed6a5: the `muted` sigil's marks, in `mutedSigil`,
+ * from src/components/Sigil.tsx; and `HMeter`'s three elements (a level and
+ * a cap in a track), from src/components/Meters.tsx. See
+ * desktop/LICENSES/DivoraVoiceMod.txt. The rest is Fritz's own.
  */
 import { EDGE, GAP, layout, plainText, type Envelope } from "./bubble";
+import type { MeterView } from "./meter";
 import type { TurnView } from "./state";
 
 /** What the bubble shows, worked out from the turn (pure, for the tests). */
@@ -62,13 +67,15 @@ export interface Bubble {
   /** The muted sign shown on its own, while no bubble shows. */
   readonly sign: HTMLElement;
   /** Draw `v` as `env` says, over his head at `anchor`, in a window `view`
-   * big (CSS pixels), with the muted sign while `muted`. */
+   * big (CSS pixels), with the muted sign while `muted`, and `meter` on the
+   * meter while he listens (empty without it). */
   paint(
     v: TurnView,
     env: Envelope,
     anchor: { x: number; y: number },
     view: { width: number; height: number },
     muted?: boolean,
+    meter?: MeterView | null,
   ): void;
 }
 
@@ -111,6 +118,10 @@ export function signAt(anchor: { x: number; y: number }, view: { width: number; 
   return { left: within(ax - SIGN_SIZE / 2, view.width), top: within(ay - GAP - SIGN_SIZE, view.height) };
 }
 
+/** Whether the turn is his listening: the meter shows. */
+const listens = (v: TurnView): boolean => v.phase === "listening" && !v.ended;
+const clamp01 = (n: number): number => (Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0);
+
 const round = (v: number, places = 0): string => {
   const f = 10 ** places;
   return String(Math.round(v * f) / f);
@@ -130,6 +141,9 @@ export function createBubble(doc: Document, parent: HTMLElement = doc.body): Bub
   el("span", "orb", progress);
   const progressText = el("span", "bubble-progress-text", progress);
   const text = el("div", "bubble-text", content);
+  const meter = el("div", "hmeter bubble-meter", content);
+  const meterLevel = el("div", "hmeter-level", meter);
+  const meterPeak = el("div", "hmeter-peak", meter);
   const apology = el("div", "bubble-apology", content);
   el("span", "orb warn", apology);
   const apologyText = el("span", "bubble-apology-text", apology);
@@ -170,7 +184,7 @@ export function createBubble(doc: Document, parent: HTMLElement = doc.body): Bub
   return {
     element: root,
     sign,
-    paint(v, env, anchor, view, muted = false) {
+    paint(v, env, anchor, view, muted = false, meter_ = null) {
       if (!env.visible) {
         style(root, "root", "display", "none");
         style(sign, "sign", "display", muted ? "flex" : "none");
@@ -190,8 +204,16 @@ export function createBubble(doc: Document, parent: HTMLElement = doc.body): Bub
         const t = bubbleText(v);
         row(progress, "progress", "flex", progressText, t.progress);
         row(text, "text", "block", text, t.body);
+        style(meter, "meter", "display", listens(v) ? "block" : "none");
         row(apology, "apology", "flex", apologyText, t.apology);
         row(note, "note", "block", note, t.note);
+      }
+      if (listens(v)) {
+        const m = meter_ ?? { level: 0, peak: 0 };
+        style(meterLevel, "meterLevel", "width", `${round(clamp01(m.level) * 100, 1)}%`);
+        // DivoraVoice's cap shows above 2%.
+        style(meterPeak, "meterPeak", "display", m.peak > 0.02 ? "block" : "none");
+        style(meterPeak, "meterPeak", "left", `calc(${round(clamp01(m.peak) * 100, 1)}% - 1px)`);
       }
       // Its widest and tallest first, then its own width as laid out in that.
       const room = layout(anchor, view, Number.POSITIVE_INFINITY);

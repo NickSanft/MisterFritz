@@ -17,7 +17,8 @@
     "pttListening": "ptt:listening",
     "pttRefused": "ptt:refused",
     "pttNothing": "ptt:nothing",
-    "pttClip": "ptt:clip"
+    "pttClip": "ptt:clip",
+    "pttLevel": "ptt:level"
   },
   "hotkeys": {
     "arrange": "avatar:arrange"
@@ -115,6 +116,7 @@
   "pttListeningKeys": ["press"],
   "pttNothingKeys": ["press", "why"],
   "pttClipKeys": ["id", "millis", "press"],
+  "pttLevelKeys": ["level", "press"],
   "pttWords": {
     "brainCantHear": "His brain can't hear yet: type to him instead.",
     "notConnected": "He isn't connected to his brain just now."

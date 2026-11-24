@@ -226,3 +226,48 @@ describe("the muted sign", () => {
     }
   });
 });
+
+describe("the meter while he listens", () => {
+  const listening = (revision = 1) => turn({ turnId: "ptt-1", phase: "listening", revision });
+  const level = (q: (s: string) => HTMLElement) => q(".hmeter-level").style.width;
+
+  it("shows under Listening…, its level and cap moved at every paint, the bubble not measured again", () => {
+    const { b, q } = mount();
+    b.paint(listening(), SHOWN, HEAD, VIEW, false, { level: 0.5, peak: 0.75 });
+    expect(q(".bubble-text").textContent).toBe(LISTENING);
+    expect(q(".bubble-meter").style.display).toBe("block");
+    expect(q(".bubble-meter").classList.contains("hmeter")).toBe(true);
+    expect(level(q)).toBe("50%");
+    expect(q(".hmeter-peak").style.display).toBe("block");
+    expect(q(".hmeter-peak").style.left).toBe("calc(75% - 1px)");
+    const reads = widthReads;
+    b.paint(listening(), SHOWN, HEAD, VIEW, false, { level: 0.123, peak: 0.75 });
+    expect(level(q)).toBe("12.3%");
+    expect(widthReads, "the meter's moves aren't measured").toBe(reads);
+  });
+
+  it("is empty with no level yet, and keeps its cap hidden at 2% or less, as DivoraVoice's", () => {
+    const { b, q } = mount();
+    b.paint(listening(), SHOWN, HEAD, VIEW, false, null);
+    expect(level(q)).toBe("0%");
+    expect(q(".hmeter-peak").style.display).toBe("none");
+    b.paint(listening(), SHOWN, HEAD, VIEW, false, { level: 0.01, peak: 0.02 });
+    expect(q(".hmeter-peak").style.display).toBe("none");
+    b.paint(listening(), SHOWN, HEAD, VIEW, false, { level: Number.NaN, peak: 7 });
+    expect(level(q)).toBe("0%");
+    expect(q(".hmeter-peak").style.left).toBe("calc(100% - 1px)");
+  });
+
+  it("goes with the listening: hidden for any other turn, and once it ends", () => {
+    const { b, q } = mount();
+    b.paint(turn({ reply: "Hi" }), SHOWN, HEAD, VIEW, false, { level: 0.5, peak: 0.5 });
+    expect(q(".bubble-meter").style.display).toBe("none");
+    b.paint(listening(2), SHOWN, HEAD, VIEW, false, { level: 0.5, peak: 0.5 });
+    expect(q(".bubble-meter").style.display).toBe("block");
+    b.paint({ ...listening(3), phase: "transcribing" }, SHOWN, HEAD, VIEW, false, { level: 0.5, peak: 0.5 });
+    expect(q(".bubble-meter").style.display).toBe("none");
+    b.paint({ ...listening(4), ended: true }, SHOWN, HEAD, VIEW, false, { level: 0.9, peak: 0.9 });
+    expect(q(".bubble-meter").style.display).toBe("none");
+    expect(level(q), "nothing moved once it ended").toBe("50%");
+  });
+});
