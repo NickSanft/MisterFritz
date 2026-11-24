@@ -84,6 +84,26 @@ class TestTranscribe(unittest.TestCase):
 
         self.assertEqual(result, "good evening")
 
+    def test_logs_how_much_was_heard_never_what_but_at_debug(self):
+        """A voice note's words are the speaker's: INFO says how many
+        characters were heard, and only DEBUG says them."""
+        stub, _, _ = _make_faster_whisper_stub("remind me about the biopsy")
+        audio = _make_audio_mock()
+
+        with patch.dict(sys.modules, {"faster_whisper": stub}), \
+             patch("stt.AudioSegment.from_file", return_value=audio), \
+             patch("stt.detect_nonsilent", return_value=[[0, 1000]]):
+            import stt
+            with self.assertLogs("stt", level="DEBUG") as caught:
+                stt.transcribe("audio.ogg")
+
+        info = [r.getMessage() for r in caught.records
+                if r.levelname == "INFO" and r.getMessage().startswith("Whisper transcription")]
+        self.assertEqual(info, ["Whisper transcription (lang=en, prob=0.99): 26 characters"])
+        debug = [r.getMessage() for r in caught.records if r.levelname == "DEBUG"]
+        self.assertTrue(any("biopsy" in m for m in debug), debug)
+        self.assertFalse(any("biopsy" in r.getMessage() for r in caught.records if r.levelno > 10))
+
     def test_joins_multiple_segments(self):
         """Multiple segments are joined with spaces into a single string."""
         stub = types.ModuleType("faster_whisper")

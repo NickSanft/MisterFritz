@@ -96,10 +96,14 @@ def transcribe(audio_file_path: str) -> str | None:
 
         segments, info = model.transcribe(wav_path, **kwargs)
         text = " ".join(seg.text for seg in segments).strip()
+        # How much was heard at INFO, and the words only at DEBUG: they are
+        # the speaker's. (main_discord logs a Discord voice note's text
+        # itself, as it did before.)
         logger.info(
-            "Whisper transcription (lang=%s, prob=%.2f): %r",
-            info.language, info.language_probability, text,
+            "Whisper transcription (lang=%s, prob=%.2f): %d characters",
+            info.language, info.language_probability, len(text),
         )
+        logger.debug("Whisper transcription: %r", text)
         # "" for a clip Whisper heard nothing in — silence, a half second
         # of fumbling, a recording of a quiet room — and None only when the
         # transcription itself failed. Both used to come back as None, so the

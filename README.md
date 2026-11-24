@@ -700,7 +700,7 @@ ssh -L 8001:127.0.0.1:8001 you@your-bot-host
 
 ## Desktop companion
 
-Fritz has a body for the Windows desktop: a small figure who stands on your screen, is asked from a prompt (Ctrl+Alt+F, a double-click on him, or *Ask Fritz…* in his menu) and answers in a bubble over his head. It is an app of its own, in [`desktop/`](desktop/README.md), which talks to this brain over one WebSocket, `/companion`. [Plan 14](plans/14-desktop-companion.md) is the design. Typed questions work today; voice, the wallpaper and the widgets are still to come.
+Fritz has a body for the Windows desktop: a small figure who stands on your screen, is asked from a prompt (Ctrl+Alt+F, a double-click on him, or *Ask Fritz…* in his menu) and answers in a bubble over his head. It is an app of its own, in [`desktop/`](desktop/README.md), which talks to this brain over one WebSocket, `/companion`. [Plan 14](plans/14-desktop-companion.md) is the design. Typed and spoken questions work today (see [Talking to him](#talking-to-him)); his spoken answers, the wallpaper and the widgets are still to come.
 
 ### Turning it on
 
@@ -716,6 +716,12 @@ COMPANION_TOKEN=...
 Run the brain natively, as `python main_local.py` (no Discord) or `python main_discord.py`, then build the app ([desktop/README.md](desktop/README.md)), paste the token into its Settings › Brain and press *Connect*. The app looks for the brain at `ws://127.0.0.1:8001/companion`; if you have changed `ADMIN_PANEL_PORT`, change *Where his brain is*, just above the token, to match.
 
 Two ways of running the brain cannot serve the desk today: `main_telegram.py` never starts the web server, and the Docker Compose bot (Option B) publishes no port for it and listens on its container's own loopback. `COMPANION_BIND` is reserved for reaching the brain from another machine and does nothing yet.
+
+### Talking to him
+
+Hold push-to-talk (Ctrl+Alt+V) and speak, and the brain hears you with the same Whisper speech to text a Discord voice note goes through (faster-whisper, set by the `WHISPER_*` settings). It needs faster-whisper installed in the brain's environment, `pip install ".[voice]"` or just `pip install -c requirements.txt faster-whisper` (about 48 MiB, no torch); until it is, the brain's welcome doesn't offer `audio-in`, so the desk keeps the microphone shut and says to type instead. The first clip loads the Whisper model, downloading it first if it isn't cached (`small` is about 464 MiB from Hugging Face), so that one takes a while; later ones are heard in a second or two on the CPU.
+
+What you said is answered as a spoken question (he keeps a spoken answer short), in the bubble as a typed one is; the brain also sends back what it heard (`stt`), which the bubble doesn't show yet. A clip with no speech in it, or one Whisper couldn't make out, is said in the bubble instead. Only how long a clip was is logged, never what was said (the words reach the log only at `LOG_LEVEL=DEBUG`), and its WAV is deleted once heard.
 
 ### Who the desk is
 

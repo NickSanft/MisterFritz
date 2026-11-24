@@ -42,21 +42,34 @@ agent's callbacks fire on that pool thread and hand frames to the event loop,
 and each session's one sender task writes every frame in the order it was
 queued, so nothing is sent from two places at once.
 
-Audio (PR 9) and widgets (Phase 3) are not served: the welcome's server_caps
-say "text" only, a binary frame is dropped unread, and an `audio_end` or a
-`subscribe` is answered `bad_frame`.
+Audio (PR 9): the welcome offers `audio-in` once faster-whisper is
+installed (the [voice] extra); without it a clip could only ever come back
+unheard, so the desk is told to type instead. A push-to-talk clip is binary
+frames of 16 kHz mono PCM16, AUDIO_MAX_BYTES at most, then an `audio_end`
+naming its turn. That turn is a turn as a say's is (busy, barge-in and cancel
+alike): `state transcribing`, the clip written to a WAV and transcribed on
+the pool (stt.transcribe), then `stt` with what was heard and the turn itself
+as MessageSource.DESKTOP_VOICE. Nothing heard, or the transcriber failing,
+ends it with `stt_failed`; a clip that is no clip (empty, half a sample, not
+16 kHz mono, too long) with `bad_frame`. What was said is never logged at INFO
+or above, only how long it was (stt.transcribe keeps the words to DEBUG).
+
+Widgets (Phase 3) are not served: a `subscribe` is answered `bad_frame`.
 """
 from __future__ import annotations
 
 import asyncio
 import base64
+import importlib.util
 import json
 import logging
 import os
 import re
 import secrets
+import tempfile
 import threading
 import time
+import wave
 from dataclasses import dataclass, field
 
 from starlette.routing import WebSocketRoute
@@ -67,8 +80,8 @@ import identity_store
 from bot_adapters import fritz_error, run_blocking
 from companion_protocol import (CLOSE_BAD_FRAME, CLOSE_BAD_TOKEN, CLOSE_FULL, CLOSE_GONE_QUIET,
                                 CLOSE_NO_HELLO, CLOSE_UNSUPPORTED, PROTOCOL_VERSION, AudioEnd, BadFrame,
-                                Cancel, Done, Error, Hello, Ping, Pong, Progress, Say, State, Subscribe,
-                                Token, Welcome, parse_client_frame)
+                                Cancel, Done, Error, Hello, Ping, Pong, Progress, Say, State, Stt,
+                                Subscribe, Token, Welcome, parse_client_frame)
 from fritz_utils import MessageSource, canonical_user_id, resolve_identity
 from observability import audit_log
 
@@ -81,8 +94,21 @@ UNANSWERED_PINGS_ALLOWED = 2
 
 # The close codes (CLOSE_*) are companion_protocol's, imported above.
 
-# What this server does today. PR 9 adds the audio caps.
-SERVER_CAPS = ["text"]
+# A push-to-talk clip: 16 kHz mono PCM16, 30 seconds at most, as the desktop
+# sends it (desktop/src/shared/companion.ts, AUDIO_FORMAT and AUDIO_MAX_BYTES).
+AUDIO_RATE = 16000
+AUDIO_MAX_BYTES = 30 * AUDIO_RATE * 2
+
+
+def server_caps() -> list[str]:
+    """What this server does: text, and audio-in once it can transcribe."""
+    return ["text", "audio-in"] if _can_transcribe() else ["text"]
+
+
+def _can_transcribe() -> bool:
+    """Whether faster-whisper is installed. Its model loads (or downloads) at
+    the first clip, as stt.transcribe loads it for Discord."""
+    return importlib.util.find_spec("faster_whisper") is not None
 
 # Refused before it is parsed. A hello is well under 1 KiB, and the longest
 # say (8000 characters, every one an astral emoji written as 😀)
@@ -99,6 +125,11 @@ _COPY_BAD_FRAME = ("I'm afraid I could not make sense of that, sir. The particul
 _COPY_BUSY = ("One moment, sir: I am still attending to your last request. Do stop "
               "me first if you would rather I turned to this one.")
 _COPY_NO_EARS = "Forgive me, sir, but I cannot hear you at this desk as yet. Do type instead."
+# The first after Discord's words for a voice note it could not make out
+# (main_discord.py); the other two are the desk's own.
+_COPY_NOT_HEARD = "I could not make out a word of that, sir. Do say it again, or type it."
+_COPY_SILENCE = "I heard nothing at all, sir: hold the key while you speak."
+_COPY_TOO_LONG = "That ran longer than I can listen to at once, sir: half a minute at most."
 _COPY_NO_WIDGETS = "I keep no widgets at this desk as yet, sir."
 
 
@@ -117,10 +148,12 @@ class _Turn:
 
 @dataclass(frozen=True)
 class _Waiting:
-    """A say that came after its running turn was cancelled: barge-in."""
+    """A say, or a clip, that came after its running turn was cancelled:
+    barge-in. A clip is transcribed once it starts."""
     turn_id: str
     text: str
     source: MessageSource
+    pcm: bytes | None = None
 
 
 def _connected_as(canonical_id: str, identity: str) -> str:
@@ -161,6 +194,12 @@ class _Session:
         self.out: asyncio.Queue = asyncio.Queue()
         self.active: _Turn | None = None
         self.waiting: _Waiting | None = None
+        # The clip the next audio_end names, as its binary frames come, and
+        # whether it outgrew AUDIO_MAX_BYTES (then it is dropped whole). Kept
+        # only when the welcome offered audio-in.
+        self.hears = False
+        self.audio = bytearray()
+        self.audio_over = False
         self.unanswered_pings = 0
         self.loop = asyncio.get_running_loop()
 
@@ -208,8 +247,8 @@ async def companion_endpoint(ws: WebSocket) -> None:
             text = msg.get("text")
             if text is not None:
                 _dispatch(session, text)
-            # A binary frame is audio, which PR 9 serves. Dropped unread, never
-            # buffered: the welcome did not offer audio-in.
+            elif msg.get("bytes") is not None:
+                _hear(session, msg["bytes"])
     finally:
         _end_session(session)
         for task in tasks:
@@ -280,8 +319,10 @@ async def _handshake(ws: WebSocket) -> _Session | None:
     # ask_stuff either, which would record it against the linked one.
     identity_store.record(session.canonical_id, hello.client.name, "desktop")
     session.display_name = identity_store.display_name(session.identity)
+    caps = server_caps()
+    session.hears = "audio-in" in caps
     session.send(Welcome(protocol=PROTOCOL_VERSION, identity=session.identity,
-                         display_name=session.display_name, server_caps=SERVER_CAPS,
+                         display_name=session.display_name, server_caps=caps,
                          thread_id=session.thread_id))
     logger.info("companion: %s", _connected_as(session.canonical_id, session.identity))
     audit_log("companion_connect", result="ok", user_id=session.identity,
@@ -330,6 +371,7 @@ def _end_session(session: _Session) -> None:
     # Nothing is dispatched after this, so a say waiting behind a cancel is
     # dropped for good: the turn ahead of it finds none to start.
     session.waiting = None
+    session.audio.clear()
     if session.active is not None:
         # The client has gone; stop the model rather than finish for nobody.
         session.active.cancel.set()
@@ -392,7 +434,7 @@ def _dispatch(session: _Session, raw: str) -> None:
     elif isinstance(frame, Pong):
         session.unanswered_pings = 0
     elif isinstance(frame, AudioEnd):
-        session.send(Error(turn_id=frame.turn_id, code="bad_frame", text=_COPY_NO_EARS))
+        _end_clip(session, frame)
     elif isinstance(frame, Subscribe):
         session.send(Error(code="bad_frame", text=_COPY_NO_WIDGETS))
     else:   # a second hello
@@ -418,26 +460,69 @@ def _turn_id_near_an_end(raw: str) -> str | None:
     return None
 
 
-def _start_turn(session: _Session, turn_id: str, text: str, source: MessageSource) -> None:
+def _hear(session: _Session, data: bytes) -> None:
+    """A binary frame: part of the clip its audio_end will name. A clip that
+    outgrows AUDIO_MAX_BYTES is dropped whole, and its audio_end says so;
+    without audio-in, every one is dropped unread."""
+    if not session.hears or session.audio_over:
+        return
+    if len(session.audio) + len(data) > AUDIO_MAX_BYTES:
+        logger.warning("companion: %s sent a clip of more than %d bytes; dropped",
+                       session.canonical_id, AUDIO_MAX_BYTES)
+        session.audio.clear()
+        session.audio_over = True
+        return
+    session.audio.extend(data)
+
+
+def _end_clip(session: _Session, frame: AudioEnd) -> None:
+    """An audio_end: the clip so far is its turn's, and the next starts empty."""
+    pcm, over = bytes(session.audio), session.audio_over
+    session.audio.clear()
+    session.audio_over = False
+    if not session.hears:
+        session.send(Error(turn_id=frame.turn_id, code="bad_frame", text=_COPY_NO_EARS))
+        return
+    if over:
+        session.send(Error(turn_id=frame.turn_id, code="bad_frame", text=_COPY_TOO_LONG))
+        return
+    if frame.sample_rate != AUDIO_RATE or frame.channels != 1 or not pcm or len(pcm) % 2:
+        logger.warning("companion: %s sent a clip that can't be one: %d bytes at %d Hz, %d channel(s)",
+                       session.canonical_id, len(pcm), frame.sample_rate, frame.channels)
+        session.send(Error(turn_id=frame.turn_id, code="bad_frame", text=_COPY_BAD_FRAME))
+        return
+    _start_turn(session, frame.turn_id, "", MessageSource.DESKTOP_VOICE, pcm=pcm)
+
+
+def _start_turn(session: _Session, turn_id: str, text: str, source: MessageSource,
+                pcm: bytes | None = None) -> None:
+    """Start a turn: of `text`, or of what clip `pcm` says once transcribed."""
     active = session.active
     if active is not None:
         if active.cancel.is_set() and session.waiting is None:
             # Barge-in. The cancelled turn ends at the model's next token, or
             # when the tool in flight returns; this one starts then.
-            session.waiting = _Waiting(turn_id, text, source)
+            session.waiting = _Waiting(turn_id, text, source, pcm)
             return
         session.send(Error(turn_id=turn_id, code="busy", text=_COPY_BUSY))
         return
     turn = _Turn(turn_id)
     session.active = turn
-    session.send(State(turn_id=turn_id, state="thinking"))
-    task = asyncio.create_task(_run_turn(session, turn, text, source))
+    session.send(State(turn_id=turn_id, state="transcribing" if pcm is not None else "thinking"))
+    task = asyncio.create_task(_run_turn(session, turn, text, source, pcm))
     _TURN_TASKS.add(task)
     task.add_done_callback(_TURN_TASKS.discard)
 
 
-async def _run_turn(session: _Session, turn: _Turn, text: str, source: MessageSource) -> None:
+async def _run_turn(session: _Session, turn: _Turn, text: str, source: MessageSource,
+                    pcm: bytes | None = None) -> None:
     try:
+        if pcm is not None:
+            heard = await _transcribe(session, turn, pcm)
+            if heard is None:
+                return      # ended already, with done or stt_failed
+            text = heard
+            session.send(State(turn_id=turn.turn_id, state="thinking"))
         reply, images, interrupted = await run_blocking(_ask, session, turn, text, source)
     except Exception as e:
         session.send(Error(turn_id=turn.turn_id, code="turn_failed",
@@ -457,7 +542,58 @@ async def _run_turn(session: _Session, turn: _Turn, text: str, source: MessageSo
         # stopping, and a task started now would be left behind.
         task = asyncio.current_task()
         if waiting is not None and not (task and task.cancelling()):
-            _start_turn(session, waiting.turn_id, waiting.text, waiting.source)
+            _start_turn(session, waiting.turn_id, waiting.text, waiting.source, waiting.pcm)
+
+
+async def _transcribe(session: _Session, turn: _Turn, pcm: bytes) -> str | None:
+    """What clip `pcm` says, sent as `stt`; or None once the turn has ended:
+    cancelled (done, interrupted), nothing heard or the transcriber failing
+    (stt_failed). Only how long it was is audited, never what was said, and
+    stt.transcribe logs the words at DEBUG alone."""
+    started = time.monotonic()
+    heard = await run_blocking(_transcribe_clip, pcm)
+    said = (heard or "").strip()
+    if turn.cancel.is_set():
+        # Cancelled, or its desk gone, while it was heard: it ends as a turn
+        # cancelled before it reached the model, empty and interrupted.
+        result = "cancelled"
+        session.send(Done(turn_id=turn.turn_id, text="", interrupted=True))
+    elif heard is None:
+        # stt.transcribe has logged and counted the failure ("whisper_stt").
+        result = "failed"
+        session.send(Error(turn_id=turn.turn_id, code="stt_failed",
+                           text=fritz_error("companion_stt", note=_COPY_NOT_HEARD)))
+    elif not said:
+        result = "silent"
+        session.send(Error(turn_id=turn.turn_id, code="stt_failed", text=_COPY_SILENCE))
+    else:
+        result = "ok"
+        session.send(Stt(turn_id=turn.turn_id, text=said))
+    audit_log("companion_audio", user_id=session.identity, client=session.canonical_id,
+              audio_seconds=round(len(pcm) / (2 * AUDIO_RATE), 2), chars=len(said), result=result,
+              seconds=round(time.monotonic() - started, 2))
+    return said if result == "ok" else None
+
+
+def _transcribe_clip(pcm: bytes) -> str | None:
+    """On a pool thread: the clip written to a WAV of its own, transcribed,
+    and the WAV gone. stt.transcribe answers "" when it heard no speech and
+    None when it failed."""
+    import stt   # pydub at import, and faster-whisper only at the first clip
+
+    fd, path = tempfile.mkstemp(prefix="companion_", suffix=".wav")
+    try:
+        with os.fdopen(fd, "wb") as f, wave.open(f, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(AUDIO_RATE)
+            w.writeframes(pcm)
+        return stt.transcribe(path)
+    finally:
+        try:
+            os.remove(path)
+        except OSError as e:
+            logger.warning("companion: could not delete the clip's WAV %s: %s", path, e)
 
 
 def _ask(session: _Session, turn: _Turn, text: str, source: MessageSource) -> tuple[str, list[str], bool]:

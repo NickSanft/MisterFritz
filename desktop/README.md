@@ -179,9 +179,10 @@ the log says where to let them, whenever the microphone is opened.
 
 The microphone opens only for a brain that can hear: his window open, the
 link online, and the brain's welcome offering `audio-in` (his hello offers
-to send it). Otherwise it stays closed and the bubble says why: "His brain
-can't hear yet: type to him instead." until the brain's audio turn (PR 9)
-lands, or that he isn't connected; over a reply still running, as that
+to send it), which it does once faster-whisper is installed in the brain's
+environment (the root README's *Talking to him*). Otherwise it stays closed
+and the bubble says why: "His brain can't hear yet: type to him instead.",
+or that he isn't connected; over a reply still running, as that
 reply's notice, the reply kept. While it is open the bubble says
 *Listening…* over DivoraVoice's level meter, which shows how loud the
 microphone hears you (the shell sends its level 20 times a second,

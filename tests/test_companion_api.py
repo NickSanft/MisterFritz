@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 import unittest
+import wave
 from unittest.mock import ANY, MagicMock, patch
 
 from starlette.routing import WebSocketRoute
@@ -35,7 +36,11 @@ import companion_api
 import fritz_utils
 import identity_store
 import mister_fritz
+import stt
 from fritz_utils import MessageSource
+
+# The real one, kept before CompanionTest patches it.
+CAN_TRANSCRIBE = companion_api._can_transcribe
 
 PANEL_PASSWORD = "panel-pw"
 TOKEN = "t0k-" + "x" * 40
@@ -164,6 +169,16 @@ class CompanionTest(unittest.TestCase):
                             ("_INITIALISED", False), ("_NAME_CACHE", {})):
             self.stack.enter_context(patch.object(identity_store, name, value))
         self.use(FakeAskStuff())
+        # The brain can hear, and never through the real model.
+        self.stack.enter_context(patch.object(companion_api, "_can_transcribe", lambda: True))
+        self.hear(FakeTranscribe())
+
+    def hear(self, fake: "FakeTranscribe") -> "FakeTranscribe":
+        self.transcribe = fake
+        self.stack.enter_context(patch.object(stt, "transcribe", fake))
+        if fake.gate is not None:
+            self.addCleanup(fake.gate.set)
+        return fake
 
     def use(self, fake: FakeAskStuff) -> FakeAskStuff:
         self.fake = fake
@@ -294,7 +309,7 @@ class TestHandshake(CompanionTest):
         _ws, welcome = self.desk()
         self.assertEqual(welcome, {
             "type": "welcome", "protocol": 1, "identity": "desktop-nick-pc",
-            "display_name": "Nick's PC", "server_caps": ["text"],
+            "display_name": "Nick's PC", "server_caps": ["text", "audio-in"],
             "thread_id": "desktop-nick-pc#desktop",
         })
         self.audit.assert_any_call("companion_connect", result="ok", user_id="desktop-nick-pc",
@@ -822,17 +837,253 @@ class TestFrames(CompanionTest):
             ws.send_json(hello())
             self.assertEqual(receive(ws)["code"], "bad_frame")
 
-    def test_audio_and_widgets_are_not_served_yet(self):
+    def test_widgets_are_not_served_yet(self):
         ws, welcome = self.desk()
-        self.assertEqual(welcome["server_caps"], ["text"])
-        ws.send_bytes(b"\x00\x01" * 1000)      # dropped unread: no answer
-        ws.send_json({"type": "audio_end", "turn_id": "a1"})
-        error = receive(ws)
-        self.assertEqual((error["type"], error["code"], error["turn_id"]), ("error", "bad_frame", "a1"))
+        self.assertNotIn("widgets", welcome["server_caps"])
         ws.send_json({"type": "subscribe", "widgets": ["clock"]})
         error = receive(ws)
         self.assertEqual((error["code"], error["turn_id"]), ("bad_frame", None))
         self.assertEqual(self.fake.calls, [])
+
+
+class FakeTranscribe:
+    """Stands in for stt.transcribe in the companion's tests.
+
+    Records each WAV it is given (rate, channels, sample width, frames) and
+    its path, and answers `heard`: what it made out, "" for no speech, None
+    for a failure, as the real one does. `gate`, if given, is waited on first,
+    so a test can act while a clip is being heard.
+    """
+
+    def __init__(self, heard="what time is it", gate: threading.Event | None = None):
+        self.heard, self.gate = heard, gate
+        self.clips: list[tuple[int, int, int, bytes]] = []
+        self.paths: list[str] = []
+        self.in_flight = threading.Event()
+
+    def __call__(self, audio_file_path):
+        self.paths.append(audio_file_path)
+        with wave.open(audio_file_path, "rb") as w:
+            self.clips.append((w.getframerate(), w.getnchannels(), w.getsampwidth(),
+                               w.readframes(w.getnframes())))
+        self.in_flight.set()
+        if self.gate is not None:
+            self.gate.wait(10)
+        return self.heard
+
+
+SECOND = b"\x01\x00" * 16000     # a second of 16 kHz mono PCM16
+
+
+class TestTheAudioTurn(CompanionTest):
+    """A push-to-talk clip: binary frames, then audio_end naming its turn."""
+
+    def speak(self, ws, turn_id="a1", pcm=SECOND, pieces=2, **end):
+        step = max(2, (len(pcm) // pieces) // 2 * 2)
+        for at in range(0, len(pcm), step):
+            ws.send_bytes(pcm[at:at + step])
+        ws.send_json({"type": "audio_end", "turn_id": turn_id, **end})
+
+    def test_the_welcome_offers_audio_in_only_once_it_can_transcribe(self):
+        _ws, welcome = self.desk()
+        self.assertEqual(welcome["server_caps"], ["text", "audio-in"])
+        with patch.object(companion_api, "_can_transcribe", lambda: False):
+            ws, welcome = self.desk()
+            self.assertEqual(welcome["server_caps"], ["text"])
+            self.speak(ws)       # its binary frames dropped unread
+            error = receive(ws)
+        self.assertEqual((error["type"], error["code"], error["turn_id"], error["text"]),
+                         ("error", "bad_frame", "a1", companion_api._COPY_NO_EARS))
+        self.assertEqual(self.transcribe.clips, [])
+        # The real test: whether faster-whisper is installed.
+        import importlib.util
+        with patch.object(importlib.util, "find_spec", lambda name: None if name == "faster_whisper" else object()):
+            self.assertFalse(CAN_TRANSCRIBE())
+        with patch.object(importlib.util, "find_spec", lambda name: object()):
+            self.assertTrue(CAN_TRANSCRIBE())
+
+    def test_a_clip_is_heard_then_answered_as_a_voice_turn(self):
+        ws, _ = self.desk()
+        self.speak(ws, pcm=SECOND, pieces=3)
+        frames = self.until_idle(ws, "a1")
+        self.assertEqual([(f["type"], f.get("state")) for f in frames],
+                         [("state", "transcribing"), ("stt", None), ("state", "thinking"),
+                          ("token", None), ("token", None), ("done", None), ("state", "idle")])
+        self.assertEqual(frames[1], {"type": "stt", "turn_id": "a1", "text": "what time is it"})
+        self.assertEqual(frames[5]["text"], "Good evening, sir.")
+        (call,) = self.fake.calls
+        self.assertEqual((call["base_prompt"], call["source"], call["user_id"], call["thread_id"]),
+                         ("what time is it", MessageSource.DESKTOP_VOICE, "desktop-nick-pc",
+                          "desktop-nick-pc#desktop"))
+        # The clip, whole and as it came, in a WAV of its own, gone after.
+        self.assertEqual(self.transcribe.clips, [(16000, 1, 2, SECOND)])
+        self.assertFalse(os.path.exists(self.transcribe.paths[0]))
+        self.audit.assert_any_call("companion_audio", user_id="desktop-nick-pc", client="desktop-nick-pc",
+                                   audio_seconds=1.0, chars=15, result="ok", seconds=ANY)
+        self.assertNotIn("what time is it", repr(self.audit.call_args_list), "what was said is never logged")
+
+    def held(self, ws) -> int:
+        """How many bytes of clip the desk's session holds once every frame
+        sent before now is read (a ping's pong comes after them)."""
+        ws.send_json({"type": "ping", "t": 7})
+        self.assertEqual(receive(ws), {"type": "pong", "t": 7})
+        with companion_api._SESSIONS_LOCK:
+            (session,) = companion_api._SESSIONS
+        return len(session.audio)
+
+    def test_no_clip_is_held_past_its_limit_or_unoffered(self):
+        ws, _ = self.desk()
+        ws.send_bytes(SECOND)
+        self.assertEqual(self.held(ws), len(SECOND))
+        with self.assertLogs("companion_api", level="WARNING"):
+            ws.send_bytes(b"\x00\x00" * (companion_api.AUDIO_MAX_BYTES // 2))
+            self.assertEqual(self.held(ws), 0, "dropped whole the moment it outgrew the limit")
+        ws.send_bytes(SECOND)
+        self.assertEqual(self.held(ws), 0, "nor any more of it until its audio_end")
+        ws.close()
+        self.assertTrue(wait_for(lambda: not companion_api._SESSIONS))
+        with patch.object(companion_api, "_can_transcribe", lambda: False):
+            ws, _ = self.desk()
+            ws.send_bytes(SECOND)
+            self.assertEqual(self.held(ws), 0, "without audio-in, never held")
+
+    def test_what_was_heard_is_said_and_asked_trimmed(self):
+        self.hear(FakeTranscribe("  what time is it \n"))
+        ws, _ = self.desk()
+        self.speak(ws)
+        frames = self.until_idle(ws, "a1")
+        self.assertEqual(frames[1], {"type": "stt", "turn_id": "a1", "text": "what time is it"})
+        self.assertEqual(self.fake.calls[0]["base_prompt"], "what time is it")
+
+    def test_the_next_clip_starts_empty(self):
+        ws, _ = self.desk()
+        self.speak(ws, "a1", SECOND)
+        self.until_idle(ws, "a1")
+        self.speak(ws, "a2", SECOND[:3200], pieces=1)
+        self.until_idle(ws, "a2")
+        self.assertEqual([c[3] for c in self.transcribe.clips], [SECOND, SECOND[:3200]])
+
+    def test_nothing_heard_or_a_failure_ends_it_stt_failed(self):
+        ws, _ = self.desk()
+        for turn_id, heard in (("s1", ""), ("s2", "   ")):
+            self.hear(FakeTranscribe(heard))
+            self.speak(ws, turn_id)
+            frames = self.until_idle(ws, turn_id)
+            self.assertEqual([f["type"] for f in frames], ["state", "error", "state"], heard)
+            self.assertEqual((frames[1]["code"], frames[1]["text"]), ("stt_failed", companion_api._COPY_SILENCE))
+            self.audit.assert_any_call("companion_audio", user_id="desktop-nick-pc", client="desktop-nick-pc",
+                                       audio_seconds=1.0, chars=0, result="silent", seconds=ANY)
+        self.hear(FakeTranscribe(None))
+        with self.assertLogs(level="ERROR"):
+            self.speak(ws, "a1")
+            frames = self.until_idle(ws, "a1")
+        self.assertEqual([f["type"] for f in frames], ["state", "error", "state"])
+        self.assertEqual(frames[1]["code"], "stt_failed")
+        self.assertTrue(frames[1]["text"].startswith(companion_api._COPY_NOT_HEARD), frames[1]["text"])
+        self.assertIn("(ref `", frames[1]["text"])
+        self.audit.assert_any_call("companion_audio", user_id="desktop-nick-pc", client="desktop-nick-pc",
+                                   audio_seconds=1.0, chars=0, result="failed", seconds=ANY)
+        self.assertEqual(self.fake.calls, [], "nothing heard reaches the model")
+
+    def test_a_clip_that_cannot_be_one_is_a_bad_frame(self):
+        ws, _ = self.desk()
+        for turn_id, pcm, end in (("e1", b"", {}), ("e2", b"\x01\x00\x02", {}),
+                                  ("e3", SECOND, {"sample_rate": 44100}), ("e4", SECOND, {"channels": 2})):
+            with self.assertLogs("companion_api", level="WARNING"):
+                self.speak(ws, turn_id, pcm, pieces=1, **end)
+                error = receive(ws)
+            self.assertEqual((error["type"], error["code"], error["turn_id"], error["text"]),
+                             ("error", "bad_frame", turn_id, companion_api._COPY_BAD_FRAME))
+        self.assertEqual(self.transcribe.clips, [])
+
+    def test_a_clip_too_long_is_dropped_whole_and_said(self):
+        ws, _ = self.desk()
+        whole = b"\x00\x00" * (companion_api.AUDIO_MAX_BYTES // 2)
+        with self.assertLogs("companion_api", level="WARNING"):
+            ws.send_bytes(whole)
+            ws.send_bytes(b"\x00\x00")      # one sample too many
+            ws.send_bytes(SECOND)             # and the rest, still dropped
+            ws.send_json({"type": "audio_end", "turn_id": "l1"})
+            error = receive(ws)
+        self.assertEqual((error["code"], error["turn_id"], error["text"]),
+                         ("bad_frame", "l1", companion_api._COPY_TOO_LONG))
+        # Exactly the limit is heard, and the clip after starts afresh.
+        self.speak(ws, "l2", whole, pieces=4)
+        self.until_idle(ws, "l2")
+        self.assertEqual(len(self.transcribe.clips[0][3]), companion_api.AUDIO_MAX_BYTES)
+
+    def test_a_clip_while_a_turn_runs_is_busy_and_after_a_cancel_waits(self):
+        gate = threading.Event()
+        self.use(FakeAskStuff(deltas=("Well", ", sir", "."), gate=gate))
+        ws, _ = self.desk()
+        ws.send_json({"type": "say", "turn_id": "t1", "text": "good evening"})
+        self.assertTrue(self.fake.in_flight.wait(10))
+        self.speak(ws, "a2")
+        frames = []
+        while not any(f.get("turn_id") == "a2" for f in frames):
+            frames.append(receive(ws))
+        self.assertEqual((frames[-1]["type"], frames[-1]["code"]), ("error", "busy"))
+        # Barge-in by voice: the desktop sends the cancel and the clip in one go.
+        ws.send_json({"type": "cancel", "turn_id": "t1"})
+        self.speak(ws, "a3")
+        gate.set()
+        self.until_idle(ws, "t1")
+        after = self.until_idle(ws, "a3")
+        self.assertEqual([(f["type"], f.get("state")) for f in after][:3],
+                         [("state", "transcribing"), ("stt", None), ("state", "thinking")])
+        self.assertEqual(after[-2]["type"], "done")
+        self.assertEqual([c["source"] for c in self.fake.calls],
+                         [MessageSource.DESKTOP_TEXT, MessageSource.DESKTOP_VOICE])
+        self.assertEqual(len(self.transcribe.clips), 1, "the busy clip was never heard")
+
+    def test_a_waiting_clip_cancelled_is_never_heard(self):
+        gate = threading.Event()
+        self.use(FakeAskStuff(deltas=("Well", ", sir", "."), gate=gate))
+        ws, _ = self.desk()
+        ws.send_json({"type": "say", "turn_id": "t1", "text": "good evening"})
+        self.assertTrue(self.fake.in_flight.wait(10))
+        ws.send_json({"type": "cancel", "turn_id": "t1"})
+        self.speak(ws, "a2")
+        ws.send_json({"type": "cancel", "turn_id": "a2"})
+        frames = self.until_idle(ws, "a2")
+        self.assertIn({"type": "done", "turn_id": "a2", "text": "", "images": [], "interrupted": True}, frames)
+        gate.set()
+        self.until_idle(ws, "t1")
+        self.assertEqual(self.transcribe.clips, [])
+
+    def test_a_clip_cancelled_while_it_is_heard_ends_interrupted(self):
+        gate = threading.Event()
+        self.hear(FakeTranscribe(gate=gate))
+        ws, _ = self.desk()
+        self.speak(ws)
+        self.assertEqual(receive(ws), {"type": "state", "turn_id": "a1", "state": "transcribing"})
+        self.assertTrue(self.transcribe.in_flight.wait(10))
+        ws.send_json({"type": "say", "turn_id": "t2", "text": "and another"})
+        self.assertEqual((receive(ws)["code"]), "busy", "one turn at a time, heard or thought")
+        ws.send_json({"type": "cancel", "turn_id": "a1"})
+        gate.set()
+        frames = self.until_idle(ws, "a1")
+        self.assertEqual(frames, [{"type": "done", "turn_id": "a1", "text": "", "images": [], "interrupted": True},
+                                  {"type": "state", "turn_id": "a1", "state": "idle"}])
+        self.assertEqual(self.fake.calls, [])
+        self.audit.assert_any_call("companion_audio", user_id="desktop-nick-pc", client="desktop-nick-pc",
+                                   audio_seconds=1.0, chars=15, result="cancelled", seconds=ANY)
+
+    def test_a_desk_gone_while_its_clip_is_heard_never_reaches_the_model(self):
+        gate = threading.Event()
+        self.hear(FakeTranscribe(gate=gate))
+        ws = self.open(self.client())
+        ws.send_json(hello())
+        receive(ws)
+        self.speak(ws)
+        self.assertTrue(self.transcribe.in_flight.wait(10))
+        ws.close()
+        self.assertTrue(wait_for(lambda: not companion_api._SESSIONS))
+        gate.set()
+        self.assertTrue(wait_for(lambda: any(c.args and c.args[0] == "companion_audio" for c in self.audit.call_args_list)))
+        self.assertEqual(self.fake.calls, [])
+        self.audit.assert_any_call("companion_audio", user_id="desktop-nick-pc", client="desktop-nick-pc",
+                                   audio_seconds=1.0, chars=15, result="cancelled", seconds=ANY)
 
 
 class TestOverARealSocket(CompanionTest):
@@ -873,6 +1124,19 @@ class TestOverARealSocket(CompanionTest):
             frames.append(json.loads(socket.recv(timeout=10)))
         self.assertEqual([f["type"] for f in frames], ["state", "token", "token", "done", "state"])
         self.assertEqual(frames[3]["text"], "Good evening, sir.")
+
+    def test_a_clip_over_the_real_socket(self):
+        """Binary frames as uvicorn's sans-I/O protocol hands them over."""
+        socket = self.connect(self.serve())
+        socket.send(json.dumps(hello()))
+        self.assertIn("audio-in", json.loads(socket.recv(timeout=10))["server_caps"])
+        socket.send(SECOND)
+        socket.send(json.dumps({"type": "audio_end", "turn_id": "a1"}))
+        frames = []
+        while not frames or frames[-1].get("state") != "idle":
+            frames.append(json.loads(socket.recv(timeout=10)))
+        self.assertEqual([f["type"] for f in frames], ["state", "stt", "state", "token", "token", "done", "state"])
+        self.assertEqual(self.transcribe.clips, [(16000, 1, 2, SECOND)])
 
     def test_the_close_codes_reach_the_client(self):
         from websockets.exceptions import ConnectionClosedError
