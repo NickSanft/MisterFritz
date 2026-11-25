@@ -20,6 +20,7 @@ mod hit_shape;
 mod hook;
 mod hotkeys;
 mod keyboard;
+mod kokoro_tts;
 mod logs;
 mod non_rude;
 mod overlay_machine;
@@ -29,6 +30,8 @@ mod power;
 mod prompt;
 mod settings;
 mod tray;
+mod tts_phonemize;
+mod tts_tokens;
 mod windows_ext;
 
 use std::fs::File;
@@ -1208,6 +1211,32 @@ async fn ptt_take(webview: tauri::Webview, id: u64) -> Result<tauri::ipc::Respon
         .ok_or_else(|| "That clip isn't waiting any more.".to_owned())
 }
 
+/// Whether his voice's files are in his folder (Kokoro, espeak-ng and ONNX
+/// Runtime, as `scripts/fetch_voice.py` puts them there), for his page to
+/// say in its hello whether he speaks. Files only: nothing is loaded.
+#[tauri::command]
+async fn tts_ready(webview: tauri::Webview) -> Result<bool, String> {
+    from_the_avatar(webview.label())?;
+    Ok(kokoro_tts::installed())
+}
+
+/// One of his sentences, spoken in the voice Settings names (George if it
+/// names none he has): 24 kHz mono samples, f32 little-endian, raw (an
+/// ArrayBuffer on the page's side, a Float32Array over it), or why not.
+/// Kokoro is loaded by the first, and kept; one sentence is spoken at a
+/// time, on a blocking thread.
+#[tauri::command]
+async fn tts_synthesize(webview: tauri::Webview, text: String) -> Result<tauri::ipc::Response, String> {
+    from_the_avatar(webview.label())?;
+    let voice = settings::get().audio.tts_voice;
+    let spoken = tauri::async_runtime::spawn_blocking(move || kokoro_tts::synthesize(&text, &voice))
+        .await
+        .map_err(|e| format!("his voice stopped: {e}"))?;
+    spoken
+        .map(|samples| tauri::ipc::Response::new(kokoro_tts::le_bytes(&samples)))
+        .map_err(|e| e.to_string())
+}
+
 /// The avatar's page says whether it sent clip `id` on to the brain, and if
 /// not, why (cut to a line for the log).
 #[tauri::command]
@@ -1328,6 +1357,8 @@ pub fn run() {
             companion_said,
             ptt_take,
             ptt_sent,
+            tts_ready,
+            tts_synthesize,
             prompt_say,
             prompt_close,
             prompt_ready
@@ -1337,6 +1368,10 @@ pub fn run() {
             init_logging();
             tracing::info!(version = env!("CARGO_PKG_VERSION"), "Mister Fritz starting");
             tracing::info!(settings = %loaded.describe(), "settings");
+            match kokoro_tts::Assets::in_dir(&kokoro_tts::dir()).missing() {
+                missing if missing.is_empty() => tracing::info!("voice: installed"),
+                missing => tracing::info!("voice: not installed (no {})", missing.join(", ")),
+            }
             for problem in &repaired {
                 tracing::warn!(%problem, "a setting was put back to its default");
             }
@@ -1496,6 +1531,9 @@ mod tests {
         // The page says why a clip went unheard in the shell's own words.
         assert_eq!(fixture["pttWords"]["brainCantHear"], crate::companion::BRAIN_CANT_HEAR);
         assert_eq!(fixture["pttWords"]["notConnected"], crate::companion::NOT_CONNECTED);
+        // His voice's samples, as the page reads them (PR 10).
+        assert_eq!(fixture["voice"]["sampleRate"], crate::kokoro_tts::SAMPLE_RATE);
+        assert_eq!(fixture["voice"]["maxChars"], crate::kokoro_tts::MAX_TEXT_CHARS);
         assert_eq!(fixture["debug"]["pretendSayEnv"], super::PRETEND_SAY_ENV);
         assert_eq!(fixture["debug"]["pretendPromptEnv"], crate::prompt::PRETEND_ENV);
         assert_eq!(fixture["debug"]["pretendPromptWait"], crate::prompt::PRETEND_WAIT);
@@ -2077,6 +2115,8 @@ mod tests {
             ("companion_said", "from_the_avatar"),
             ("ptt_take", "from_the_avatar"),
             ("ptt_sent", "from_the_avatar"),
+            ("tts_ready", "from_the_avatar"),
+            ("tts_synthesize", "from_the_avatar"),
             ("prompt_say", "from_the_prompt"),
             ("prompt_close", "from_the_prompt"),
             ("prompt_ready", "from_the_prompt"),

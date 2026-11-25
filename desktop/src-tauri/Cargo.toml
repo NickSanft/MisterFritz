@@ -30,6 +30,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+# His voice (kokoro_tts.rs): ONNX Runtime for Kokoro, opened at run time from
+# the CPU onnxruntime.dll that scripts/fetch_voice.py puts in the data folder
+# (load-dynamic: nothing is downloaded or linked at build time). The owner's
+# call for PR 10: its ten new crates are ort, ort-sys, libloading 0.9 and
+# ndarray with its six helpers, which load-dynamic's `std` forces in
+# ("ndarray/std"); Fritz's own code passes tensors as a shape and a slice,
+# so ndarray can go if a later ort stops forcing it.
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "std", "api-24"] }
 
 [features]
 # Serve the embedded frontend (../dist) instead of the dev server. `tauri build`

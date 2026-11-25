@@ -121,6 +121,10 @@
     "brainCantHear": "His brain can't hear yet: type to him instead.",
     "notConnected": "He isn't connected to his brain just now."
   },
+  "voice": {
+    "sampleRate": 24000,
+    "maxChars": 2000
+  },
   "hookStatusKeys": [
     "covered",
     "events",
@@ -297,6 +301,14 @@
     "pttSent": {
       "name": "ptt_sent",
       "args": ["id", "sent", "why"]
+    },
+    "ttsReady": {
+      "name": "tts_ready",
+      "args": []
+    },
+    "ttsSynthesize": {
+      "name": "tts_synthesize",
+      "args": ["text"]
     },
     "promptSay": {
       "name": "prompt_say",

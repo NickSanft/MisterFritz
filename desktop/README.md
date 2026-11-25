@@ -26,6 +26,7 @@ opens it):
 | `logs\fritz.log` | This run's detailed log, started afresh each run |
 | `diagnostics\foreground.log` | Spike 0's foreground logger, **off** unless `diagnostics.foregroundLog` is `true` (read at start): it writes other apps' window titles |
 | `avatar\fritz.vrm` | The owner's model, if there is one (or `avatar.vrmPath`) |
+| `tts\` | His voice (Kokoro, espeak-ng, ONNX Runtime), about 137 MB (122 MB fetched), once [`scripts/fetch_voice.py`](scripts/fetch_voice.py) has put it there (*His voice*) |
 
 The hotkeys are `hotkeys.arrange` (Ctrl+Alt+A), `hotkeys.park`
 (Ctrl+Alt+H), `hotkeys.prompt` (Ctrl+Alt+F) and push-to-talk's
@@ -209,6 +210,54 @@ Hotkeys says so on push-to-talk's row, where a new key is refused until it
 is unmuted. Unmuted, its key is taken from Windows again: the setting's, or
 its default when that one can't be used, as at start.
 
+## His voice
+
+He speaks with Kokoro, on the CPU, in the shell
+([`kokoro_tts.rs`](src-tauri/src/kokoro_tts.rs), with
+[`tts_phonemize.rs`](src-tauri/src/tts_phonemize.rs) and
+[`tts_tokens.rs`](src-tauri/src/tts_tokens.rs), lifted from DivoraVoice):
+espeak-ng reads the text as phonemes, Kokoro's model says them in the voice
+`audio.ttsVoice` names (George, `bm_george`, by default and in place of any
+voice he doesn't have), and his page is handed 24 kHz mono samples
+(`tts_synthesize`). A sentence is said whole (one Kokoro can't take whole,
+past its 510 phonemes, is halved at a word), and Kokoro is loaded by the
+first, which takes a second or so more than the rest, and kept until he
+quits; one sentence is spoken at a time, on four threads, so a reply never takes the whole CPU
+from a game. Nothing he says is logged, only how long it was and how long it
+took. His page plays it from PR 10's next commit; until then nothing is
+spoken.
+
+His voice isn't in the repo or the build. Fetch it once, about 122 MB, with
+the Python of the brain's environment (or any Python 3.10 or later; it uses
+the standard library only):
+
+```powershell
+python desktop\scripts\fetch_voice.py
+```
+
+It puts everything in `%APPDATA%\com.divora.fritz\tts\`: Kokoro's model,
+its config and DivoraVoice's pack of seven voices, and espeak-ng 1.52.0 (its
+program, library and data), from DivoraVoice's `voice-assets-v2` release,
+and ONNX Runtime's CPU build, `onnxruntime.dll`, out of PyPI's onnxruntime
+1.26.0 wheel. Each file is checked against the size and SHA-256 pinned in
+the script before it is kept, a file already there and right isn't fetched
+again, and nothing fetched is run; `--check` says whether they are all
+there and right, without the network. ONNX Runtime needs Microsoft's Visual
+C++ runtime, which most Windows PCs have. Until it is all there, the log's
+`voice: not installed` line names what is missing. ONNX Runtime is opened
+only from that folder, by its full path (Windows keeps an older one of its
+own in System32 that the app can't use), and only once the app has loaded
+it itself and found it a 1.24 or later: `ort` hangs for good on one it
+can't load, so a broken or wrong DLL is refused instead, and the log says
+why.
+
+Kokoro-82M (the model, its config and voices) is Apache-2.0; espeak-ng and
+its data are GPL-3.0, run as a program of its own and never linked (source:
+[github.com/espeak-ng/espeak-ng](https://github.com/espeak-ng/espeak-ng));
+ONNX Runtime is MIT. The app's crates for it are `ort` 2.0.0-rc.12 with
+`load-dynamic` (nothing downloaded at build time), which also brings in
+`ndarray`.
+
 ## His speech bubble
 
 His replies show in a bubble over his head, on its own panel in the mood's
@@ -334,6 +383,11 @@ token it opens at the first run anyway. In a debug build,
 would, and `FRITZ_SAVE_CLIPS` set to a folder opens the microphone while
 push-to-talk is held and saves each clip there as a WAV, for a live check of
 his ears (a release build reads neither).
+
+His voice's real tests (espeak-ng's and Kokoro's) need the fetched files, so
+they are `#[ignore]`d: run them with `FRITZ_TTS_TEST_DIR` set to the folder
+(`%APPDATA%\com.divora.fritz\tts`, read, never written) and
+`-- --ignored tts`.
 
 ## The placeholder model
 
