@@ -233,7 +233,11 @@ spoken by the shell in turn and played as it comes, after the one before,
 while the rest is still being written. Push-to-talk pressed, a question
 typed, or the link lost stops him at once, mid-sentence. The bubble stays up
 while he speaks, with what the brain heard you say in quotes over his reply,
-and he goes on speaking while he is parked. A push-to-talk press to a brain
+and he goes on speaking while he is parked. His mouth moves as he speaks
+([`lipSync.ts`](src/avatar/lipSync.ts)): everything he says plays through
+one analyser, whose level each frame opens his model's `aa` (shut under a
+floor, wide at Kokoro's loudest), quick to open and a little slower to
+close, at any motion setting. A push-to-talk press to a brain
 that will answer aloud loads Kokoro while you talk, so his first sentence
 isn't kept waiting for it. The audio plays on Windows' default output, and
 is opened only when he first speaks and let go a few seconds after he

@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../shared/testClock";
 import type { Speak } from "../shared/protocol";
 import type { Spoken } from "./voiceLink";
-import { LEAD_S, STALL_MARGIN_MS, SUSPEND_AFTER_MS, Speech, type BufferLike, type OutLike, type SourceLike } from "./speech";
+import { ANALYSER_SIZE, LEAD_S, STALL_MARGIN_MS, SUSPEND_AFTER_MS, Speech, type BufferLike, type OutLike, type SourceLike } from "./speech";
 
 class FakeSource implements SourceLike {
   buffer: unknown = null;
@@ -35,11 +35,30 @@ class FakeSource implements SourceLike {
   }
 }
 
+class FakeBus {
+  fftSize = 2048;
+  connected: unknown = null;
+  level = 0;
+  connect(to: unknown) {
+    this.connected = to;
+    return to;
+  }
+  getFloatTimeDomainData(into: Float32Array) {
+    into.fill(this.level);
+  }
+}
+
 class FakeOut implements OutLike {
   currentTime = 0;
   state = "running";
   destination = { the: "speakers" };
   sources: FakeSource[] = [];
+  buses: FakeBus[] = [];
+  createAnalyser() {
+    const b = new FakeBus();
+    this.buses.push(b);
+    return b;
+  }
   resumes = 0;
   suspends = 0;
   async resume() {
@@ -119,7 +138,12 @@ describe("his voice on his page", () => {
     expect(shell.asked).toEqual(["Good evening, sir.", "It is half past nine."]);
     const [first] = out.sources;
     expect(first.at).toBeCloseTo(1 + LEAD_S);
-    expect(first.connected).toBe(out.destination);
+    // Through his mouth's analyser, which passes it on to the speakers.
+    expect(out.buses).toHaveLength(1);
+    expect(first.connected).toBe(out.buses[0]);
+    expect(out.buses[0].connected).toBe(out.destination);
+    expect(out.buses[0].fftSize).toBe(ANALYSER_SIZE);
+    expect(speech.analyser).toBe(out.buses[0]);
     out.currentTime = 1.5;
     await shell.answer(3);
     // After the first, not now.
@@ -152,12 +176,25 @@ describe("his voice on his page", () => {
     expect(out.sources[1].at).toBeCloseTo(10 + LEAD_S);
   });
 
+  it("without an analyser it plays straight out, and says his mouth won't move", async () => {
+    out.createAnalyser = () => {
+      throw new Error("no analysers here");
+    };
+    speech.hear(speak("t1", 0, "One."));
+    await shell.answer(1);
+    expect(out.sources[0].connected).toBe(out.destination);
+    expect(speech.analyser).toBeNull();
+    expect(String(warn.mock.calls[0][0])).toContain("mouth won't move");
+    expect(speech.counts.started).toBe(1);
+  });
+
   it("makes the audio context only when he first has something to play", async () => {
     speech.hear(speak("t1", 0, "", true));
     expect(made).toBe(0);
     speech.hear(speak("t2", 0, "Hello."));
     expect(made).toBe(0);
     expect(speech.audioState).toBe("none");
+    expect(speech.analyser, "none to read before then").toBeNull();
     await shell.answer(1);
     expect(made).toBe(1);
     speech.hear(speak("t2", 1, "Again."));
@@ -420,6 +457,15 @@ describe("the page's use of his voice", () => {
 
   it("holds the bubble while he speaks", () => {
     expect(body("function paintBubble(dt: number): void {")).toContain("bubbleClock.tick(dt * 1000, hovered || speech.busy, motionFactor)");
+  });
+
+  it("moves his mouth from his voice each frame, before he is posed", () => {
+    const tick = body("const loop = new PacedLoop((dt) => {", "\n}, FPS);");
+    expect(tick.split("\n")[1].trim()).toBe("const mouth = lips.sample(dt * 1000, speech.analyser, speech.busy);");
+    const set = tick.indexOf("actor.setMouth(mouth);");
+    expect(set).toBeGreaterThan(0);
+    expect(set).toBeLessThan(tick.indexOf("actor?.update(dt);"));
+    expect(main.split("lips.sample(").length - 1).toBe(1);
   });
 
   it("shows what the brain heard", () => {

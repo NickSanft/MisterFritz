@@ -3,8 +3,9 @@
  * a procedural idle — breathing, a slow sway, a blink every few seconds — and
  * looking where he is told (`setLook`, from the cursor): his eyes through
  * three-vrm's look-at, his head turning a share of the way. `setPhase` is the
- * turn's: thinking, he glances up and away and tilts his head. Mood and the
- * mouth come with the PRs that drive them.
+ * turn's: thinking, he glances up and away and tilts his head. His mouth
+ * opens as his voice says (`setMouth`, lipSync.ts, PR 10), through the
+ * model's `aa`; mood comes with the PR that drives it.
  *
  * Poses go through three-vrm's normalized humanoid. That rig is built from
  * the bones as the file has them, before `VRMUtils.rotateVRM0` turns a VRM
@@ -99,6 +100,8 @@ export class VrmActor {
   /** The turn's phase, the glance's seconds left, and the head's tilt now
    * (degrees). */
   private phase: Phase = "idle";
+  /** How open his mouth is, 0 to 1 (`setMouth`). */
+  private mouth = 0;
   private glance = 0;
   private tilt = 0;
   private crown: number | null = null;
@@ -182,6 +185,9 @@ export class VrmActor {
     this.breathe();
     this.look(dt);
     this.blink(dt);
+    // After the blink, before the expressions are applied. A model without
+    // an `aa` (or without expressions) shows nothing of it.
+    this.vrm.expressionManager?.setValue("aa", this.mouth);
     this.vrm.update(dt);
     if (this.tint) {
       for (const m of this.boundRim) m.parametricRimColorFactor.add(this.tint.glow);
@@ -211,6 +217,16 @@ export class VrmActor {
 
   get currentPhase(): Phase {
     return this.phase;
+  }
+
+  /** How open his mouth is, 0 shut to 1 wide (his voice's level): applied at
+   * the next `update`, whatever the motion. */
+  setMouth(open: number): void {
+    this.mouth = Number.isFinite(open) ? Math.min(1, Math.max(0, open)) : 0;
+  }
+
+  get mouthOpen(): number {
+    return this.mouth;
   }
 
   /** The theme's motion factor (0 to 1): it scales his sway, and at 0 he

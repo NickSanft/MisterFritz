@@ -20,11 +20,14 @@
  * - The audio context is made at the first sentence, so a desk he never
  *   speaks on opens no audio device, and suspended once he has been quiet
  *   a few seconds, so it doesn't keep the device's thread running.
+ * - Everything plays through one analyser, which his mouth reads
+ *   (lipSync.ts) and passes the sound on unchanged.
  * - It doesn't ride the paced loop: Web Audio plays on its own, so he goes
  *   on talking while he is parked or the display is off.
  * - Nothing he says is logged.
  */
 import type { Clock } from "../shared/clock";
+import type { AnalyserLike } from "./lipSync";
 import type { Speak } from "../shared/protocol";
 import { TTS_SAMPLE_RATE, type Spoken } from "./voiceLink";
 
@@ -43,6 +46,14 @@ export interface BufferLike {
   copyToChannel(source: Float32Array<ArrayBuffer>, channel: number): void;
 }
 
+/** The part of an AnalyserNode used here: his speech plays through it, and
+ * his mouth reads it. */
+export interface BusLike {
+  fftSize: number;
+  connect(to: unknown): unknown;
+  getFloatTimeDomainData(into: Float32Array<ArrayBuffer>): void;
+}
+
 /** The part of an AudioContext used here (a test passes its own). */
 export interface OutLike {
   readonly currentTime: number;
@@ -52,6 +63,7 @@ export interface OutLike {
   suspend(): Promise<void>;
   createBuffer(channels: number, length: number, rate: number): BufferLike;
   createBufferSource(): SourceLike;
+  createAnalyser(): BusLike;
 }
 
 export interface SpeechDeps {
@@ -61,6 +73,9 @@ export interface SpeechDeps {
   speak(text: string): Promise<Spoken>;
   clock: Clock;
 }
+
+/** The analyser's window, in samples: about 21 ms at 48 kHz. */
+export const ANALYSER_SIZE = 1024;
 
 /** How long he is quiet before the audio context is suspended. */
 export const SUSPEND_AFTER_MS = 5_000;
@@ -88,6 +103,9 @@ export class Speech {
   /** When the last scheduled sentence ends, on the context's clock. */
   private endsAt = 0;
   private out: OutLike | null = null;
+  /** What everything plays through, his mouth's to read; null without one
+   * (then it plays straight out, and his mouth stays still). */
+  private bus: BusLike | null = null;
   private broken = false;
   private quietTimer: unknown = null;
   private warnedFor: string | null = null;
@@ -100,6 +118,11 @@ export class Speech {
   /** Anything left to say, or still playing. */
   get busy(): boolean {
     return this.asking || this.waiting.length > 0 || this.playing.size > 0;
+  }
+
+  /** What his mouth reads: null before he first speaks. */
+  get analyser(): AnalyserLike | null {
+    return this.bus;
   }
 
   /** The audio context's state, or "none" before he first speaks. */
@@ -181,7 +204,7 @@ export class Speech {
     buffer.copyToChannel(samples, 0);
     const src = out.createBufferSource();
     src.buffer = buffer;
-    src.connect(out.destination);
+    src.connect(this.bus ?? out.destination);
     const at = Math.max(out.currentTime + LEAD_S, this.endsAt);
     const ends = at + buffer.duration;
     // By the wall clock: the context's own stands still when it isn't
@@ -224,11 +247,25 @@ export class Speech {
         this.broken = true;
         console.warn("avatar: no audio context for his voice", e);
       }
+      if (this.out !== null) this.bus = this.busOn(this.out);
     }
     if (this.out?.state === "suspended") {
       this.out.resume().catch((e: unknown) => console.warn("avatar: his voice's audio wouldn't resume", e));
     }
     return this.out;
+  }
+
+  /** The analyser for `out`, between his sentences and the speakers. */
+  private busOn(out: OutLike): BusLike | null {
+    try {
+      const bus = out.createAnalyser();
+      bus.fftSize = ANALYSER_SIZE;
+      bus.connect(out.destination);
+      return bus;
+    } catch (e) {
+      console.warn("avatar: no analyser for his voice, so his mouth won't move", e);
+      return null;
+    }
   }
 
   /** About to speak: the context stays awake. */

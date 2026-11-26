@@ -21,7 +21,8 @@
  * His voice (speech.ts, PR 10): the brain's sentences for the shown turn
  * are spoken by the shell and played as they come; push-to-talk, a typed
  * question or the link lost stops him at once, and the bubble stays up
- * while he speaks.
+ * while he speaks. His mouth follows his voice's level (lipSync.ts), set
+ * each frame before he is posed.
  */
 import "../divora/tokens.css";
 import "../divora/fonts.css";
@@ -42,6 +43,7 @@ import { AHEAD, CURSOR_EVENT, fetchCursor, gaze, parseCursor, type CursorFrame, 
 import { CompanionClient } from "../shared/companion";
 import { browserClock } from "../shared/clock";
 import { Speech } from "./speech";
+import { LipSync } from "./lipSync";
 import { speakSentence } from "./voiceLink";
 import {
   BRAIN_CANT_HEAR,
@@ -150,10 +152,13 @@ const bubble = createBubble(document);
 const bubbleClock = new BubbleClock();
 /** His voice: the brain's sentences, spoken by the shell, played here. */
 const speech = new Speech({ audio: () => new AudioContext(), speak: (text) => speakSentence(text), clock: browserClock });
+/** His mouth, from what his voice plays. */
+const lips = new LipSync();
 // For a live check's eyes: what his voice has done, in counts, never words.
 (window as unknown as Record<string, unknown>).__fritzSpeech = () => ({
   busy: speech.busy,
   audio: speech.audioState,
+  mouth: lips.value,
   ...speech.counts,
 });
 let wasOnline = false;
@@ -329,8 +334,10 @@ function paintBubble(dt: number): void {
 }
 
 const loop = new PacedLoop((dt) => {
+  const mouth = lips.sample(dt * 1000, speech.analyser, speech.busy);
   if (actor) {
     actor.setPhase(turn.phase);
+    actor.setMouth(mouth);
     if (cursorFrame) actor.setLook(lookFor(cursorFrame, actor));
   }
   actor?.update(dt);
