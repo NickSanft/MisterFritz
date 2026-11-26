@@ -44,6 +44,23 @@ describe("the turn the bubble shows", () => {
     expect(cancelFirst(v)).toBe("t1");
   });
 
+  it("keeps what the brain heard for the shown turn, until the next", () => {
+    const stt = (turn_id: string, text: string) => f({ type: "stt", turn_id, text });
+    let v = run(asked("t1"), state("t1"));
+    expect(v.heard).toBeNull();
+    const before = v.revision;
+    v = reduce(v, stt("t1", "what time is it"));
+    expect(v.heard).toBe("what time is it");
+    expect(v.revision, "the bubble shows it").toBe(before + 1);
+    expect(reduce(v, stt("t2", "another turn's"))).toBe(v);
+    v = reduce(v, done("t1", "Half past nine, sir."));
+    expect(v.heard, "kept with the reply").toBe("what time is it");
+    expect(reduce(v, stt("t1", "late"))).toBe(v);
+    expect(run(asked("t1"), stt("t1", "x"), asked("t2")).heard).toBeNull();
+    expect(run(asked("t1"), stt("t1", "x"), { kind: "listening", press: 2 }).heard).toBeNull();
+    expect(INITIAL.heard).toBeNull();
+  });
+
   it("streams tokens, and a restart replaces what came before", () => {
     let v = run(asked("t1"), state("t1"), token("t1", "Good "), token("t1", "eve"));
     expect(v.reply).toBe("Good eve");

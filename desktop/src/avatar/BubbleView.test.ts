@@ -39,6 +39,21 @@ describe("what the bubble shows of a turn", () => {
     expect(bubbleText({ ...INITIAL, turnId: "ptt-1", phase: "transcribing", ended: false }).body).toBe(THINKING);
   });
 
+  it("what the brain heard, in quotes, over the reply; nothing for a typed turn", () => {
+    expect(bubbleText(turn()).heard).toBeNull();
+    expect(bubbleText(turn({ heard: "  what time is it " })).heard).toBe("“what time is it”");
+    expect(bubbleText(turn({ heard: "   " })).heard).toBeNull();
+    expect(bubbleText(turn({ heard: "x", ended: true, reply: "Half past nine." })).heard).toBe("“x”");
+    const { b, q } = mount();
+    b.paint(turn({ heard: "what time is it", revision: 2 }), SHOWN, HEAD, VIEW);
+    const heard = q(".bubble-heard");
+    expect(heard.style.display).toBe("block");
+    expect(heard.textContent).toBe("“what time is it”");
+    expect(heard.nextElementSibling?.className, "first, over the rest").toBe("bubble-progress");
+    b.paint(turn({ heard: null, revision: 3 }), SHOWN, HEAD, VIEW);
+    expect(heard.style.display).toBe("none");
+  });
+
   it("an ellipsis while he thinks, the reply as it comes", () => {
     expect(bubbleText(turn()).body).toBe(THINKING);
     expect(bubbleText(turn({ reply: "**Good** evening" })).body).toBe("Good evening");

@@ -13,6 +13,7 @@ import {
   CompanionClient,
   PING_EVERY_MS,
   SILENCE_MS,
+  SPEAKS,
   WELCOME_TIMEOUT_MS,
   backoffDelay,
   closeReason,
@@ -116,6 +117,20 @@ describe("connecting", () => {
     expect(h.last().sent).toEqual([
       { type: "hello", protocol: 1, token: CONFIG.token, client: { id: "nick-pc", name: "Nick's PC", caps: ["text", "audio-in", "vrm"] } },
     ]);
+  });
+
+  it("offers to voice what he says only with his voice installed", () => {
+    const h = harness();
+    h.client.configure({ ...CONFIG, speaks: true });
+    h.last().open();
+    expect(h.last().sent[0]).toMatchObject({ client: { caps: ["text", "audio-in", "vrm", "speak-local"] } });
+    expect(SPEAKS).toBe("speak-local");
+    // A change to it is a new config: connected anew.
+    expect(h.client.configure({ ...CONFIG, speaks: false })).toBe(true);
+    h.last().open();
+    expect(h.last().sent[0]).toMatchObject({ client: { caps: ["text", "audio-in", "vrm"] } });
+    expect(h.client.configure({ ...CONFIG, speaks: false })).toBe(false);
+    expect(h.client.configure(CONFIG), "absent is false").toBe(false);
   });
 
   it("is online only once welcomed, and says who it is to the brain", () => {

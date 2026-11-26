@@ -29,9 +29,9 @@ What runs, compared with main_discord:
   Discord feature, but its retention is a privacy promise about message bodies
   stored in plaintext, and it must not lapse because Discord is not running.
 - TTS does not load. With COMPANION_TTS=local the brain sends a spoken turn's
-  sentences to a desk that voices text itself, which the desktop app will
-  from plan 14's PR 10; until then nothing is sent and nothing is voiced.
-  The brain's own speech (xtts) is not built.
+  sentences to a desk that voices text itself, which the desktop app does
+  once its voice is fetched (Kokoro, in the app). The brain's own speech
+  (xtts) is not built.
 
 Stopping: the first Ctrl+C or SIGTERM asks it to stop, and it exits once
 nothing is left running. A turn caught in the middle of a model call finishes

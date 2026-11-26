@@ -448,6 +448,40 @@ fn loaded<'a>(g: &'a mut MutexGuard<'static, Option<Engine>>, dir: &Path) -> Res
     Ok(g.as_mut().expect("just loaded"))
 }
 
+/// A warm on its way, so a run of presses starts one.
+static WARMING: AtomicBool = AtomicBool::new(false);
+/// How many warms were started, for the test that a run starts one.
+#[cfg(test)]
+static WARMS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Load his voice now, if it isn't loaded, so the first sentence doesn't
+/// wait for it.
+pub fn warm() -> Result<(), TtsError> {
+    loaded(&mut engine(), &dir()).map(|_| ())
+}
+
+/// `warm`, on a thread of its own, unless one is on its way: push-to-talk
+/// asks it as the owner starts talking, which leaves the time he talks and
+/// the brain thinks for Kokoro's load. A sentence asked meanwhile waits for
+/// the load rather than loading it again.
+pub fn warm_in_background() {
+    if WARMING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let started = std::thread::Builder::new().name("voice-warm".into()).spawn(|| {
+        #[cfg(test)]
+        WARMS.fetch_add(1, Ordering::SeqCst);
+        if let Err(e) = warm() {
+            tracing::debug!("voice: not warmed: {e}");
+        }
+        WARMING.store(false, Ordering::SeqCst);
+    });
+    if let Err(e) = started {
+        WARMING.store(false, Ordering::SeqCst);
+        tracing::warn!("voice: couldn't warm: {e}");
+    }
+}
+
 /// `text` in voice `voice_id` (George if it isn't one), as 24 kHz mono f32
 /// samples: each of its sentences in turn, back to back.
 pub fn synthesize(text: &str, voice_id: &str) -> Result<Vec<f32>, TtsError> {
@@ -737,6 +771,33 @@ mod tests {
         assert!(RUNTIME.get().is_none(), "ONNX Runtime isn't opened for a folder without it");
         assert!(engine().is_none());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A warm with no voice to load says so and is done, so the next press
+    /// can warm again; a run of them starts one at a time.
+    #[test]
+    fn a_warm_without_his_voice_ends_and_can_come_again() {
+        assert!(matches!(warm(), Err(TtsError::NotInstalled(_))), "a test's own folder has no voice");
+        let ended = || {
+            let deadline = Instant::now() + std::time::Duration::from_secs(10);
+            while WARMING.load(Ordering::SeqCst) {
+                assert!(Instant::now() < deadline, "the warm never ended");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        // One on its way: a press now starts none.
+        ended();
+        let before = WARMS.load(Ordering::SeqCst);
+        WARMING.store(true, Ordering::SeqCst);
+        warm_in_background();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(WARMS.load(Ordering::SeqCst), before, "none while one is on its way");
+        WARMING.store(false, Ordering::SeqCst);
+        warm_in_background();
+        ended();
+        assert_eq!(WARMS.load(Ordering::SeqCst), before + 1);
+        assert!(engine().is_none());
+        assert!(RUNTIME.get().is_none(), "nothing to load: ONNX Runtime isn't opened");
     }
 
     #[test]

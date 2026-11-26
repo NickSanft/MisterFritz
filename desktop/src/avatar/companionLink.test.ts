@@ -127,8 +127,51 @@ describe("the companion link", () => {
     expect(shell.asks).toHaveLength(1);
     shell.asks[0]!.resolve(SHELL);
     await settle();
-    expect(client.configured).toEqual([{ url: SHELL.url, token: SHELL.token, client: { id: "nick-pc", name: "NICK-PC" } }]);
+    expect(client.configured).toEqual([{ url: SHELL.url, token: SHELL.token, client: { id: "nick-pc", name: "NICK-PC" }, speaks: false }]);
     expect(client.reconnects).toBe(0);
+  });
+
+  it("offers to voice what he says only when his voice is installed, asked once", async () => {
+    const cases: [(() => Promise<boolean>) | undefined, boolean][] = [
+      [async () => true, true],
+      [async () => false, false],
+      [async () => Promise.reject(new Error("gone")), false],
+      [undefined, false],
+    ];
+    for (const [ready, speaks] of cases) {
+      const client = fakeClient();
+      const shell = fakeShell();
+      let asked = 0;
+      if (ready) {
+        shell.deps.voiceReady = () => {
+          asked += 1;
+          return ready();
+        };
+      }
+      await startCompanion(client as unknown as CompanionClient, shell.deps);
+      shell.asks[0]!.resolve(SHELL);
+      await settle();
+      expect(client.configured.at(-1)?.speaks, String(ready)).toBe(speaks);
+      shell.config();
+      shell.asks[1]!.resolve(SHELL);
+      await settle();
+      expect(client.configured.at(-1)?.speaks).toBe(speaks);
+      if (ready) expect(asked, "once, at the start").toBe(1);
+    }
+  });
+
+  it("the first config waits for the answer on his voice", async () => {
+    const client = fakeClient();
+    const shell = fakeShell();
+    let answer: (v: boolean) => void = () => {};
+    shell.deps.voiceReady = () => new Promise<boolean>((r) => (answer = r));
+    await startCompanion(client as unknown as CompanionClient, shell.deps);
+    shell.asks[0]!.resolve(SHELL);
+    await settle();
+    expect(client.configured).toEqual([]);
+    answer(true);
+    await settle();
+    expect(client.configured.map((c) => c?.speaks)).toEqual([true]);
   });
 
   it("without a token, the client is unconfigured", async () => {

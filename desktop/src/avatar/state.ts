@@ -18,6 +18,8 @@
  * - The link lost mid-turn ends it with an apology of the page's own: the
  *   brain sends nothing more for a turn once its socket is gone. A
  *   listening turn is left to its clip, whose outcome ends it.
+ * - What the brain heard (`stt`, a spoken turn's) is kept to show over
+ *   the reply, until the next turn (PR 10).
  * - Push-to-talk (PR 8): listening is a turn of its own, under a local id
  *   (its press's number) no brain frame carries, until the clip is sent and
  *   the brain's turn (`asked`) takes its place. Unheard (the clip came to
@@ -43,6 +45,8 @@ export interface TurnView {
   apology: string | null;
   pictures: number;
   interrupted: boolean;
+  /** What the brain heard the owner say, for a spoken turn (its `stt`). */
+  heard: string | null;
   /** Over: done, failed or lost. */
   ended: boolean;
   revision: number;
@@ -77,6 +81,7 @@ export const INITIAL: TurnView = Object.freeze({
   apology: null,
   pictures: 0,
   interrupted: false,
+  heard: null,
   ended: true,
   revision: 0,
 });
@@ -89,7 +94,7 @@ export const LOST_APOLOGY =
 export const INTERRUPTED_MARK = " [interrupted]";
 
 /** The fields the bubble shows: a change to any of them is a new revision. */
-const SHOWN = ["turnId", "reply", "progress", "apology", "pictures", "interrupted", "ended"] as const;
+const SHOWN = ["turnId", "reply", "progress", "apology", "pictures", "interrupted", "heard", "ended"] as const;
 
 function next(v: TurnView, change: Partial<TurnView>): TurnView {
   const out = { ...v, ...change };
@@ -128,6 +133,7 @@ export function reduce(v: TurnView, e: TurnEvent): TurnView {
         apology: null,
         pictures: 0,
         interrupted: false,
+        heard: null,
         ended: false,
         revision: v.revision + 1,
       };
@@ -143,6 +149,7 @@ export function reduce(v: TurnView, e: TurnEvent): TurnView {
         apology: null,
         pictures: 0,
         interrupted: false,
+        heard: null,
         ended: false,
         revision: v.revision + 1,
       };
@@ -178,6 +185,8 @@ function frame(v: TurnView, f: ServerFrame): TurnView {
       return next(v, { reply: f.restart ? f.delta : v.reply + f.delta });
     case "progress":
       return next(v, { progress: f.text });
+    case "stt":
+      return next(v, { heard: f.text });
     case "done":
       return next(v, {
         reply: f.interrupted ? unmarked(f.text) : f.text,

@@ -253,6 +253,11 @@ fn push_to_talk(app: &AppHandle, pressed: bool) {
         }
         audio_in::Edge::Save(dir) => audio_in::press(device, || {}, |_| {}, move |clip| audio_in::save_clip(&dir, clip)),
         audio_in::Edge::Send => {
+            // He will answer aloud: his voice is loaded while the owner
+            // talks, so the first sentence isn't kept waiting for it.
+            if companion::current(true).speaks_back() && kokoro_tts::installed() {
+                kokoro_tts::warm_in_background();
+            }
             let (h, k, m) = (app.clone(), app.clone(), app.clone());
             // A press that is AlreadyHeld leaves a gap: no outcome comes for it.
             let press = PRESSES.fetch_add(1, Ordering::SeqCst) + 1;
@@ -2165,6 +2170,12 @@ mod tests {
         let send = ptt.find("audio_in::Edge::Send => {").expect("one to send");
         assert!(ptt[send..].contains("audio_in::press(device, listening, level, move |clip| clip_heard(&k, press, clip))"));
         assert!(ptt[send..].contains("ptt_listening_payload(press)"), "listening says which press");
+        // His voice is warmed only for a press to a brain that will answer
+        // aloud, with his voice there to answer in; never one only saved.
+        let warm = ptt.find("kokoro_tts::warm_in_background();").expect("a warm");
+        assert!(send < warm && warm < ptt.find("audio_in::press(device, listening").unwrap());
+        assert!(ptt[send..warm].contains("if companion::current(true).speaks_back() && kokoro_tts::installed() {"));
+        assert_eq!(src.matches("kokoro_tts::warm_in_background()").count(), 1);
         // Its levels go to his page, each with its press; a clip only saved
         // has no page to tell.
         assert!(ptt[send..].contains("m.emit_to(OVERLAY_LABEL, PTT_LEVEL_EVENT, ptt_level_payload(press, l))"));

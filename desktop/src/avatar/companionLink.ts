@@ -19,6 +19,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { CompanionClient, CompanionConfig, LinkStatus } from "../shared/companion";
 import { SETTINGS_EVENT, parseBrain } from "../shared/settings";
 import { oneAtATime as newestOnly } from "../shared/oneAtATime";
+import { voiceReady } from "./voiceLink";
 
 export const CONFIG_CMD = "companion_config";
 export const REPORT_CMD = "companion_report";
@@ -254,9 +255,11 @@ export function parseShellConfig(v: unknown): ShellConfig | null {
 }
 
 /** The client's config, or null (unconfigured) without a token. */
-export function configFrom(s: ShellConfig): CompanionConfig | null {
+/** The client's config from the shell's, and whether his voice is
+ * installed (the desk then offers to voice what he says). */
+export function configFrom(s: ShellConfig, speaks = false): CompanionConfig | null {
   if (s.token === null || s.token === "") return null;
-  return { url: s.url, token: s.token, client: { id: s.clientId, name: s.clientName } };
+  return { url: s.url, token: s.token, client: { id: s.clientId, name: s.clientName }, speaks };
 }
 
 // The commands' arguments, built in one place so the wire test checks them.
@@ -283,6 +286,9 @@ export interface LinkDeps {
   report(s: LinkStatus): Promise<void>;
   onConfig(cb: () => void): Promise<unknown>;
   onSettings(cb: (settings: unknown) => void): Promise<unknown>;
+  /** Whether his voice is installed (asked once, at the start: files
+   * fetched later count from the next start). Absent: it isn't. */
+  voiceReady?(): Promise<boolean>;
 }
 
 const tauriDeps = (): LinkDeps => ({
@@ -296,12 +302,15 @@ const tauriDeps = (): LinkDeps => ({
   },
   onConfig: (cb) => listen(CONFIG_EVENT, () => cb()),
   onSettings: (cb) => listen<unknown>(SETTINGS_EVENT, (e) => cb(e.payload)),
+  voiceReady: () => voiceReady(),
 });
 
 /** Connect `client` as the shell says, and keep the shell told. Resolves
  * once listening; the first config is asked for without waiting. */
 export async function startCompanion(client: CompanionClient, deps: LinkDeps = tauriDeps()): Promise<void> {
   client.onLink(oneAtATime(deps.report));
+  // Asked at once, and waited for only by the first config.
+  const speaks = deps.voiceReady ? deps.voiceReady().catch(() => false) : Promise.resolve(false);
   // The `brain` settings the client was last configured from, to tell a
   // change to them from a change to anything else.
   let brain: string | null = null;
@@ -318,11 +327,12 @@ export async function startCompanion(client: CompanionClient, deps: LinkDeps = t
       console.warn(`avatar: ${CONFIG_CMD} failed`, e);
       return;
     }
+    const voice = await speaks;
     if (mine !== asked) return;
     const shell = parseShellConfig(answer);
     if (!shell) return;
     brain = brainKey(shell);
-    const changed = client.configure(configFrom(shell));
+    const changed = client.configure(configFrom(shell, voice));
     if (again && !changed) client.reconnectNow();
   };
   await deps.onConfig(() => void refresh(true));

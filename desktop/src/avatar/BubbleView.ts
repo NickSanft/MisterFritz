@@ -15,6 +15,8 @@
  * - While push-to-talk is muted (the tray's Mute push-to-talk), the muted
  *   sign shows over his head the whole time: in the bubble's corner while
  *   it shows, else on its own where the bubble's tail would point.
+ * - What the brain heard you say (a spoken turn's `stt`) shows over the
+ *   reply, in quotes, smaller (PR 10).
  * - While he listens, DivoraVoice's level meter shows under *Listening…*:
  *   shown or hidden with the turn (so the bubble is measured as ever), its
  *   level and cap moved at every paint (meter.ts).
@@ -31,6 +33,8 @@ import type { TurnView } from "./state";
 
 /** What the bubble shows, worked out from the turn (pure, for the tests). */
 export interface BubbleText {
+  /** What the brain heard, quoted; null for a typed turn. */
+  heard: string | null;
   progress: string | null;
   body: string;
   apology: string | null;
@@ -59,7 +63,8 @@ export function bubbleText(v: TurnView): BubbleText {
     if (!v.ended) body = v.phase === "listening" ? LISTENING : THINKING;
     else body = v.apology === null && note === null ? NOTHING_TO_SAY : "";
   }
-  return { progress: v.ended ? null : v.progress, body, apology: v.apology, note };
+  const heard = v.heard === null || v.heard.trim() === "" ? null : `“${v.heard.trim()}”`;
+  return { heard, progress: v.ended ? null : v.progress, body, apology: v.apology, note };
 }
 
 export interface Bubble {
@@ -137,6 +142,7 @@ export function createBubble(doc: Document, parent: HTMLElement = doc.body): Bub
   const root = el("div", "bubble", parent);
   const clip = el("div", "bubble-clip", root);
   const content = el("div", "bubble-content", clip);
+  const heard = el("div", "bubble-heard", content);
   const progress = el("div", "bubble-progress", content);
   el("span", "orb", progress);
   const progressText = el("span", "bubble-progress-text", progress);
@@ -202,6 +208,7 @@ export function createBubble(doc: Document, parent: HTMLElement = doc.body): Bub
       if (fresh) {
         revision = v.revision;
         const t = bubbleText(v);
+        row(heard, "heard", "block", heard, t.heard);
         row(progress, "progress", "flex", progressText, t.progress);
         row(text, "text", "block", text, t.body);
         style(meter, "meter", "display", listens(v) ? "block" : "none");

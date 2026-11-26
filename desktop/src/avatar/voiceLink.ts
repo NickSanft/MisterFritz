@@ -2,7 +2,7 @@
  * His voice in the shell (kokoro_tts.rs, plan 14 PR 10): whether its files
  * are installed, and one of his sentences spoken, by the names the shell
  * has (wire.fixture.json). What comes back is 24 kHz mono samples, ready
- * for an AudioBuffer; playing them is the page's (PR 10's next commit).
+ * for an AudioBuffer, which speech.ts plays.
  */
 import { invoke } from "@tauri-apps/api/core";
 import fixture from "./wire.fixture.json";
@@ -31,7 +31,7 @@ export async function voiceReady(call: Call = invoke): Promise<boolean> {
 }
 
 /** A sentence of his, spoken: its samples, or why not in the shell's words. */
-export type Spoken = { samples: Float32Array } | { why: string };
+export type Spoken = { samples: Float32Array<ArrayBuffer> } | { why: string };
 
 /** `text` spoken by the shell. Its answer is raw f32 little-endian (an
  * ArrayBuffer, as `ipc::Response` gives it); Windows on x86 and ARM is

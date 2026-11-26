@@ -52,6 +52,10 @@ export interface CompanionConfig {
   url: string;
   token: string;
   client: { id: string; name: string };
+  /** His voice is installed, so the desk voices text itself: its hello
+   * offers `speak-local`, and the brain sends a spoken turn's sentences
+   * (PR 10). Absent, it doesn't. */
+  speaks?: boolean;
 }
 
 export interface LinkStatus {
@@ -87,8 +91,10 @@ export interface ClientDeps {
 }
 
 /** What this desk can do, told to the brain in its hello: it can send
- * what it hears (PR 8). */
+ * what it hears (PR 8). With his voice installed, `SPEAKS` too. */
 export const CAPS: Cap[] = ["text", "audio-in", "vrm"];
+/** The cap for a desk that voices text itself (PR 10). */
+export const SPEAKS: Cap = "speak-local";
 /** The longest clip, in bytes: 30 s of 16 kHz PCM16 mono, what the shell's
  * ears hand over (audio_in.rs's MAX_BYTES), and under the brain's 1 MiB
  * frame limit. */
@@ -134,7 +140,7 @@ export const helloFrame = (c: CompanionConfig): Hello => ({
   type: "hello",
   protocol: PROTOCOL_VERSION,
   token: c.token,
-  client: { id: c.client.id, name: c.client.name, caps: [...CAPS] },
+  client: { id: c.client.id, name: c.client.name, caps: c.speaks === true ? [...CAPS, SPEAKS] : [...CAPS] },
 });
 export const sayFrame = (turnId: string, text: string): Say => ({ type: "say", turn_id: turnId, text });
 export const cancelFrame = (turnId: string): Cancel => ({ type: "cancel", turn_id: turnId });
@@ -166,7 +172,13 @@ const OFFLINE: LinkStatus = {
 
 function sameConfig(a: CompanionConfig | null, b: CompanionConfig | null): boolean {
   if (a === null || b === null) return a === b;
-  return a.url === b.url && a.token === b.token && a.client.id === b.client.id && a.client.name === b.client.name;
+  return (
+    a.url === b.url &&
+    a.token === b.token &&
+    a.client.id === b.client.id &&
+    a.client.name === b.client.name &&
+    (a.speaks === true) === (b.speaks === true)
+  );
 }
 
 function sameStatus(a: LinkStatus, b: LinkStatus): boolean {
@@ -228,7 +240,7 @@ export class CompanionClient {
    * Returns whether it changed anything. */
   configure(c: CompanionConfig | null): boolean {
     if (this.closed || sameConfig(this.config, c)) return false;
-    this.config = c ? { url: c.url, token: c.token, client: { ...c.client } } : null;
+    this.config = c ? { url: c.url, token: c.token, client: { ...c.client }, speaks: c.speaks === true } : null;
     if (!this.config) {
       this.drop();
       this.setStatus(OFFLINE);

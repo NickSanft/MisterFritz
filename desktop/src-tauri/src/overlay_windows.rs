@@ -48,8 +48,12 @@ use crate::windows_ext::{self, Bounds};
 /// Lorraine's WebView2 arguments, byte-identical in every window this app
 /// ever builds (and in tauri.conf.json's windows), or WebView2 forks a second
 /// browser environment. They also stop Chromium treating an unfocused or
-/// covered window as backgrounded, which would throttle the paced loop.
-pub const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion,UseEcoQoSForBackgroundProcess --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-background-timer-throttling";
+/// covered window as backgrounded, which would throttle the paced loop. And
+/// they let his voice play (PR 10): his window is never clicked, so under
+/// Chromium's own autoplay policy its AudioContext would never be allowed to
+/// start; wry adds this flag itself only when an app passes no arguments of
+/// its own, and this app passes these.
+pub const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion,UseEcoQoSForBackgroundProcess --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-background-timer-throttling --autoplay-policy=no-user-gesture-required";
 
 /// Where a parked window stands: off every monitor, so it is never shown
 /// again, re-activated or composed (the SnapShelf pattern), only moved back.
@@ -1122,6 +1126,7 @@ mod tests {
             );
         }
         assert!(BROWSER_ARGS.contains("--disable-background-timer-throttling"));
+        assert!(BROWSER_ARGS.ends_with(" --autoplay-policy=no-user-gesture-required"), "his voice plays with no click");
     }
 
     /// The window, tray and status work keeps its order on the main thread;

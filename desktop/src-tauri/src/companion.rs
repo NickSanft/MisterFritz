@@ -167,6 +167,12 @@ impl CompanionStatus {
         self.link == Link::Online && self.server_caps.iter().any(|c| c == "audio-in")
     }
 
+    /// Online, to a brain that speaks a spoken turn's reply back (its
+    /// welcome offered `speak-local`).
+    pub fn speaks_back(&self) -> bool {
+        self.link == Link::Online && self.server_caps.iter().any(|c| c == "speak-local")
+    }
+
     /// What changed enough to log: the link, and why.
     pub fn headline(&self) -> (Link, Option<Reason>) {
         (self.link, self.reason)
@@ -445,6 +451,24 @@ mod tests {
         }
         assert!(ptt_refusal(&hearing, false).unwrap().contains("window is closed"));
         assert!(ptt_refusal(&CompanionStatus::before_any_report(true), false).unwrap().contains("window"));
+    }
+
+    /// He answers aloud only online, to a brain whose welcome offered
+    /// `speak-local` (it sends a spoken turn's sentences, PR 10).
+    #[test]
+    fn a_brain_speaks_back_only_online_and_only_when_it_says_so() {
+        let speaking = CompanionStatus { link: Link::Online, server_caps: vec!["text".into(), "speak-local".into()],
+                                         ..CompanionStatus::before_any_report(true) };
+        assert!(speaking.speaks_back());
+        assert!(!speaking.hears(), "speaking isn't hearing");
+        let quiet = CompanionStatus { server_caps: vec!["text".into(), "audio-in".into()], ..speaking.clone() };
+        assert!(!quiet.speaks_back());
+        for link in [Link::Unconfigured, Link::Connecting, Link::Offline, Link::Refused] {
+            assert!(!CompanionStatus { link, ..speaking.clone() }.speaks_back(), "{link:?}");
+        }
+        // As the page reports it, the cap survives the filter.
+        let reported = status_from(serde_json::json!({"link": "online", "serverCaps": ["speak-local"]})).unwrap();
+        assert!(reported.speaks_back());
     }
 
     #[test]

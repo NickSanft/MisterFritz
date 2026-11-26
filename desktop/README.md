@@ -224,8 +224,29 @@ past its 510 phonemes, is halved at a word), and Kokoro is loaded by the
 first, which takes a second or so more than the rest, and kept until he
 quits; one sentence is spoken at a time, on four threads, so a reply never takes the whole CPU
 from a game. Nothing he says is logged, only how long it was and how long it
-took. His page plays it from PR 10's next commit; until then nothing is
-spoken.
+took.
+
+His page plays it ([`speech.ts`](src/avatar/speech.ts)): his hello offers to
+voice what he says (`speak-local`) once his voice is there at his start, so
+the brain sends a spoken question's answer a sentence at a time, and each is
+spoken by the shell in turn and played as it comes, after the one before,
+while the rest is still being written. Push-to-talk pressed, a question
+typed, or the link lost stops him at once, mid-sentence. The bubble stays up
+while he speaks, with what the brain heard you say in quotes over his reply,
+and he goes on speaking while he is parked. A push-to-talk press to a brain
+that will answer aloud loads Kokoro while you talk, so his first sentence
+isn't kept waiting for it. The audio plays on Windows' default output, and
+is opened only when he first speaks and let go a few seconds after he
+stops. A typed question's answer is never spoken.
+
+His window is never clicked, and Chromium lets a page's audio start only
+after a click unless told otherwise, so every window's WebView2 arguments
+(`BROWSER_ARGS`, kept the same in tauri.conf.json) end with
+`--autoplay-policy=no-user-gesture-required`, the flag wry adds itself only
+when an app passes no arguments of its own. Should his audio still not play
+(a device gone, say), a sentence not ended two seconds after it should have
+drops the rest of the turn and says so once in his page's console, rather
+than holding the bubble up for a voice nobody hears.
 
 His voice isn't in the repo or the build. Fetch it once, about 122 MB, with
 the Python of the brain's environment (or any Python 3.10 or later; it uses

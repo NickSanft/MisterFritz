@@ -81,6 +81,14 @@
   display: none;
 }
 
+/* What the brain heard you say, a spoken turn's: over the reply, quoted,
+   smaller and quieter. */
+.bubble-heard {
+  display: none;
+  font: italic 500 var(--t-xs) / 1.4 var(--font-ui);
+  color: var(--text-mid);
+}
+
 /* A tool at work, and the apology: a smaller line after an orb. */
 .bubble-progress,
 .bubble-apology {

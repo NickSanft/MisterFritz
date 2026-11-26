@@ -17,6 +17,11 @@
  * tick: the turn it shows is state.ts's, moved on by the brain's frames and
  * by `companion:say` (the shell's bridge, from Settings › Brain's Ask and
  * the prompt), each answered with whether it went on to the brain.
+ *
+ * His voice (speech.ts, PR 10): the brain's sentences for the shown turn
+ * are spoken by the shell and played as they come; push-to-talk, a typed
+ * question or the link lost stops him at once, and the bubble stays up
+ * while he speaks.
  */
 import "../divora/tokens.css";
 import "../divora/fonts.css";
@@ -35,6 +40,9 @@ import { keyAction } from "./keys";
 import { POWER_EVENT, afterAsking, fetchDisplayOn, parseDisplay, shouldDraw } from "./run";
 import { AHEAD, CURSOR_EVENT, fetchCursor, gaze, parseCursor, type CursorFrame, type Gaze } from "./look";
 import { CompanionClient } from "../shared/companion";
+import { browserClock } from "../shared/clock";
+import { Speech } from "./speech";
+import { speakSentence } from "./voiceLink";
 import {
   BRAIN_CANT_HEAR,
   NOT_CONNECTED,
@@ -140,6 +148,14 @@ let muted = false;
 const meter = new LevelMeter();
 const bubble = createBubble(document);
 const bubbleClock = new BubbleClock();
+/** His voice: the brain's sentences, spoken by the shell, played here. */
+const speech = new Speech({ audio: () => new AudioContext(), speak: (text) => speakSentence(text), clock: browserClock });
+// For a live check's eyes: what his voice has done, in counts, never words.
+(window as unknown as Record<string, unknown>).__fritzSpeech = () => ({
+  busy: speech.busy,
+  audio: speech.audioState,
+  ...speech.counts,
+});
 let wasOnline = false;
 /** His shape on the page, sent to the shell as it changes; and whether the
  * WebGL context is lost (a GPU reset), when nothing of him is drawn. */
@@ -164,6 +180,7 @@ function apply(e: TurnEvent): void {
 /** Ask the brain: a turn still running is cancelled first (barge-in; the
  * brain starts the new one once the old has stopped). Whether it went on. */
 function ask(text: string): boolean {
+  speech.stop();
   const old = cancelFirst(turn);
   if (old !== null) companion.cancel(old);
   const id = companion.say(text);
@@ -175,12 +192,21 @@ function ask(text: string): boolean {
   return true;
 }
 
-for (const type of ["state", "token", "progress", "done", "error"] as const) {
+for (const type of ["state", "token", "progress", "done", "error", "stt"] as const) {
   companion.on(type, (frame) => apply({ kind: "frame", frame }));
 }
-// The link lost mid-turn: the brain sends nothing more for it.
+// His sentences, for the turn shown only: a cancelled turn's last ones
+// still come after a barge-in.
+companion.on("speak", (frame) => {
+  if (frame.turn_id === turn.turnId) speech.hear(frame);
+});
+// The link lost mid-turn: the brain sends nothing more for it, and he
+// stops.
 companion.onLink((s) => {
-  if (wasOnline && s.link !== "online") apply({ kind: "lost" });
+  if (wasOnline && s.link !== "online") {
+    speech.stop();
+    apply({ kind: "lost" });
+  }
   wasOnline = s.link === "online";
 });
 
@@ -205,6 +231,7 @@ function sendClip(pcm: ArrayBuffer, press: number): { turnId: string } | { why: 
 void listen<unknown>(PTT_LISTENING_EVENT, (e) => {
   const press = parseListening(e.payload);
   if (press === null) return;
+  speech.stop();
   const old = cancelFirst(turn);
   if (old !== null) companion.cancel(old);
   apply({ kind: "listening", press });
@@ -288,10 +315,11 @@ function lookFor(c: CursorFrame, a: VrmActor): Gaze {
 }
 
 /** The bubble this frame: its clock moved on by the frame's time (held
- * while the cursor is over his window), drawn over his head. */
+ * while the cursor is over his window, or while he speaks), drawn over his
+ * head. */
 function paintBubble(dt: number): void {
   const hovered = cursorFrame !== null && cursorFrame.active && cursorFrame.over;
-  const env = bubbleClock.tick(dt * 1000, hovered, motionFactor);
+  const env = bubbleClock.tick(dt * 1000, hovered || speech.busy, motionFactor);
   const view = { width: window.innerWidth, height: window.innerHeight };
   const anchor = actor
     ? actor.headScreen(camera, view.width, view.height, anchorAbove(actor.crownAboveHead))
