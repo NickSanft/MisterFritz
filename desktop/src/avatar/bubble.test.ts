@@ -151,6 +151,51 @@ describe("the bubble's clock", () => {
     expect(c.showing).toBe(false);
   });
 
+  it("stands while it comes in, shows and holds; not while it fades, unless brought back", () => {
+    const c = new BubbleClock();
+    expect(c.standing, "hidden").toBe(false);
+    c.show();
+    expect(c.standing, "coming in").toBe(true);
+    frames(c, 500, 1);
+    expect(c.standing, "shown").toBe(true);
+    c.end(0);
+    frames(c, HOLD_MS - 2 * FRAME, 1);
+    expect(c.standing, "holding").toBe(true);
+    until(c, 1, (e) => e.opacity < 1);
+    expect(c.standing, "fading").toBe(false);
+    c.tick(FRAME, true, 1);
+    expect(c.standing, "the cursor brings it back").toBe(true);
+    c.tick(FRAME, false, 1);
+    expect(c.standing, "and it fades again").toBe(false);
+    until(c, 1, (e) => !e.visible);
+    expect(c.standing, "gone").toBe(false);
+    c.show();
+    frames(c, 500, 1);
+    c.end(0);
+    frames(c, HOLD_MS + FRAME, 1);
+    expect(c.standing, "a later fade starts on its own, whatever the last one was").toBe(false);
+  });
+
+  it("a fade begun after one the cursor brought back stands no frame longer", () => {
+    const c = new BubbleClock();
+    c.show();
+    frames(c, 500, 1);
+    c.end(0);
+    until(c, 1, (e) => e.opacity < 1);
+    c.tick(FRAME, true, 1);
+    expect(c.standing, "brought back").toBe(true);
+    // A new turn, while it was being brought back.
+    c.show();
+    frames(c, 500, 1);
+    c.end(0);
+    let at = -1;
+    for (let i = 0; i < 1000 && at < 0; i++) {
+      const e = c.tick(FRAME, false, 1);
+      if (!c.standing) at = e.opacity;
+    }
+    expect(at, "it stops standing the frame its fade begins, still wholly up").toBe(1);
+  });
+
   it("fades with opacity only", () => {
     const c = new BubbleClock();
     c.show();

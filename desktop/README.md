@@ -88,8 +88,8 @@ tray's *Appearance* menu, and changed in both windows at once. He takes a
 tint from it, his outlines leaning toward the mood and a rim light in the
 accent. With no motion, or while Windows asks for less (its *Animation
 effects* switch) and *Keep his motion when Windows asks for less*
-(`theme.motionUser`) is off, he only blinks and breathes: no sway, and his
-eyes stay ahead. The parchment grain (`theme.grain`) is the control
+(`theme.motionUser`) is off, he moves only to blink and breathe, to speak
+and to show his mood: no sway, no glance or tilt, and his eyes stay ahead. The parchment grain (`theme.grain`) is the control
 window's alone.
 
 The tray's *Settings…* opens the control window: his brain (where it is,
@@ -282,6 +282,25 @@ its data are GPL-3.0, run as a program of its own and never linked (source:
 ONNX Runtime is MIT. The app's crates for it are `ort` 2.0.0-rc.12 with
 `load-dynamic` (nothing downloaded at build time), which also brings in
 `ndarray`.
+
+## His face
+
+The brain asks his answers at the desk to begin with a mood (dry, pleased,
+alarmed or weary), takes it off the words and tells his page
+([`face.ts`](src/avatar/face.ts)), and his face shows it while the reply's
+bubble is up: dry is his resting face; pleased is his model's `happy` at
+0.4 (a VRoid 0.x export's Joy), alarmed `surprised` at 0.5 (or an
+expression of its own called `Surprised`, as VRoid exports have), weary
+`sad` at 0.4 (Sorrow). An expression eases in over 0.3 s and out over a
+second; a later part of the reply with another mood eases the first out as
+it comes in. It goes as the bubble starts to fade (and comes back while the
+cursor brings the bubble back), at any motion setting, and his mouth moves
+under it. A model without one of these expressions shows nothing for that
+mood, and so does one made to be all or nothing (a binary expression,
+which only a weight over a half turns on); and a VRM 1.0 model can make an
+expression hold the mouth or the blink still while it shows, which wins
+(the owner's VRoid 0.x export, and the placeholder, do neither). Like the
+bubble, it waits while he is parked.
 
 ## His speech bubble
 

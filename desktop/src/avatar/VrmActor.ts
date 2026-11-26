@@ -5,7 +5,8 @@
  * three-vrm's look-at, his head turning a share of the way. `setPhase` is the
  * turn's: thinking, he glances up and away and tilts his head. His mouth
  * opens as his voice says (`setMouth`, lipSync.ts, PR 10), through the
- * model's `aa`; mood comes with the PR that drives it.
+ * model's `aa`, and his face shows his mood (`setFace`, face.ts, PR 11)
+ * through its expressions, each looked for by name.
  *
  * Poses go through three-vrm's normalized humanoid. That rig is built from
  * the bones as the file has them, before `VRMUtils.rotateVRM0` turns a VRM
@@ -23,6 +24,7 @@ import {
 import { AHEAD, EYE_TAU, HEAD_SHARE_PITCH, HEAD_SHARE_YAW, HEAD_TAU, approach, type Gaze } from "./look";
 import { restBands, toView, type Band, type HitRect } from "./hitShape";
 import type { Phase } from "./state";
+import type { FaceFor } from "./face";
 
 const RAD = Math.PI / 180;
 /** The eyes sit about this far above the head bone, in metres: where a
@@ -94,14 +96,19 @@ export class VrmActor {
    * head, in the direction of `eyes`. It is told the whole gaze; it works
    * out the eyes' part from where the head already points. */
   readonly lookTarget = new THREE.Object3D();
-  /** The theme's motion factor (theme.ts): 1 is everything, 0 leaves only
-   * the blink and the breathing. */
+  /** The theme's motion factor (theme.ts): 1 is everything; 0 stills his
+   * sway, glance and tilt and holds his gaze ahead (the blink, the
+   * breathing, his mouth and his face still move). */
   private motion = 1;
   /** The turn's phase, the glance's seconds left, and the head's tilt now
    * (degrees). */
   private phase: Phase = "idle";
   /** How open his mouth is, 0 to 1 (`setMouth`). */
   private mouth = 0;
+  /** His face (`setFace`): each expression's names and weight, and which
+   * of the names the model has, looked for once a list. */
+  private face: readonly FaceFor[] = [];
+  private readonly faceNames = new Map<string, string | null>();
   private glance = 0;
   private tilt = 0;
   private crown: number | null = null;
@@ -186,8 +193,16 @@ export class VrmActor {
     this.look(dt);
     this.blink(dt);
     // After the blink, before the expressions are applied. A model without
-    // an `aa` (or without expressions) shows nothing of it.
-    this.vrm.expressionManager?.setValue("aa", this.mouth);
+    // an `aa` (or without expressions) shows nothing of it, nor a mood it
+    // has no expression for.
+    const em = this.vrm.expressionManager;
+    em?.setValue("aa", this.mouth);
+    if (em) {
+      for (const f of this.face) {
+        const name = this.expressionFor(f.names);
+        if (name !== null) em.setValue(name, f.weight);
+      }
+    }
     this.vrm.update(dt);
     if (this.tint) {
       for (const m of this.boundRim) m.parametricRimColorFactor.add(this.tint.glow);
@@ -229,10 +244,38 @@ export class VrmActor {
     return this.mouth;
   }
 
+  /** His face: each expression at its weight (0 to 1), applied at the next
+   * `update`, whatever the motion. An expression is the first of its names
+   * the model has; one it has none of is left out. */
+  setFace(faces: readonly FaceFor[]): void {
+    this.face = faces.map((f) => ({
+      names: f.names,
+      weight: Number.isFinite(f.weight) ? Math.min(1, Math.max(0, f.weight)) : 0,
+    }));
+  }
+
+  /** An expression's weight on the model now (0 for one it hasn't). */
+  expressionValue(name: string): number {
+    return this.vrm.expressionManager?.getValue(name) ?? 0;
+  }
+
+  /** The first of `names` the model has an expression for, or null. */
+  private expressionFor(names: readonly string[]): string | null {
+    const key = names.join("\n");
+    let name = this.faceNames.get(key);
+    if (name === undefined) {
+      const em = this.vrm.expressionManager;
+      name = names.find((n) => em?.getExpression(n) != null) ?? null;
+      this.faceNames.set(key, name);
+    }
+    return name;
+  }
+
   /** The theme's motion factor (0 to 1): it scales his sway, and at 0 he
    * looks ahead whatever `setLook` says, with no glance or tilt (plan 14:
-   * with no motion, only the blink and the breathing move). Neither the
-   * blink nor the breathing is ever scaled. */
+   * with no motion, only the blink and the breathing move; the owner's calls
+   * since keep his mouth moving as he speaks, PR 10, and his face showing his
+   * mood, PR 11). None of those is ever scaled. */
   setMotion(factor: number): void {
     this.motion = Math.min(1, Math.max(0, factor));
   }

@@ -23,6 +23,9 @@
  * question or the link lost stops him at once, and the bubble stays up
  * while he speaks. His mouth follows his voice's level (lipSync.ts), set
  * each frame before he is posed.
+ *
+ * His face (face.ts, PR 11): the shown turn's mood, from the brain's `mood`
+ * frame, eases in on his model while the bubble stands and out as it goes.
  */
 import "../divora/tokens.css";
 import "../divora/fonts.css";
@@ -44,6 +47,7 @@ import { CompanionClient } from "../shared/companion";
 import { browserClock } from "../shared/clock";
 import { Speech } from "./speech";
 import { LipSync } from "./lipSync";
+import { Face } from "./face";
 import { speakSentence } from "./voiceLink";
 import {
   BRAIN_CANT_HEAR,
@@ -154,12 +158,20 @@ const bubbleClock = new BubbleClock();
 const speech = new Speech({ audio: () => new AudioContext(), speak: (text) => speakSentence(text), clock: browserClock });
 /** His mouth, from what his voice plays. */
 const lips = new LipSync();
+/** His face, from the shown turn's mood. */
+const face = new Face();
 // For a live check's eyes: what his voice has done, in counts, never words.
 (window as unknown as Record<string, unknown>).__fritzSpeech = () => ({
   busy: speech.busy,
   audio: speech.audioState,
   mouth: lips.value,
   ...speech.counts,
+});
+// And of his face: the mood shown, and his expressions' weights on the model.
+(window as unknown as Record<string, unknown>).__fritzFace = () => ({
+  mood: face.mood,
+  standing: bubbleClock.standing,
+  values: Object.fromEntries(["happy", "surprised", "Surprised", "sad"].map((n) => [n, actor?.expressionValue(n) ?? 0])),
 });
 let wasOnline = false;
 /** His shape on the page, sent to the shell as it changes; and whether the
@@ -197,7 +209,7 @@ function ask(text: string): boolean {
   return true;
 }
 
-for (const type of ["state", "token", "progress", "done", "error", "stt"] as const) {
+for (const type of ["state", "token", "progress", "done", "error", "stt", "mood"] as const) {
   companion.on(type, (frame) => apply({ kind: "frame", frame }));
 }
 // His sentences, for the turn shown only: a cancelled turn's last ones
@@ -335,9 +347,13 @@ function paintBubble(dt: number): void {
 
 const loop = new PacedLoop((dt) => {
   const mouth = lips.sample(dt * 1000, speech.analyser, speech.busy);
+  // The shown turn's mood while its bubble stands; his resting face after.
+  face.set(bubbleClock.standing ? turn.mood : null);
+  face.tick(dt * 1000);
   if (actor) {
     actor.setPhase(turn.phase);
     actor.setMouth(mouth);
+    actor.setFace(face.faces());
     if (cursorFrame) actor.setLook(lookFor(cursorFrame, actor));
   }
   actor?.update(dt);

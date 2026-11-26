@@ -61,6 +61,29 @@ describe("the turn the bubble shows", () => {
     expect(INITIAL.heard).toBeNull();
   });
 
+  it("keeps his mood for the shown turn, the newest standing, until the next", () => {
+    const mood = (turn_id: string, m: "dry" | "pleased" | "alarmed" | "weary") => f({ type: "mood", turn_id, mood: m });
+    expect(INITIAL.mood).toBeNull();
+    let v = run(asked("t1"), state("t1"));
+    expect(v.mood).toBeNull();
+    const before = v.revision;
+    v = reduce(v, mood("t1", "alarmed"));
+    expect(v.mood).toBe("alarmed");
+    expect(v.revision, "the bubble doesn't show it").toBe(before);
+    expect(reduce(v, mood("t1", "alarmed")), "the same again changes nothing").toBe(v);
+    expect(reduce(v, mood("t2", "weary")), "another turn's").toBe(v);
+    v = reduce(v, token("t1", "Let me look."));
+    v = reduce(v, mood("t1", "pleased"));
+    expect(v.mood, "a later part's").toBe("pleased");
+    v = reduce(v, done("t1", "Found it, sir."));
+    expect(v.mood, "kept with the reply").toBe("pleased");
+    expect(reduce(v, mood("t1", "dry")), "not after its end").toBe(v);
+    expect(run(asked("t1"), mood("t1", "weary"), asked("t2")).mood).toBeNull();
+    expect(run(asked("t1"), mood("t1", "weary"), { kind: "listening", press: 2 }).mood).toBeNull();
+    const ended = run(asked("t1"), mood("t1", "weary"), done("t1", "x"));
+    expect(reduce(ended, { kind: "unheard", why: "Nothing heard." }).mood).toBeNull();
+  });
+
   it("streams tokens, and a restart replaces what came before", () => {
     let v = run(asked("t1"), state("t1"), token("t1", "Good "), token("t1", "eve"));
     expect(v.reply).toBe("Good eve");

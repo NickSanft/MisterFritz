@@ -12,10 +12,29 @@ export function placeholderBytes(): ArrayBuffer {
   return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
 }
 
+/** A VRM 0.x blend shape group: its preset ("joy", "a", or "unknown" for a
+ * custom one, which three-vrm names by `name`), with no binds. */
+export interface Vrm0Group {
+  presetName: string;
+  name: string;
+}
+
+/** The owner's export's expressions for his moods and mouth (VRoid 0.x):
+ * Joy, Sorrow, Fun, Angry, A, and a custom Surprised. */
+export const VROID0_GROUPS: readonly Vrm0Group[] = [
+  { presetName: "joy", name: "Joy" },
+  { presetName: "sorrow", name: "Sorrow" },
+  { presetName: "fun", name: "Fun" },
+  { presetName: "angry", name: "Angry" },
+  { presetName: "a", name: "A" },
+  { presetName: "unknown", name: "Surprised" },
+];
+
 /** The placeholder's GLB rewritten as a VRM 0.x export would arrive: the
  * `VRM` extension instead of `VRMC_vrm`, and the model facing -Z (the whole
- * scene turned half round about Y), as VRoid's "VRM 0.0" export does. */
-export function asVrm0(glb: ArrayBuffer): ArrayBuffer {
+ * scene turned half round about Y), as VRoid's "VRM 0.0" export does. Its
+ * blend shape groups are `groups` (none, unless given). */
+export function asVrm0(glb: ArrayBuffer, groups: readonly Vrm0Group[] = []): ArrayBuffer {
   const view = new DataView(glb);
   const jsonLength = view.getUint32(12, true);
   const json = JSON.parse(new TextDecoder().decode(new Uint8Array(glb, 20, jsonLength)));
@@ -27,7 +46,7 @@ export function asVrm0(glb: ArrayBuffer): ArrayBuffer {
       specVersion: "0.0",
       meta: { title: "Fritz (placeholder as VRM 0.x)", version: "1", author: "test", licenseName: "CC0" },
       humanoid: { humanBones: Object.entries(humanBones).map(([bone, b]) => ({ bone, node: b.node, useDefaultValues: true })) },
-      blendShapeMaster: { blendShapeGroups: [] },
+      blendShapeMaster: { blendShapeGroups: groups.map((g) => ({ ...g, binds: [], materialValues: [], isBinary: false })) },
       firstPerson: { firstPersonBone: humanBones.head.node, meshAnnotations: [], lookAtTypeName: "BlendShape" },
       secondaryAnimation: { boneGroups: [], colliderGroups: [] },
       materialProperties: [],

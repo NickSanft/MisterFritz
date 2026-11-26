@@ -469,6 +469,6 @@ describe("the page's use of his voice", () => {
   });
 
   it("shows what the brain heard", () => {
-    expect(main).toContain('for (const type of ["state", "token", "progress", "done", "error", "stt"] as const) {');
+    expect(main).toContain('for (const type of ["state", "token", "progress", "done", "error", "stt", "mood"] as const) {');
   });
 });

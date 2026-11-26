@@ -116,9 +116,18 @@ export class BubbleClock {
   private ended = false;
   private holdFor = 0;
   private held = 0;
+  /** Fading, and the cursor over him bringing it back. */
+  private back = false;
 
   get showing(): boolean {
     return this.stage !== "hidden";
+  }
+
+  /** Up and not going: coming in, shown, holding, or brought back by the
+   * cursor while it fades. Not while it fades on its own, or once it has
+   * gone: his face for the reply goes with it. */
+  get standing(): boolean {
+    return this.stage === "out" ? this.back : this.stage !== "hidden";
   }
 
   show(): void {
@@ -144,6 +153,7 @@ export class BubbleClock {
     this.p = 0;
     this.ended = false;
     this.held = 0;
+    this.back = false;
   }
 
   tick(dtMs: number, hovered: boolean, motion: number): Envelope {
@@ -162,9 +172,13 @@ export class BubbleClock {
         break;
       case "hold":
         if (!hovered) this.held += dt;
-        if (this.held >= this.holdFor) this.stage = "out";
+        if (this.held >= this.holdFor) {
+          this.stage = "out";
+          this.back = false;
+        }
         break;
       case "out":
+        this.back = hovered;
         this.o = hovered
           ? Math.min(1, this.o + dt / opacityMs(MATERIALISE_MS, motion))
           : Math.max(0, this.o - dt / opacityMs(FADE_MS, motion));

@@ -1,8 +1,10 @@
 /**
  * The theme on his body, on the placeholder (MToon, outlined) and its 0.x
  * rewrite (no MToon left): the tint leans his outlines and lights his rim
- * from the model's own colours, and the motion factor stills all but the
- * blink and the breathing.
+ * from the model's own colours, and the motion factor stills his sway and
+ * holds his gaze ahead (the blink and the breathing move at any motion, as
+ * his mouth and his face do: mouth.test.ts, faceModel.test.ts; the glance
+ * and tilt are looking.test.ts's).
  */
 import * as THREE from "three";
 import { describe, expect, it } from "vitest";

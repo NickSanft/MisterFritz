@@ -20,6 +20,8 @@
  *   listening turn is left to its clip, whose outcome ends it.
  * - What the brain heard (`stt`, a spoken turn's) is kept to show over
  *   the reply, until the next turn (PR 10).
+ * - His mood (`mood`, PR 11) is kept for his face, the newest standing,
+ *   until the next turn. The bubble doesn't show it: no new revision.
  * - Push-to-talk (PR 8): listening is a turn of its own, under a local id
  *   (its press's number) no brain frame carries, until the clip is sent and
  *   the brain's turn (`asked`) takes its place. Unheard (the clip came to
@@ -32,7 +34,7 @@
  * `revision` changes whenever what the bubble shows changes, and only then,
  * so the page writes and measures text only when it must.
  */
-import type { ServerFrame, TurnState } from "../shared/protocol";
+import type { MoodName, ServerFrame, TurnState } from "../shared/protocol";
 
 export type Phase = TurnState;
 
@@ -47,6 +49,8 @@ export interface TurnView {
   interrupted: boolean;
   /** What the brain heard the owner say, for a spoken turn (its `stt`). */
   heard: string | null;
+  /** His mood for the reply, the newest the brain told (its `mood`). */
+  mood: MoodName | null;
   /** Over: done, failed or lost. */
   ended: boolean;
   revision: number;
@@ -82,6 +86,7 @@ export const INITIAL: TurnView = Object.freeze({
   pictures: 0,
   interrupted: false,
   heard: null,
+  mood: null,
   ended: true,
   revision: 0,
 });
@@ -99,7 +104,7 @@ const SHOWN = ["turnId", "reply", "progress", "apology", "pictures", "interrupte
 function next(v: TurnView, change: Partial<TurnView>): TurnView {
   const out = { ...v, ...change };
   const shown = SHOWN.some((k) => out[k] !== v[k]);
-  if (!shown && out.phase === v.phase) return v;
+  if (!shown && out.phase === v.phase && out.mood === v.mood) return v;
   return shown ? { ...out, revision: v.revision + 1 } : out;
 }
 
@@ -134,6 +139,7 @@ export function reduce(v: TurnView, e: TurnEvent): TurnView {
         pictures: 0,
         interrupted: false,
         heard: null,
+        mood: null,
         ended: false,
         revision: v.revision + 1,
       };
@@ -150,6 +156,7 @@ export function reduce(v: TurnView, e: TurnEvent): TurnView {
         pictures: 0,
         interrupted: false,
         heard: null,
+        mood: null,
         ended: false,
         revision: v.revision + 1,
       };
@@ -187,6 +194,8 @@ function frame(v: TurnView, f: ServerFrame): TurnView {
       return next(v, { progress: f.text });
     case "stt":
       return next(v, { heard: f.text });
+    case "mood":
+      return next(v, { mood: f.mood });
     case "done":
       return next(v, {
         reply: f.interrupted ? unmarked(f.text) : f.text,
