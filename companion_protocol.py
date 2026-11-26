@@ -19,6 +19,8 @@ Where this differs from the plan's sketch, and why:
 - Say.text is stripped before its length is checked: whitespace is not a
   question.
 - Done.images are data: URLs (see Done).
+- mood (PR 11, the owner's Q3 call: inline tags) is a frame of its own, which
+  the plan named only as "state-adjacent".
 
 Most models are declared ahead of the server code that sends or reads them,
 so the generated types are whole from the start. Which frames the server
@@ -51,6 +53,8 @@ TurnId = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{1,64}$")]
 Cap = Literal["text", "audio-in", "audio-out", "speak-local", "vrm", "widgets"]
 TurnState = Literal["listening", "transcribing", "thinking", "speaking", "idle"]
 ErrorCode = Literal["busy", "bad_frame", "turn_failed", "stt_failed", "not_allowed", "internal"]
+# His mood, as the model's leading [mood:…] tag names it (mood_tags.py).
+MoodName = Literal["dry", "pleased", "alarmed", "weary"]
 
 
 # ── client → server ──────────────────────────────────────────────────────────
@@ -138,6 +142,19 @@ class Token(BaseModel):
     restart: bool = False
 
 
+class Mood(BaseModel):
+    """His mood for the reply that follows, from the tag the model began it
+    with (taken off the tokens, the speech and done's text). Sent before the
+    first token of the part of the reply it heads; a reply in several parts
+    (the model wrote, called a tool, wrote again) may name one per part, and
+    the newest stands; a part that is only a tag tells its mood as the next
+    part begins. Always before the turn's done or error. A reply that names
+    none sends none."""
+    type: Literal["mood"] = "mood"
+    turn_id: str
+    mood: MoodName
+
+
 class Progress(BaseModel):
     type: Literal["progress"] = "progress"
     turn_id: str
@@ -201,8 +218,8 @@ class Reminder(BaseModel):
 
 ClientFrame = Annotated[Union[Hello, Say, AudioEnd, Cancel, Subscribe, Ping, Pong],
                         Field(discriminator="type")]
-ServerFrame = Annotated[Union[Welcome, State, Stt, Token, Progress, Speech, Speak, Done, Error,
-                              Widget, Reminder, Ping, Pong],
+ServerFrame = Annotated[Union[Welcome, State, Stt, Token, Mood, Progress, Speech, Speak, Done,
+                              Error, Widget, Reminder, Ping, Pong],
                         Field(discriminator="type")]
 
 _CLIENT_FRAME: TypeAdapter = TypeAdapter(ClientFrame)

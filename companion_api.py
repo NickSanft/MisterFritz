@@ -65,6 +65,11 @@ interrupted reply ends without its tail; a sentence said before a tool call
 can't be unsaid when the client clears it. COMPANION_TTS=xtts (the brain
 speaking) is not built yet, and `off` sends no speech.
 
+Mood (PR 11): a desk turn's context asks the model to begin its reply with a
+mood tag (mood_tags), which ask_stuff takes off the tokens, the speech and
+done's text, and which reaches the desk as a `mood` frame, before the tokens
+of the part of the reply it heads. A reply without one sends none.
+
 Widgets (Phase 3) are not served: a `subscribe` is answered `bad_frame`.
 """
 from __future__ import annotations
@@ -92,8 +97,8 @@ import identity_store
 from bot_adapters import fritz_error, run_blocking
 from companion_protocol import (CLOSE_BAD_FRAME, CLOSE_BAD_TOKEN, CLOSE_FULL, CLOSE_GONE_QUIET,
                                 CLOSE_NO_HELLO, CLOSE_UNSUPPORTED, PROTOCOL_VERSION, AudioEnd, BadFrame,
-                                Cancel, Done, Error, Hello, Ping, Pong, Progress, Say, Speak, State,
-                                Stt, Subscribe, Token, Welcome, parse_client_frame)
+                                Cancel, Done, Error, Hello, Mood, Ping, Pong, Progress, Say, Speak,
+                                State, Stt, Subscribe, Token, Welcome, parse_client_frame)
 from fritz_utils import MessageSource, canonical_user_id, resolve_identity
 from observability import audit_log
 
@@ -679,13 +684,18 @@ def _ask(session: _Session, turn: _Turn, text: str, source: MessageSource) -> tu
     def progress_callback(notice: str) -> None:
         session.send_from_thread(Progress(turn_id=turn.turn_id, text=notice))
 
+    def mood_callback(mood: str) -> None:
+        # From this thread, as the tokens are, so it is ahead of the part's.
+        session.send_from_thread(Mood(turn_id=turn.turn_id, mood=mood))
+
     try:
         # The desk's own id, unresolved: ask_stuff follows IDENTITY_LINKS itself.
         result = ask_stuff(text, source, session.canonical_id,
                            progress_callback=progress_callback,
                            streaming_callback=streaming_callback,
                            thread_id=session.thread_id,
-                           cancel_event=turn.cancel)
+                           cancel_event=turn.cancel,
+                           mood_callback=mood_callback)
     except Exception as e:
         audit_log("companion_turn", user_id=session.identity, client=session.canonical_id,
                   chars=len(text), result="error", error=str(e))

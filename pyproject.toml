@@ -198,6 +198,7 @@ py-modules = [
     "migrate_db",
     "migrate_identity",
     "mister_fritz",
+    "mood_tags",
     "observability",
     "ollama_recovery",
     "preflight",

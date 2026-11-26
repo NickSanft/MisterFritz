@@ -21,11 +21,13 @@ How Python's types are read:
 - str, int, bool, dict, list[X], X | None and Literal map to string, number,
   boolean, Record<string, unknown>, X[], X | null and a union of literals.
   Anything else stops the script, so a new kind of field is decided here.
-- The module's Literal aliases (Cap, TurnState, ErrorCode) become type aliases.
+- The module's Literal aliases (Cap, TurnState, ErrorCode, MoodName) become
+  type aliases.
 - A server frame's fields are all required: the server sends model_dump_json,
   defaults included. A client frame's defaulted fields are optional, but for
   `type`.
-- Error is emitted as ErrorFrame, so it doesn't shadow the global Error.
+- Error is emitted as ErrorFrame, so it doesn't shadow the global Error, and
+  Mood as MoodFrame, so it isn't taken for settings.ts's Mood (the colours).
 """
 from __future__ import annotations
 
@@ -49,9 +51,11 @@ TS_FILE = "protocol.ts"
 FIXTURES_FILE = "protocol.fixtures.json"
 
 # The module's own Literal aliases, emitted as named types.
-ALIASES = {"Cap": cp.Cap, "TurnState": cp.TurnState, "ErrorCode": cp.ErrorCode}
-# A TypeScript name for a model whose own would shadow a global.
-RENAMED = {"Error": "ErrorFrame"}
+ALIASES = {"Cap": cp.Cap, "TurnState": cp.TurnState, "ErrorCode": cp.ErrorCode,
+           "MoodName": cp.MoodName}
+# A TypeScript name for a model whose own would shadow a global (Error) or be
+# taken for another module's type (settings.ts's Mood, the colours).
+RENAMED = {"Error": "ErrorFrame", "Mood": "MoodFrame"}
 
 CLOSE_NAMES = {
     "goneQuiet": "CLOSE_GONE_QUIET",

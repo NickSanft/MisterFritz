@@ -176,6 +176,14 @@ class TestTheServerFrames(unittest.TestCase):
         with self.assertRaises(ValidationError):
             cp.Error(code="oops", text="x")
 
+    def test_a_mood_must_be_one_of_his(self):
+        for mood in ("dry", "pleased", "alarmed", "weary"):
+            frame = cp.parse_server_frame(json.dumps({"type": "mood", "turn_id": "t1", "mood": mood}))
+            self.assertEqual((type(frame), frame.mood), (cp.Mood, mood))
+        for mood in ("happy", "Pleased", ""):
+            with self.subTest(mood=mood), self.assertRaises(ValidationError):
+                cp.Mood(turn_id="t1", mood=mood)
+
 
 class TestTheUnions(unittest.TestCase):
     """The parsers and the TypeScript generator walk ClientFrame and
@@ -187,7 +195,7 @@ class TestTheUnions(unittest.TestCase):
     def test_every_frame_model_is_in_a_union(self):
         listed = union_members(cp.ClientFrame) | union_members(cp.ServerFrame)
         self.assertEqual(sorted(m.__name__ for m in self.FRAMES - listed), [])
-        self.assertEqual(len(self.FRAMES), 18)
+        self.assertEqual(len(self.FRAMES), 19)
 
     def test_ping_and_pong_go_both_ways(self):
         """The server pings and the client mirrors it (§ 2.2)."""

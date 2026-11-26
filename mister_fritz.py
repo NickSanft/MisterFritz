@@ -66,6 +66,7 @@ from fritz_utils import (
     thread_id_for,
 )
 import identity_store
+import mood_tags
 from observability import METRICS, init_logging
 
 EXECUTOR_NODE = "executor"
@@ -154,10 +155,14 @@ def get_source_info(source: MessageSource, display_name: str,
         return f"User is texting from Telegram ({who})"
     elif source == MessageSource.TELEGRAM_VOICE:
         return f"User is speaking from Telegram ({who}). Please answer in 30 words or less."
+    # The desk shows his mood on his face (plan 14 PR 11), so only its turns
+    # ask for the tag; every reply has one taken off (mood_tags).
     elif source == MessageSource.DESKTOP_TEXT:
-        return f"User is typing to you at their desk, where you are present as a figure on their screen ({who})"
+        return (f"User is typing to you at their desk, where you are present as a figure on "
+                f"their screen ({who}). {mood_tags.ASK}")
     elif source == MessageSource.DESKTOP_VOICE:
-        return f"User is speaking to you at their desk ({who}). Please answer in 30 words or less."
+        return (f"User is speaking to you at their desk ({who}). Please answer in 30 words or "
+                f"less. {mood_tags.ASK}")
     return f"User is interacting via CLI ({who})"
 
 
@@ -647,33 +652,70 @@ class _DeltaEmitter:
     model that narrates before calling a tool emits that preamble under one
     chunk id and the real answer under another, so an appending consumer would
     otherwise render "Let me look. I found it sir." as one reply.
+
+    A segment's leading mood tag (mood_tags) is never emitted: it is held
+    until whole and dropped, so `delta` and `accumulated` are what may be
+    shown. `on_mood(mood)`, if given, hears the tag's mood before the first
+    emission of the segment it heads. A segment that was nothing but a tag
+    emits nothing, not even its restart; its mood is told when the next
+    segment begins or the stream ends.
     """
 
-    def __init__(self, callback, min_chars: int | None = None):
+    def __init__(self, callback, min_chars: int | None = None, on_mood=None):
         # Read at CALL time, not bound as a default. `min_chars=STREAM_MIN_CHARS`
         # in the signature captured the module constant once, at class-definition
         # time, so patching mister_fritz.STREAM_MIN_CHARS could never affect an
         # emitter — which made test_sub_threshold_tail_is_flushed pass without
         # exercising the threshold it names.
         self._callback = callback
+        self._on_mood = on_mood
         self._min_chars = max(1, STREAM_MIN_CHARS if min_chars is None else min_chars)
         self._segment = _SEGMENT_UNSET
         self._accumulated = ""
         self._buffer = ""
         self._restart_pending = False
+        self._tag = mood_tags.LeadingTag()
 
     def feed(self, text: str, segment_id=None) -> None:
-        if not text or self._callback is None:
+        if not text or (self._callback is None and self._on_mood is None):
             return
         if segment_id != self._segment:
+            # The segment before is over, as at the stream's end: a tag that
+            # was all it said still tells its mood, and whitespace it held
+            # (a tag might have followed) is let go, as it always was.
+            self._read(None)
             self._segment = segment_id
             self._accumulated = ""
             self._buffer = ""
             self._restart_pending = True
+            self._tag = mood_tags.LeadingTag()
+        self._read(text)
+
+    def _read(self, text: str | None) -> None:
+        """`text` through the segment's tag (None: the segment is over),
+        its mood told once it is known, and what may be shown, shown."""
+        told = self._tag.mood
+        shown = self._tag.end() if text is None else self._tag.feed(text)
+        if self._tag.mood is not None and told is None:
+            self._tell(self._tag.mood)
+        self._show(shown)
+
+    def _show(self, text: str) -> None:
+        if not text:
+            return
         self._accumulated += text
         self._buffer += text
         if len(self._buffer) >= self._min_chars:
             self.flush()
+
+    def _tell(self, mood: str) -> None:
+        if self._on_mood is None:
+            return
+        try:
+            self._on_mood(mood)
+        except Exception as e:
+            # A broken consumer must not kill the turn.
+            logger.warning("mood callback raised (non-fatal): %s", e)
 
     def flush(self) -> None:
         """Emit whatever is buffered.
@@ -682,6 +724,7 @@ class _DeltaEmitter:
         the last few characters of a reply never reach the UI.
         """
         if self._callback is None or not self._buffer:
+            self._buffer = ""
             return
         delta, self._buffer = self._buffer, ""
         restart, self._restart_pending = self._restart_pending, False
@@ -691,11 +734,18 @@ class _DeltaEmitter:
             # A broken UI consumer must not kill the turn.
             logger.warning("streaming_callback raised (non-fatal): %s", e)
 
+    def finish(self) -> None:
+        """The model's stream is over: the current segment's held start (a
+        tag never finished, or whitespace) is settled, and the tail emitted."""
+        self._read(None)
+        self.flush()
+
     def end_with(self, text: str) -> None:
         """`text` as a paragraph after what the current segment said (all of
         it, if nothing was said), emitted at once: words the reply gains
         after the model's stream, which a consumer that reads only the
         stream (the web chat, the desk's voice) would otherwise never get."""
+        self._read(None)
         if self._segment is _SEGMENT_UNSET:
             self.feed(text)
         else:
@@ -810,6 +860,7 @@ def executor(state: EnhancedState, config: RunnableConfig):
     include_file_tools = workspace_root is not None
     progress_callback = metadata.get("progress_callback")
     streaming_callback = metadata.get("streaming_callback")
+    mood_callback = metadata.get("mood_callback")
     channel_id = metadata.get("channel_id")
     schedule_manager = metadata.get("schedule_manager")
     cancel_event = metadata.get("cancel_event")
@@ -969,7 +1020,7 @@ def executor(state: EnhancedState, config: RunnableConfig):
 
     final_state = None
     bound_hit: list[bool] = []
-    emitter = _DeltaEmitter(streaming_callback)
+    emitter = _DeltaEmitter(streaming_callback, on_mood=mood_callback)
     # A LIST — even of one mode — is what makes LangGraph tuple its output as
     # (mode, payload); a bare string yields raw payloads instead. Keeping it a
     # list either way makes the loop below uniform.
@@ -977,8 +1028,10 @@ def executor(state: EnhancedState, config: RunnableConfig):
     # A cancellable turn streams even with nobody to show the tokens to,
     # because "messages" mode is what fills `segments`. ChatOllama fires the
     # token callback either way, so the stop itself would still happen without
-    # it, but the reply so far would be lost and stored as a bare mark.
-    stream_modes = ["values", "messages"] if streaming_callback or cancel_event is not None else ["values"]
+    # it, but the reply so far would be lost and stored as a bare mark. A
+    # turn whose mood is asked for streams too: the tag is read from tokens.
+    streams = streaming_callback or mood_callback or cancel_event is not None
+    stream_modes = ["values", "messages"] if streams else ["values"]
 
     agent_config = get_config_values(config)
     if cancel_event is not None:
@@ -1029,17 +1082,23 @@ def executor(state: EnhancedState, config: RunnableConfig):
         stream.close()
 
     # Flush the sub-threshold tail, or the last few characters never arrive.
-    emitter.flush()
+    emitter.finish()
 
     if interrupted:
         METRICS.increment("turn_cancelled")
-        spoken = "\n\n".join(s for s in segments.values() if s.strip())
+        # Each part without its leading mood tag, as it was shown.
+        shown = (mood_tags.strip_leading(s)[1] for s in segments.values())
+        spoken = "\n\n".join(s for s in shown if s.strip())
         resp = f"{spoken.rstrip()}{INTERRUPTED_MARK}".strip()
         turn_flags = metadata.get("turn_flags")
         if turn_flags is not None:
             turn_flags.interrupted = True
     else:
         resp = final_state["messages"][-1].content if final_state and "messages" in final_state else ""
+        # What is checkpointed, and so what Discord, the web chat and the
+        # desk's done all read: never the tag, as the stream never showed it.
+        if isinstance(resp, str):
+            resp = mood_tags.strip_leading(resp)[1]
     if bound_hit and not interrupted:
         METRICS.increment("agent.recursion_limit")
         logger.warning("a turn hit the %d-super-step bound", AGENT_RECURSION_LIMIT)
@@ -1100,6 +1159,7 @@ def ask_stuff(
     channel_key: str | None = None,
     may_wait: bool = False,
     cancel_event: threading.Event | None = None,
+    mood_callback=None,
 ) -> dict:
     """Process user input and return structured output with text and attachments.
 
@@ -1121,6 +1181,11 @@ def ask_stuff(
     `delta` and clear on `restart`.
 
     progress_callback(message) is called with human-readable tool notices.
+
+    mood_callback(mood) is called with the mood a part of the reply begins
+    with ("pleased"), before that part's first token; the tag itself never
+    reaches the stream or the returned text (mood_tags). The desk's turns ask
+    the model for one; any other reply that has one loses it all the same.
 
     `may_wait` is for callers that are not a person waiting on a reply. One
     turn runs at a time per thread and one more may queue; beyond that an
@@ -1171,6 +1236,7 @@ def ask_stuff(
             "thread_id": thread_id_clean,
             "progress_callback": progress_callback,
             "streaming_callback": streaming_callback,
+            "mood_callback": mood_callback,
             "user_image_paths": user_image_paths,
             "workspace_root": workspace_root,
             "channel_id": channel_id,

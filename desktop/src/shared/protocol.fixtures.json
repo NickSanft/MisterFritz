@@ -138,6 +138,38 @@
         }
       },
       {
+        "why": "mood",
+        "frame": {
+          "type": "mood",
+          "turn_id": "7f3c2a10-4b5e-4f6a-9c8d-0e1f2a3b4c5d",
+          "mood": "dry"
+        }
+      },
+      {
+        "why": "mood with mood pleased",
+        "frame": {
+          "type": "mood",
+          "turn_id": "7f3c2a10-4b5e-4f6a-9c8d-0e1f2a3b4c5d",
+          "mood": "pleased"
+        }
+      },
+      {
+        "why": "mood with mood alarmed",
+        "frame": {
+          "type": "mood",
+          "turn_id": "7f3c2a10-4b5e-4f6a-9c8d-0e1f2a3b4c5d",
+          "mood": "alarmed"
+        }
+      },
+      {
+        "why": "mood with mood weary",
+        "frame": {
+          "type": "mood",
+          "turn_id": "7f3c2a10-4b5e-4f6a-9c8d-0e1f2a3b4c5d",
+          "mood": "weary"
+        }
+      },
+      {
         "why": "progress",
         "frame": {
           "type": "progress",
@@ -711,6 +743,60 @@
           "turn_id": "7f3c2a10-4b5e-4f6a-9c8d-0e1f2a3b4c5d",
           "delta": "Good evening",
           "restart": 1
+        }
+      },
+      {
+        "why": "mood without turn_id",
+        "frame": {
+          "type": "mood",
+          "mood": "dry"
+        }
+      },
+      {
+        "why": "mood.turn_id: null where null isn't allowed",
+        "frame": {
+          "type": "mood",
+          "turn_id": null,
+          "mood": "dry"
+        }
+      },
+      {
+        "why": "mood.turn_id: a number for a string",
+        "frame": {
+          "type": "mood",
+          "turn_id": 1,
+          "mood": "dry"
+        }
+      },
+      {
+        "why": "mood without mood",
+        "frame": {
+          "type": "mood",
+          "turn_id": "7f3c2a10-4b5e-4f6a-9c8d-0e1f2a3b4c5d"
+        }
+      },
+      {
+        "why": "mood.mood: null where null isn't allowed",
+        "frame": {
+          "type": "mood",
+          "turn_id": "7f3c2a10-4b5e-4f6a-9c8d-0e1f2a3b4c5d",
+          "mood": null
+        }
+      },
+      {
+        "why": "mood.mood: a value not in its Literal",
+        "frame": {
+          "type": "mood",
+          "turn_id": "7f3c2a10-4b5e-4f6a-9c8d-0e1f2a3b4c5d",
+          "mood": "nonsense"
+        }
+      },
+      {
+        "why": "mood.mood: a number for a Literal",
+        "frame": {
+          "type": "mood",
+          "turn_id": "7f3c2a10-4b5e-4f6a-9c8d-0e1f2a3b4c5d",
+          "mood": 1
         }
       },
       {

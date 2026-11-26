@@ -27,6 +27,10 @@ import unittest
 import wave
 from unittest.mock import ANY, MagicMock, patch
 
+from langchain.agents import create_agent
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from starlette.routing import WebSocketRoute
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -38,6 +42,9 @@ import identity_store
 import mister_fritz
 import stt
 from fritz_utils import MessageSource
+
+# Before any test patches it.
+REAL_ASK_STUFF = mister_fritz.ask_stuff
 
 # The real one, kept before CompanionTest patches it.
 CAN_TRANSCRIBE = companion_api._can_transcribe
@@ -55,20 +62,26 @@ class FakeAskStuff:
     returns: the reply so far with INTERRUPTED_MARK, and interrupted=True.
     `gate`, if given, is waited on after `pause_after` deltas, so a test can
     act while a turn is in flight. `fail`, if given, is raised instead.
+    `mood`, if given, is told to mood_callback before the first delta, as
+    the real one tells a reply's leading tag.
     """
 
     def __init__(self, deltas=("Good evening", ", sir."), progress=(), images=(),
                  gate: threading.Event | None = None, pause_after: int = 1,
-                 fail: BaseException | None = None):
+                 fail: BaseException | None = None, mood: str | None = None):
         self.deltas, self.progress, self.images = list(deltas), list(progress), list(images)
-        self.gate, self.pause_after, self.fail = gate, pause_after, fail
+        self.gate, self.pause_after, self.fail, self.mood = gate, pause_after, fail, mood
         self.calls: list[dict] = []
         self.in_flight = threading.Event()
 
     def __call__(self, base_prompt, source, user_id, progress_callback=None, streaming_callback=None,
                  user_image_paths=None, workspace_root=None, channel_id=None, schedule_manager=None, *,
-                 thread_id=None, display_name=None, channel_key=None, may_wait=False, cancel_event=None):
+                 thread_id=None, display_name=None, channel_key=None, may_wait=False, cancel_event=None,
+                 mood_callback=None):
         self.calls.append({k: v for k, v in locals().items() if k != "self"})
+        # The mood first: a reply may name one and then fail.
+        if self.mood is not None and mood_callback:
+            mood_callback(self.mood)
         if self.fail is not None:
             raise self.fail
         for line in self.progress:
@@ -1096,7 +1109,8 @@ class ScriptedAskStuff(FakeAskStuff):
 
     def __call__(self, base_prompt, source, user_id, progress_callback=None, streaming_callback=None,
                  user_image_paths=None, workspace_root=None, channel_id=None, schedule_manager=None, *,
-                 thread_id=None, display_name=None, channel_key=None, may_wait=False, cancel_event=None):
+                 thread_id=None, display_name=None, channel_key=None, may_wait=False, cancel_event=None,
+                 mood_callback=None):
         self.calls.append({"base_prompt": base_prompt, "source": source})
         said = ""
         for delta, restart in self.script:
@@ -1201,7 +1215,8 @@ class TestSpokenReplies(CompanionTest):
         class WritesOn(ScriptedAskStuff):
             def __call__(self, base_prompt, source, user_id, progress_callback=None, streaming_callback=None,
                          user_image_paths=None, workspace_root=None, channel_id=None, schedule_manager=None, *,
-                         thread_id=None, display_name=None, channel_key=None, may_wait=False, cancel_event=None):
+                         thread_id=None, display_name=None, channel_key=None, may_wait=False, cancel_event=None,
+                         mood_callback=None):
                 said = ""
                 for i, (delta, restart) in enumerate(self.script):
                     said = delta if restart else said + delta
@@ -1245,6 +1260,113 @@ class TestSpokenReplies(CompanionTest):
         frames = self.speak(ws)
         self.assertEqual(self.spoken(frames), [])
         self.assertNotIn("speaking", [f.get("state") for f in frames])
+
+
+class _TaggedModel(BaseChatModel):
+    """A model whose reply is `pieces`, as gpt-oss streams a tagged one."""
+
+    pieces: list
+
+    @property
+    def _llm_type(self) -> str:
+        return "tagged"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        text = ""
+        for chunk in self._stream(messages, stop, run_manager, **kwargs):
+            if run_manager:
+                run_manager.on_llm_new_token(chunk.text, chunk=chunk)
+            text += chunk.text
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=text))])
+
+    def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+        for piece in self.pieces:
+            yield ChatGenerationChunk(message=AIMessageChunk(content=piece))
+
+
+class TestHisMood(CompanionTest):
+    """PR 11: the reply's leading mood tag reaches the desk as a `mood`
+    frame, ahead of the tokens, and never as words."""
+
+    def test_the_mood_comes_before_the_reply(self):
+        self.use(FakeAskStuff(deltas=("Very good", ", sir."), mood="pleased"))
+        ws, _ = self.desk()
+        self.assertEqual(self.turn(ws, "m1"), [
+            {"type": "state", "turn_id": "m1", "state": "thinking"},
+            {"type": "mood", "turn_id": "m1", "mood": "pleased"},
+            {"type": "token", "turn_id": "m1", "delta": "Very good", "restart": True},
+            {"type": "token", "turn_id": "m1", "delta": ", sir.", "restart": False},
+            {"type": "done", "turn_id": "m1", "text": "Very good, sir.", "images": [],
+             "interrupted": False},
+            {"type": "state", "turn_id": "m1", "state": "idle"},
+        ])
+
+    def test_a_mood_told_before_a_failure_comes_before_its_error(self):
+        self.use(FakeAskStuff(mood="alarmed", fail=RuntimeError("the model fell over")))
+        ws, _ = self.desk()
+        frames = self.turn(ws, "m2")
+        self.assertEqual([(f["type"], f.get("mood") or f.get("code") or f.get("state")) for f in frames],
+                         [("state", "thinking"), ("mood", "alarmed"), ("error", "turn_failed"), ("state", "idle")])
+
+    def test_a_mood_comes_before_an_interrupted_done(self):
+        gate = threading.Event()
+        self.use(FakeAskStuff(deltas=("one ", "two ", "three"), gate=gate, pause_after=1, mood="weary"))
+        ws, _ = self.desk()
+        ws.send_json({"type": "say", "turn_id": "m3", "text": "go on"})
+        self.assertTrue(self.fake.in_flight.wait(10))
+        ws.send_json({"type": "cancel", "turn_id": "m3"})
+        gate.set()
+        frames = self.until_idle(ws, "m3")
+        kinds = [f["type"] for f in frames]
+        self.assertTrue(frames[kinds.index("done")]["interrupted"])
+        self.assertLess(kinds.index("mood"), kinds.index("token"))
+        self.assertLess(kinds.index("mood"), kinds.index("done"))
+
+    def test_a_reply_without_one_sends_none(self):
+        ws, _ = self.desk()
+        self.assertNotIn("mood", [f["type"] for f in self.turn(ws)])
+
+    def test_every_desk_turn_listens_for_one(self):
+        ws, _ = self.desk(client=SPEAKS)
+        self.turn(ws, "typed")
+        ws.send_bytes(SECOND)
+        ws.send_json({"type": "audio_end", "turn_id": "spoken"})
+        self.until_idle(ws, "spoken")
+        self.assertEqual([c["source"] for c in self.fake.calls],
+                         [MessageSource.DESKTOP_TEXT, MessageSource.DESKTOP_VOICE])
+        for call in self.fake.calls:
+            self.assertTrue(callable(call["mood_callback"]))
+
+    def test_through_the_real_ask_stuff(self):
+        """companion_api, ask_stuff and the executor as they are, over a real
+        ReAct agent whose model writes a tag cut across its chunks: the desk
+        hears the mood first, and no frame carries the tag, spoken or shown."""
+        self.stack.enter_context(patch.object(mister_fritz, "ask_stuff", REAL_ASK_STUFF))
+        for name, value in (("search_memories_internal", MagicMock(return_value="{}")),
+                            ("get_user_profile", MagicMock(return_value={})),
+                            ("extract_memories_background", MagicMock()),
+                            ("STREAM_MIN_CHARS", 1)):
+            self.stack.enter_context(patch.object(mister_fritz, name, value))
+        model = _TaggedModel(pieces=["[mood:al", "armed]\n", "Smoke, sir. ", "Open a window."])
+        agent = create_agent(model, tools=[], middleware=mister_fritz._agent_middleware())
+        self.stack.enter_context(patch.object(mister_fritz, "_get_conversation_agent", return_value=agent))
+        ws, _ = self.desk(client={**SPEAKS, "id": "mood-pc"})
+        ws.send_bytes(SECOND)
+        ws.send_json({"type": "audio_end", "turn_id": "e2e"})
+        frames = self.until_idle(ws, "e2e")
+        kinds = [f["type"] for f in frames]
+        self.assertEqual(frames[kinds.index("mood")], {"type": "mood", "turn_id": "e2e", "mood": "alarmed"})
+        self.assertEqual(kinds.count("mood"), 1)
+        self.assertLess(kinds.index("mood"), kinds.index("token"))
+        self.assertEqual("".join(f["delta"] for f in frames if f["type"] == "token"),
+                         "Smoke, sir. Open a window.")
+        self.assertEqual(" ".join(f["text"] for f in frames if f["type"] == "speak").strip(),
+                         "Smoke, sir. Open a window.")
+        self.assertEqual(frames[kinds.index("done")]["text"], "Smoke, sir. Open a window.")
+        self.assertNotIn("[mood", json.dumps(frames))
 
 
 class TestOverARealSocket(CompanionTest):

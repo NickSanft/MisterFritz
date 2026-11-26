@@ -29,6 +29,8 @@ export type TurnState = "listening" | "transcribing" | "thinking" | "speaking" |
 export const TURN_STATE_VALUES: readonly TurnState[] = ["listening", "transcribing", "thinking", "speaking", "idle"];
 export type ErrorCode = "busy" | "bad_frame" | "turn_failed" | "stt_failed" | "not_allowed" | "internal";
 export const ERROR_CODE_VALUES: readonly ErrorCode[] = ["busy", "bad_frame", "turn_failed", "stt_failed", "not_allowed", "internal"];
+export type MoodName = "dry" | "pleased" | "alarmed" | "weary";
+export const MOOD_NAME_VALUES: readonly MoodName[] = ["dry", "pleased", "alarmed", "weary"];
 
 // ── Client to server ────────────────────────────────────────────────────────
 
@@ -106,6 +108,21 @@ export interface Token {
   turn_id: string;
   delta: string;
   restart: boolean;
+}
+
+/**
+ * His mood for the reply that follows, from the tag the model began it
+ * with (taken off the tokens, the speech and done's text). Sent before the
+ * first token of the part of the reply it heads; a reply in several parts
+ * (the model wrote, called a tool, wrote again) may name one per part, and
+ * the newest stands; a part that is only a tag tells its mood as the next
+ * part begins. Always before the turn's done or error. A reply that names
+ * none sends none.
+ */
+export interface MoodFrame {
+  type: "mood";
+  turn_id: string;
+  mood: MoodName;
 }
 
 export interface Progress {
@@ -196,7 +213,7 @@ export interface Pong {
 }
 
 export type ClientFrame = Hello | Say | AudioEnd | Cancel | Subscribe | Ping | Pong;
-export type ServerFrame = Welcome | State | Stt | Token | Progress | Speech | Speak | Done | ErrorFrame | Widget | Reminder | Ping | Pong;
+export type ServerFrame = Welcome | State | Stt | Token | MoodFrame | Progress | Speech | Speak | Done | ErrorFrame | Widget | Reminder | Ping | Pong;
 
 /** Every `type` the server sends. */
 export const SERVER_FRAME_TYPES = [
@@ -204,6 +221,7 @@ export const SERVER_FRAME_TYPES = [
   "state",
   "stt",
   "token",
+  "mood",
   "progress",
   "speech",
   "speak",
@@ -236,6 +254,7 @@ const SERVER_CHECKS: ReadonlyMap<string, Check> = new Map<string, Check>([
   ["state", shape({ type: oneOf(["state"]), turn_id: str, state: oneOf(TURN_STATE_VALUES) })],
   ["stt", shape({ type: oneOf(["stt"]), turn_id: str, text: str })],
   ["token", shape({ type: oneOf(["token"]), turn_id: str, delta: str, restart: bool })],
+  ["mood", shape({ type: oneOf(["mood"]), turn_id: str, mood: oneOf(MOOD_NAME_VALUES) })],
   ["progress", shape({ type: oneOf(["progress"]), turn_id: str, text: str })],
   ["speech", shape({ type: oneOf(["speech"]), turn_id: str, seq: int, mime: oneOf(["audio/wav"]), b64: str, final: bool })],
   ["speak", shape({ type: oneOf(["speak"]), turn_id: str, seq: int, text: str, final: bool })],
