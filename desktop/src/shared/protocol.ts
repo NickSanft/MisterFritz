@@ -12,6 +12,8 @@ export const CLIENT_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
 export const SAY_MAX_CHARS = 8000;
 /** The longest client name, in characters (code points). */
 export const CLIENT_NAME_MAX_CHARS = 64;
+/** The most widgets one subscribe may name. */
+export const WIDGETS_MAX = 8;
 
 /** The codes the server closes a session with. */
 export const CLOSE = {
@@ -70,7 +72,8 @@ export interface Cancel {
 }
 
 /**
- * Phase 3: the widgets the client wants fed.
+ * The widgets the client wants fed, replacing any it asked for before;
+ * none stops the feed. A name the server doesn't feed is let be.
  */
 export interface Subscribe {
   type: "subscribe";
@@ -179,7 +182,9 @@ export interface ErrorFrame {
 }
 
 /**
- * Phase 3.
+ * One widget's news: `payload` is its payload model's (WidgetPayloads
+ * in TypeScript), as an object. It holds for `ttl_s` more seconds (0:
+ * until the next), so a desk can tell a stale one.
  */
 export interface Widget {
   type: "widget";
@@ -212,6 +217,69 @@ export interface Pong {
   t: number;
 }
 
+// ── Widget payloads ─────────────────────────────────────────────────────────
+
+/**
+ * The brain's time: `now` in ISO 8601 with its zone's offset, and the
+ * zone's IANA name (SCHEDULE_TIMEZONE). The desk ticks the seconds itself.
+ */
+export interface ClockPayload {
+  now: string;
+  zone: string;
+}
+
+/**
+ * Now and today at the brain's WEATHER_LATITUDE and WEATHER_LONGITUDE,
+ * from Open-Meteo. `code` is the WMO weather code and `summary` its words;
+ * `observed_at` is Open-Meteo's time for `now`, ISO 8601 with the place's
+ * offset.
+ */
+export interface WeatherPayload {
+  temperature: number;
+  feels_like: number;
+  high: number;
+  low: number;
+  unit: "F" | "C";
+  code: number;
+  summary: string;
+  wind: number;
+  wind_unit: "mph" | "km/h";
+  is_day: boolean;
+  observed_at: string;
+}
+
+/**
+ * One question and its answer, each cut to its first few hundred
+ * characters, his mood for it, and when it ended (ISO 8601, UTC).
+ */
+export interface DeskExchange {
+  asked: string;
+  answered: string;
+  mood: MoodName | null;
+  at: string;
+}
+
+/**
+ * His desk: the last exchange at a desk of this identity since the
+ * brain started, or none yet.
+ */
+export interface DeskPayload {
+  last: DeskExchange | null;
+}
+
+/** Each widget's payload, by its name (a Widget frame's `name`). */
+export interface WidgetPayloads {
+  clock: ClockPayload;
+  weather: WeatherPayload;
+  desk: DeskPayload;
+}
+/** Every widget the server may feed. */
+export const WIDGET_NAMES = [
+  "clock",
+  "weather",
+  "desk",
+] as const satisfies readonly (keyof WidgetPayloads)[];
+
 export type ClientFrame = Hello | Say | AudioEnd | Cancel | Subscribe | Ping | Pong;
 export type ServerFrame = Welcome | State | Stt | Token | MoodFrame | Progress | Speech | Speak | Done | ErrorFrame | Widget | Reminder | Ping | Pong;
 
@@ -241,6 +309,7 @@ const isObj = (v: unknown): v is Record<string, unknown> =>
 const str: Check = (v) => typeof v === "string";
 const int: Check = (v) => Number.isInteger(v);
 const bool: Check = (v) => typeof v === "boolean";
+const num: Check = (v) => typeof v === "number" && Number.isFinite(v);
 const oneOf = (values: readonly unknown[]): Check => (v) => values.includes(v);
 const listOf = (item: Check): Check => (v) => Array.isArray(v) && v.every((e) => item(e));
 const orNull = (inner: Check): Check => (v) => v === null || inner(v);
@@ -273,4 +342,18 @@ export function isServerFrame(x: unknown): x is ServerFrame {
   if (!isObj(x) || typeof x.type !== "string") return false;
   const check = SERVER_CHECKS.get(x.type);
   return check !== undefined && check(x);
+}
+
+/** Each widget's payload's fields, by the widget's name. */
+const PAYLOAD_CHECKS: ReadonlyMap<string, Check> = new Map<string, Check>([
+  ["clock", shape({ now: str, zone: str })],
+  ["weather", shape({ temperature: num, feels_like: num, high: num, low: num, unit: oneOf(["F", "C"]), code: int, summary: str, wind: num, wind_unit: oneOf(["mph", "km/h"]), is_day: bool, observed_at: str })],
+  ["desk", shape({ last: orNull(shape({ asked: str, answered: str, mood: orNull(oneOf(MOOD_NAME_VALUES)), at: str })) })],
+]);
+
+/** Whether `payload` is widget `name`'s, every field there, of its type.
+ * Fields it doesn't know are allowed, as in a frame. */
+export function isWidgetPayload<K extends keyof WidgetPayloads>(name: K, payload: unknown): payload is WidgetPayloads[K] {
+  const check = PAYLOAD_CHECKS.get(name);
+  return check !== undefined && check(payload);
 }

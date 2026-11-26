@@ -50,6 +50,11 @@ dependencies = [
     "ddgs>=9.10",
     "pytz>=2025.2",
     "APScheduler>=3.10",
+    # The host's zone by its IANA name (fritz_utils.SCHEDULE_TIMEZONE), and
+    # the zones themselves where the OS has none (Windows): APScheduler 3
+    # brings both already; declared because the brain now imports them.
+    "tzlocal>=5.3",
+    "tzdata>=2025.2",
     # document ingestion — document_engine imports these at module level
     "watchdog>=6.0",
     "msoffcrypto-tool>=5.4",
@@ -211,6 +216,7 @@ py-modules = [
     "storage",
     "stt",
     "tts",
+    "widgets",
     "workspace_store",
 ]
 

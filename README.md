@@ -314,6 +314,17 @@ For the desktop app of [plan 14](plans/14-desktop-companion.md); [Desktop compan
 | `COMPANION_BIND` | `127.0.0.1` | Reserved (plan 14, Phase 5). Where `/companion` will listen for a second device; until then it is served with the panel on `127.0.0.1`. Never a wildcard: any address meaning "every interface" (`0.0.0.0`, `::` and their other spellings) or an empty value is refused. |
 | `GOOGLE_MCP_ENABLED` | `false` | Reserved (plan 14, PR 15). Read-only Gmail, Drive and Calendar for `ROOT_USER`. |
 
+### The desk's widgets, and the time
+
+What the brain feeds a desktop app that asks for widgets (plan 14, PR 14): the clock, the weather, and his desk (the last question and answer at a desk). See [Widgets](#widgets).
+
+| Variable | Default | Description |
+|---|---|---|
+| `SCHEDULE_TIMEZONE` | the host's zone | The zone Fritz keeps time in: the desk's clock now, and the zone a reminder is made in once plan 14's PR 14 is finished (until then reminders keep the host's zone, as before). An IANA name, such as `America/Chicago`. One the machine doesn't know refuses to start. In Docker the host is the container, so UTC unless you set this (or `TZ`). |
+| `WEATHER_LATITUDE` | `35.85` | Where the desk's weather is for, in degrees (Murfreesboro, Tennessee, by default). Sent to [Open-Meteo](https://open-meteo.com) (no key) every 15 minutes while a desk asks for weather (every 2 while the fetch fails), with nothing but the units and what to report. Set it and `WEATHER_LONGITUDE` both empty for no weather; one without the other refuses to start. |
+| `WEATHER_LONGITUDE` | `-86.39` | See `WEATHER_LATITUDE`. |
+| `WEATHER_UNIT` | `fahrenheit` | `fahrenheit` (wind in mph) or `celsius` (km/h). |
+
 ### Models and Ollama
 
 | Variable | Default | Description |
@@ -724,6 +735,10 @@ Hold push-to-talk (Ctrl+Alt+V) and speak, and the brain hears you with the same 
 What you said is answered as a spoken question (he keeps a spoken answer short), in the bubble as a typed one is, with what the brain heard (`stt`) in quotes over it. With `COMPANION_TTS=local` (the default) the brain sends the answer for the desk to say aloud as well, a sentence at a time as it is written, so he starts speaking before he has finished thinking; a typed question's answer is never spoken. It sends them only to a desk that says it voices text itself: the desktop app does once his voice is fetched (`python desktop\scripts\fetch_voice.py`, about 122 MB; [desktop/README.md](desktop/README.md#his-voice)), from its next start. Pressing push-to-talk, asking him something, or the link dropping stops him mid-sentence. A clip with no speech in it, or one Whisper couldn't make out, is said in the bubble instead. Only how long a clip was is logged, never what was said (the words reach the log only at `LOG_LEVEL=DEBUG`), and its WAV is deleted once heard.
 
 His answers at the desk, typed or spoken, are asked to begin with a mood tag, one of `[mood:dry]`, `[mood:pleased]`, `[mood:alarmed]` and `[mood:weary]`. The tag never reaches you: it is taken off the bubble's words, what he says aloud and what is kept of the conversation, and the desk is told the mood on its own. A tag at the start of a reply anywhere else (Discord, the web chat) is taken off too, though only the desk's questions ask for one. His face shows it while the reply is up ([desktop/README.md](desktop/README.md#his-face)).
+
+### Widgets
+
+A desktop app that asks for widgets is fed them by the brain over the same socket, worked out by plain Python, never the model: the **clock** (the brain's time in `SCHEDULE_TIMEZONE`, each minute; the app ticks the seconds), the **weather** (now and today at `WEATHER_LATITUDE` and `WEATHER_LONGITUDE`, from Open-Meteo, each quarter hour, however many desks ask), and **his desk** (the last question and answer at a desk of yours, cut short, with his mood for it, sent again after each turn that ends whole). The last exchange is kept in memory only, so it starts empty when the brain does, and it goes with the conversation when you forget it. The weather is the one widget that reaches the network, and only for the place and the units; each comes with how long it holds (30 minutes from its fetch), a failed fetch is logged once and tried again two minutes later, and a desk going away never cuts off a fetch others are waiting on. The desktop app doesn't show them yet: its wallpaper and widgets are plan 14's PRs 12 and 13.
 
 ### Who the desk is
 

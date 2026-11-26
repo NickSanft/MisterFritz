@@ -97,7 +97,12 @@ os.environ.setdefault("FRITZ_WRITE_DIAGRAMS", "0")
 # load_dotenv, which only fills names that are missing, supply one from .env.
 for _name, _default in (("COMPANION_ENABLED", "false"), ("COMPANION_TOKEN", ""),
                         ("COMPANION_BIND", "127.0.0.1"), ("COMPANION_MAX_CLIENTS", "2"),
-                        ("COMPANION_TTS", "local"), ("GOOGLE_MCP_ENABLED", "false")):
+                        ("COMPANION_TTS", "local"), ("GOOGLE_MCP_ENABLED", "false"),
+                        # PR 14's: the zone fixed rather than the host's, and
+                        # the weather at its default place (never fetched in
+                        # a test: widgets' fetch is replaced wherever it runs).
+                        ("SCHEDULE_TIMEZONE", "UTC"), ("WEATHER_LATITUDE", "35.85"),
+                        ("WEATHER_LONGITUDE", "-86.39"), ("WEATHER_UNIT", "fahrenheit")):
     os.environ[_name] = _default
 # IDENTITY_LINKS likewise, and for a second reason: a link is not only words
 # validate_config may warn about. The owner's real one (their desk linked to

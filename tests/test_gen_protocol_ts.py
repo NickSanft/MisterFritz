@@ -18,6 +18,8 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
+from pydantic import ValidationError
+
 import companion_api
 import companion_protocol as cp
 
@@ -114,9 +116,30 @@ class TestWhatIsGenerated(unittest.TestCase):
         self.assertIn("  sample_rate?: number;", self.ts)
         self.assertIn('  type: "hello";', self.ts)
 
+    def test_a_float_is_any_finite_number(self):
+        self.assertEqual((gen.ts_type(float), gen.ts_check(float)), ("number", "num"))
+        self.assertIn('const num: Check = (v) => typeof v === "number" && Number.isFinite(v);', self.ts)
+
+    def test_each_widget_has_its_payload_typed_and_checked(self):
+        for name, model in gen.PAYLOADS.items():
+            self.assertIn(f"  {name}: {model.__name__};", self.ts)
+            self.assertIn(f"  [{json.dumps(name)}, shape(", self.ts)
+        self.assertIn("export function isWidgetPayload<K extends keyof WidgetPayloads>", self.ts)
+
+    def test_every_widget_payload_fixture_is_what_it_says(self):
+        valid, invalid = self.fixtures["widgets"]["valid"], self.fixtures["widgets"]["invalid"]
+        self.assertEqual({e["name"] for e in valid if e["why"] == e["name"]}, set(gen.PAYLOADS))
+        for entry in valid:
+            with self.subTest(why=entry["why"]):
+                gen.PAYLOADS[entry["name"]].model_validate(entry["payload"])
+        for entry in invalid:
+            with self.subTest(why=entry["why"]):
+                with self.assertRaises(ValidationError):
+                    gen.PAYLOADS[entry["name"]].model_validate(entry["payload"], strict=True)
+
     def test_an_unknown_kind_of_field_stops_the_generator(self):
         with self.assertRaises(SystemExit):
-            gen.ts_type(float)
+            gen.ts_type(complex)
         with self.assertRaises(SystemExit):
             gen.ts_check(set[str])
         with self.assertRaises(SystemExit):

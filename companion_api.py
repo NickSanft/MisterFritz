@@ -70,7 +70,15 @@ mood tag (mood_tags), which ask_stuff takes off the tokens, the speech and
 done's text, and which reaches the desk as a `mood` frame, before the tokens
 of the part of the reply it heads. A reply without one sends none.
 
-Widgets (Phase 3) are not served: a `subscribe` is answered `bad_frame`.
+Widgets (PR 14): the welcome offers `widgets`, and a `subscribe` names the
+ones a desk wants (widgets.py says what each holds), replacing any it named
+before; none stops them. A name the brain doesn't feed is let be. Each named
+widget is sent at once, the timed ones again on their cadence (clock every
+minute, weather every quarter hour, or every two minutes while its fetch
+fails), each by a task of its own, so the clock never waits on the weather,
+all gone with the session; `desk` (the identity's last exchange at a desk) is
+sent at once and again to every desk of the identity that wants it after each
+turn that ends whole, unless the conversation was forgotten meanwhile.
 """
 from __future__ import annotations
 
@@ -95,10 +103,11 @@ import companion_tts
 import fritz_utils
 import identity_store
 from bot_adapters import fritz_error, run_blocking
+import widgets
 from companion_protocol import (CLOSE_BAD_FRAME, CLOSE_BAD_TOKEN, CLOSE_FULL, CLOSE_GONE_QUIET,
                                 CLOSE_NO_HELLO, CLOSE_UNSUPPORTED, PROTOCOL_VERSION, AudioEnd, BadFrame,
                                 Cancel, Done, Error, Hello, Mood, Ping, Pong, Progress, Say, Speak,
-                                State, Stt, Subscribe, Token, Welcome, parse_client_frame)
+                                State, Stt, Subscribe, Token, Welcome, Widget, parse_client_frame)
 from fritz_utils import MessageSource, canonical_user_id, resolve_identity
 from observability import audit_log
 
@@ -118,14 +127,15 @@ AUDIO_MAX_BYTES = 30 * AUDIO_RATE * 2
 
 
 def server_caps() -> list[str]:
-    """What this server does: text; audio-in once it can transcribe; and
+    """What this server does: text; audio-in once it can transcribe;
     speak-local with COMPANION_TTS=local, a spoken turn's reply sent for the
-    desk to voice itself."""
+    desk to voice itself; and widgets."""
     caps = ["text"]
     if _can_transcribe():
         caps.append("audio-in")
     if fritz_utils.COMPANION_TTS == "local":
         caps.append("speak-local")
+    caps.append("widgets")
     return caps
 
 
@@ -154,7 +164,6 @@ _COPY_NO_EARS = "Forgive me, sir, but I cannot hear you at this desk as yet. Do 
 _COPY_NOT_HEARD = "I could not make out a word of that, sir. Do say it again, or type it."
 _COPY_SILENCE = "I heard nothing at all, sir: hold the key while you speak."
 _COPY_TOO_LONG = "That ran longer than I can listen to at once, sir: half a minute at most."
-_COPY_NO_WIDGETS = "I keep no widgets at this desk as yet, sir."
 
 
 @dataclass(frozen=True)
@@ -168,6 +177,11 @@ class _Turn:
     turn_id: str
     cancel: threading.Event = field(default_factory=threading.Event)
     started: float = field(default_factory=time.monotonic)
+    # The newest mood his reply named (its mood frames), for the desk widget.
+    mood: str | None = None
+    # The identity's desk forgettings as the turn began (widgets.generation):
+    # one since, and its exchange is not recorded.
+    desk_since: int = 0
 
 
 @dataclass(frozen=True)
@@ -226,6 +240,9 @@ class _Session:
         self.audio_over = False
         self.unanswered_pings = 0
         self.loop = asyncio.get_running_loop()
+        # The widgets it asked for (`subscribe`), and the tasks feeding them.
+        self.widgets: frozenset[str] = frozenset()
+        self.feed: list[asyncio.Task] = []
 
     def send(self, frame) -> None:
         """Queue a frame for the sender task. On the event loop only."""
@@ -396,6 +413,8 @@ def _end_session(session: _Session) -> None:
     # dropped for good: the turn ahead of it finds none to start.
     session.waiting = None
     session.audio.clear()
+    session.widgets = frozenset()
+    _stop_feed(session)
     if session.active is not None:
         # The client has gone; stop the model rather than finish for nobody.
         session.active.cancel.set()
@@ -460,7 +479,7 @@ def _dispatch(session: _Session, raw: str) -> None:
     elif isinstance(frame, AudioEnd):
         _end_clip(session, frame)
     elif isinstance(frame, Subscribe):
-        session.send(Error(code="bad_frame", text=_COPY_NO_WIDGETS))
+        _subscribe(session, frame.widgets)
     else:   # a second hello
         logger.warning("companion: %s sent %s mid-session", session.canonical_id, frame.type)
         session.send(Error(code="bad_frame", text=_COPY_BAD_FRAME))
@@ -468,6 +487,61 @@ def _dispatch(session: _Session, raw: str) -> None:
 
 _TURN_ID_FIELD = re.compile(r'"turn_id"\s*:\s*"([A-Za-z0-9_-]{1,64})"')
 _TURN_ID_SCAN_CHARS = 1024
+
+
+def _subscribe(session: _Session, names: list[str]) -> None:
+    """The widgets `session` asked for, in place of any before: the feed is
+    started again for them, or stopped for none."""
+    wanted = [n for n in dict.fromkeys(names) if n in widgets.WIDGETS]
+    if len(wanted) < len(set(names)):
+        logger.info("companion: %s asked for widgets this brain doesn't feed: %d let be",
+                    session.canonical_id, len(set(names)) - len(wanted))
+    session.widgets = frozenset(wanted)
+    _stop_feed(session)
+    for name in wanted:
+        feed = _tick(session, name) if name in widgets.TIMED else _send_widget(session, name)
+        session.feed.append(asyncio.create_task(feed))
+
+
+def _stop_feed(session: _Session) -> None:
+    for task in session.feed:
+        task.cancel()
+    session.feed = []
+
+
+async def _tick(session: _Session, name: str) -> None:
+    """A timed widget: sent at once, and again on its cadence, until the
+    session asks for others or goes."""
+    while True:
+        await _send_widget(session, name)
+        await asyncio.sleep(widgets.next_in(name))
+
+
+async def _send_widget(session: _Session, name: str) -> None:
+    try:
+        got = await widgets.widget(name, session.identity)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("companion: widget %s failed", name)
+        return
+    if got is not None:
+        payload, ttl_s = got
+        session.send(Widget(name=name, payload=payload.model_dump(mode="json"), ttl_s=ttl_s))
+
+
+def _desk_changed(identity: str) -> None:
+    """Every desk of `identity` that wants its desk widget is sent it anew,
+    each on its own loop (the TestClient gives each connection one)."""
+    frame = Widget(name="desk", payload=widgets.desk_payload(identity).model_dump(mode="json"),
+                   ttl_s=widgets.TTL_S["desk"])
+    with _SESSIONS_LOCK:
+        targets = [s for s in _SESSIONS if s.identity == identity and "desk" in s.widgets]
+    for s in targets:
+        s.send_from_thread(frame)
+
+
+widgets.watch(_desk_changed)
 
 
 def _turn_id_near_an_end(raw: str) -> str | None:
@@ -530,7 +604,7 @@ def _start_turn(session: _Session, turn_id: str, text: str, source: MessageSourc
             return
         session.send(Error(turn_id=turn_id, code="busy", text=_COPY_BUSY))
         return
-    turn = _Turn(turn_id)
+    turn = _Turn(turn_id, desk_since=widgets.generation(session.identity))
     session.active = turn
     session.send(State(turn_id=turn_id, state="transcribing" if pcm is not None else "thinking"))
     task = asyncio.create_task(_run_turn(session, turn, text, source, pcm))
@@ -555,6 +629,10 @@ async def _run_turn(session: _Session, turn: _Turn, text: str, source: MessageSo
         # After every token: the pool thread queued those with
         # call_soon_threadsafe before it returned, so they are ahead of this.
         session.send(Done(turn_id=turn.turn_id, text=reply, images=images, interrupted=interrupted))
+        # His desk's last exchange, for every desk of the identity that shows
+        # it: only a turn that ended whole, with something said.
+        if not interrupted and reply.strip():
+            widgets.record_exchange(session.identity, text, reply, turn.mood, since=turn.desk_since)
     finally:
         # Cleared in the same step as the frames are queued, so the client's
         # next say, which can only come after it has read them, finds no turn.
@@ -686,6 +764,7 @@ def _ask(session: _Session, turn: _Turn, text: str, source: MessageSource) -> tu
 
     def mood_callback(mood: str) -> None:
         # From this thread, as the tokens are, so it is ahead of the part's.
+        turn.mood = mood
         session.send_from_thread(Mood(turn_id=turn.turn_id, mood=mood))
 
     try:

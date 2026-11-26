@@ -5,10 +5,14 @@ This walks its frame unions and writes, into desktop/src/shared/:
 
 - protocol.ts: an interface per frame, the ClientFrame and ServerFrame unions,
   the protocol's constants and close codes, and isServerFrame(x), a
-  structural check of every frame the server sends;
+  structural check of every frame the server sends; and for the widgets
+  (PR 14) an interface per payload (WIDGET_PAYLOADS), WidgetPayloads (each
+  by its widget's name), WIDGET_NAMES, WIDGETS_MAX and isWidgetPayload(name,
+  x), the same check of a payload;
 - protocol.fixtures.json: frames for the desktop's tests. The valid ones are
   built from the models and parsed back through companion_protocol; the
-  invalid ones break one thing each.
+  invalid ones break one thing each. And each widget's payload, valid and
+  broken one thing at a time (its WIDGET_PAYLOADS model, PR 14).
 
     python scripts/gen_protocol_ts.py            write both files
     python scripts/gen_protocol_ts.py --check    exit 1 if either is out of date
@@ -18,8 +22,9 @@ tests/test_gen_protocol_ts.py fails while the committed files are out of date,
 so CI's Python job holds the two ends together without the desktop's tools.
 
 How Python's types are read:
-- str, int, bool, dict, list[X], X | None and Literal map to string, number,
-  boolean, Record<string, unknown>, X[], X | null and a union of literals.
+- str, int, float, bool, dict, list[X], X | None and Literal map to string,
+  number (an integer for int, any finite one for float), boolean,
+  Record<string, unknown>, X[], X | null and a union of literals.
   Anything else stops the script, so a new kind of field is decided here.
 - The module's Literal aliases (Cap, TurnState, ErrorCode, MoodName) become
   type aliases.
@@ -93,6 +98,14 @@ SAMPLE_BY_MODEL = {
     ("Pong", "t"): 1763112000000,
     ("Widget", "ttl_s"): 600,
     ("Reminder", "schedule_id"): 7,
+    ("ClockPayload", "now"): "2026-11-26T21:15:00-06:00",
+    ("ClockPayload", "zone"): "America/Chicago",
+    ("WeatherPayload", "code"): 2,
+    ("WeatherPayload", "summary"): "Partly cloudy",
+    ("WeatherPayload", "observed_at"): "2026-11-26T21:15-06:00",
+    ("DeskExchange", "asked"): "what time is it",
+    ("DeskExchange", "answered"): "A quarter past nine, sir.",
+    ("DeskExchange", "at"): "2026-11-27T03:15:00+00:00",
 }
 
 
@@ -102,6 +115,7 @@ def union_members(union) -> list[type[BaseModel]]:
 
 
 CLIENT = union_members(cp.ClientFrame)
+PAYLOADS = cp.WIDGET_PAYLOADS
 SERVER = union_members(cp.ServerFrame)
 BOTH = [m for m in CLIENT if m in SERVER]
 
@@ -149,7 +163,7 @@ def ts_type(annotation) -> str:
         return "string"
     if annotation is bool:
         return "boolean"
-    if annotation is int:
+    if annotation is int or annotation is float:
         return "number"
     if annotation is dict:
         return "Record<string, unknown>"
@@ -177,6 +191,8 @@ def ts_check(annotation) -> str:
         return "bool"
     if annotation is int:
         return "int"
+    if annotation is float:
+        return "num"
     if annotation is dict:
         return "isObj"
     if is_model(annotation):
@@ -290,6 +306,8 @@ def render_ts() -> str:
         f"export const SAY_MAX_CHARS = {field_max_length(cp.Say, 'text')};",
         "/** The longest client name, in characters (code points). */",
         f"export const CLIENT_NAME_MAX_CHARS = {field_max_length(cp.ClientInfo, 'name')};",
+        "/** The most widgets one subscribe may name. */",
+        f"export const WIDGETS_MAX = {cp.WIDGETS_MAX};",
         "",
         "/** The codes the server closes a session with. */",
         "export const CLOSE = {",
@@ -309,6 +327,20 @@ def render_ts() -> str:
         lines += ["", f"// ── {title} " + "─" * max(0, 72 - len(title))]
         for model in in_order(models, done):
             lines += ["", *interface(model)]
+    lines += ["", "// ── Widget payloads " + "─" * 57]
+    for model in in_order(list(PAYLOADS.values()), done):
+        lines += ["", *interface(model)]
+    lines += [
+        "",
+        "/** Each widget's payload, by its name (a Widget frame's `name`). */",
+        "export interface WidgetPayloads {",
+        *(f"  {name}: {ts_name(model)};" for name, model in PAYLOADS.items()),
+        "}",
+        "/** Every widget the server may feed. */",
+        "export const WIDGET_NAMES = [",
+        *(f"  {json.dumps(name)}," for name in PAYLOADS),
+        "] as const satisfies readonly (keyof WidgetPayloads)[];",
+    ]
     lines += [
         "",
         f"export type ClientFrame = {' | '.join(ts_name(m) for m in CLIENT)};",
@@ -327,6 +359,7 @@ def render_ts() -> str:
         'const str: Check = (v) => typeof v === "string";',
         "const int: Check = (v) => Number.isInteger(v);",
         'const bool: Check = (v) => typeof v === "boolean";',
+        'const num: Check = (v) => typeof v === "number" && Number.isFinite(v);',
         "const oneOf = (values: readonly unknown[]): Check => (v) => values.includes(v);",
         "const listOf = (item: Check): Check => (v) => Array.isArray(v) && v.every((e) => item(e));",
         "const orNull = (inner: Check): Check => (v) => v === null || inner(v);",
@@ -346,6 +379,18 @@ def render_ts() -> str:
         '  if (!isObj(x) || typeof x.type !== "string") return false;',
         "  const check = SERVER_CHECKS.get(x.type);",
         "  return check !== undefined && check(x);",
+        "}",
+        "",
+        "/** Each widget's payload's fields, by the widget's name. */",
+        "const PAYLOAD_CHECKS: ReadonlyMap<string, Check> = new Map<string, Check>([",
+        *(f"  [{json.dumps(name)}, {shape_expr(model)}]," for name, model in PAYLOADS.items()),
+        "]);",
+        "",
+        "/** Whether `payload` is widget `name`'s, every field there, of its type.",
+        " * Fields it doesn't know are allowed, as in a frame. */",
+        "export function isWidgetPayload<K extends keyof WidgetPayloads>(name: K, payload: unknown): payload is WidgetPayloads[K] {",
+        "  const check = PAYLOAD_CHECKS.get(name);",
+        "  return check !== undefined && check(payload);",
         "}",
         "",
     ]
@@ -370,6 +415,8 @@ def sample(model: type[BaseModel], name: str, annotation):
         return True
     if inner is int:
         return 1
+    if inner is float:
+        return 12.5
     if inner is dict:
         return {"key": "value"}
     if is_model(inner):
@@ -400,6 +447,8 @@ def wrong_values(annotation) -> list[tuple[str, object]]:
     elif inner is int:
         out.append(("a string for an int", "1"))
         out.append(("a fraction for an int", 1.5))
+    elif inner is float:
+        out.append(("a string for a number", "12.5"))
     elif inner is bool:
         out.append(("a string for a bool", "true"))
         out.append(("a number for a bool", 1))
@@ -468,6 +517,46 @@ def valid_server_frames() -> list[dict]:
     return out
 
 
+def payload_cases(model: type[BaseModel], base: dict, path: str = "") -> tuple[list, list]:
+    """`base` (a valid `model`) changed one thing at a time, as (why,
+    payload): the valid ways (a null, each Literal's other values) and the
+    broken ones (a field missing, of a wrong type), down into the models its
+    fields hold, by the field's path."""
+    valid, invalid = [], []
+    for field_name, field in model.model_fields.items():
+        at = f"{path}{field_name}"
+        optional, inner = is_optional(field.annotation)
+        listed = typing.get_origin(inner) is list
+        if optional:
+            valid.append((f"with {at} null", {**base, field_name: None}))
+        for value in literal_values(field.annotation)[1:]:
+            valid.append((f"with {at} {value}", {**base, field_name: [value] if listed else value}))
+        invalid.append((f"without {at}", {k: v for k, v in base.items() if k != field_name}))
+        for why, value in wrong_values(field.annotation):
+            invalid.append((f"{at}: {why}", {**base, field_name: value}))
+        if is_model(inner) and isinstance(base.get(field_name), dict):
+            deeper_valid, deeper_invalid = payload_cases(inner, base[field_name], f"{at}.")
+            valid += [(why, {**base, field_name: p}) for why, p in deeper_valid]
+            invalid += [(why, {**base, field_name: p}) for why, p in deeper_invalid]
+    return valid, invalid
+
+
+def payload_fixtures() -> dict:
+    """Each widget's payload: valid (each checked by its model), and broken
+    one thing at a time, by the widget's name."""
+    valid, invalid = [], []
+    for name, model in PAYLOADS.items():
+        base = valid_frame(model)
+        valid.append({"why": name, "name": name, "payload": base})
+        good, bad = payload_cases(model, base)
+        valid += [{"why": f"{name} {why}", "name": name, "payload": p} for why, p in good]
+        invalid += [{"why": f"{name}: {why}", "name": name, "payload": p} for why, p in bad]
+        invalid.append({"why": f"{name}: not an object", "name": name, "payload": [base]})
+    for entry in valid:
+        PAYLOADS[entry["name"]].model_validate(entry["payload"])  # each must hold
+    return {"valid": valid, "invalid": invalid}
+
+
 def render_fixtures() -> str:
     client = {}
     for model in CLIENT:
@@ -477,10 +566,12 @@ def render_fixtures() -> str:
     fixtures = {
         "about": ("Generated by scripts/gen_protocol_ts.py from companion_protocol.py: do not "
                   "edit. Frames for the desktop's tests: valid server frames (each parsed back "
-                  "by companion_protocol) and invalid ones (each breaking one thing), and a "
-                  "valid frame of each type the client sends."),
+                  "by companion_protocol) and invalid ones (each breaking one thing), a "
+                  "valid frame of each type the client sends, and each widget's payload, "
+                  "valid and broken one thing at a time."),
         "server": {"valid": valid_server_frames(), "invalid": invalid_frames()},
         "client": {"valid": client},
+        "widgets": payload_fixtures(),
     }
     return json.dumps(fixtures, indent=2, ensure_ascii=False) + "\n"
 

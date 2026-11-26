@@ -7,7 +7,10 @@
  */
 import { describe, expect, it } from "vitest";
 import fixtures from "./protocol.fixtures.json";
-import { CLIENT_ID_PATTERN, SERVER_FRAME_TYPES, TURN_ID_PATTERN, isServerFrame } from "./protocol";
+import {
+  CLIENT_ID_PATTERN, SERVER_FRAME_TYPES, TURN_ID_PATTERN, WIDGET_NAMES, isServerFrame, isWidgetPayload,
+  type WidgetPayloads,
+} from "./protocol";
 import { CAPS, audioEndFrame, cancelFrame, helloFrame, pingFrame, pongFrame, sayFrame } from "./companion";
 
 /** Each key's JSON type, recursively: what a frame looks like on the wire. */
@@ -36,6 +39,27 @@ describe("isServerFrame", () => {
 
   it("refuses what isn't an object", () => {
     for (const x of [undefined, 0, "", true, () => ({ type: "pong", t: 1 })]) expect(isServerFrame(x)).toBe(false);
+  });
+});
+
+describe("isWidgetPayload", () => {
+  const name = (n: string) => n as keyof WidgetPayloads;
+
+  it("takes every payload the server may send, by its widget", () => {
+    for (const { why, name: n, payload } of fixtures.widgets.valid) expect(isWidgetPayload(name(n), payload), why).toBe(true);
+    expect(new Set(fixtures.widgets.valid.map((e) => e.name))).toEqual(new Set(WIDGET_NAMES));
+  });
+
+  it("refuses each broken one, down into the desk's exchange", () => {
+    expect(fixtures.widgets.invalid.length).toBeGreaterThan(40);
+    expect(fixtures.widgets.invalid.some((e) => e.why.startsWith("desk: last."))).toBe(true);
+    for (const { why, name: n, payload } of fixtures.widgets.invalid) expect(isWidgetPayload(name(n), payload), why).toBe(false);
+  });
+
+  it("refuses a payload for a widget it doesn't know, and one meant for another", () => {
+    const clock = fixtures.widgets.valid.find((e) => e.name === "clock")!.payload;
+    expect(isWidgetPayload(name("agenda"), clock)).toBe(false);
+    expect(isWidgetPayload("weather", clock)).toBe(false);
   });
 });
 

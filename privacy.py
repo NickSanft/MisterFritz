@@ -179,8 +179,15 @@ def forget_conversation(user_id: str, thread_id: str | None = None) -> int:
     else:
         where = "thread_id = ?"
         params = (thread_id,)
+    # The desk widget's copy of the last desk exchange goes too (plan 14 PR
+    # 14): with the identity's whole conversation, or with its desk thread.
+    desk_of = user_id if sweep_channels else (
+        thread_id[: -len("#desktop")] if thread_id.endswith("#desktop") else None)
     try:
         with _no_turn_in_flight(_threads_to_forget(thread_id, sweep_channels, where, params)):
+            if desk_of:
+                import widgets
+                widgets.forget(desk_of)
             with sqlite3.connect(CHAT_DB_NAME) as conn:
                 cur1 = conn.execute(
                     f"DELETE FROM checkpoints WHERE {where}", params,

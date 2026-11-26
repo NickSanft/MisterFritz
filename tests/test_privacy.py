@@ -197,6 +197,20 @@ class TestForgetConversation(unittest.TestCase):
         self.assertEqual(alice_remaining, 0)
         self.assertEqual(bob_remaining, 1)  # Other users untouched.
 
+    def test_the_desk_widgets_last_exchange_goes_with_it(self):
+        """Plan 14 PR 14: with the identity's whole conversation, or its desk
+        thread; not with another thread of it."""
+        import widgets
+        self.addCleanup(widgets._LAST.clear)
+        for forget, gone in ((lambda: self.privacy.forget_conversation("alice"), True),
+                             (lambda: self.privacy.forget_conversation("alice", thread_id="alice#desktop"), True),
+                             (lambda: self.privacy.forget_conversation("alice", thread_id="alice#web"), False)):
+            widgets.record_exchange("alice", "q", "a", None)
+            widgets.record_exchange("bob", "q", "a", None)
+            forget()
+            self.assertEqual(widgets.desk_payload("alice").last is None, gone)
+            self.assertIsNotNone(widgets.desk_payload("bob").last, "another's is kept")
+
     def test_returns_zero_when_no_rows_match(self):
         count = self.privacy.forget_conversation("nobody")
         self.assertEqual(count, 0)

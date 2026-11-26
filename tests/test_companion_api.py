@@ -15,6 +15,7 @@ Also here, from P5's scaffold:
   requests only, so a WebSocket on the same app is reached with no Basic auth
   and no same-origin header. That is why COMPANION_TOKEN is the only gate.
 """
+import asyncio
 import base64
 import contextlib
 import inspect
@@ -41,6 +42,8 @@ import fritz_utils
 import identity_store
 import mister_fritz
 import stt
+import widgets
+from companion_protocol import WeatherPayload
 from fritz_utils import MessageSource
 
 # Before any test patches it.
@@ -322,7 +325,7 @@ class TestHandshake(CompanionTest):
         _ws, welcome = self.desk()
         self.assertEqual(welcome, {
             "type": "welcome", "protocol": 1, "identity": "desktop-nick-pc",
-            "display_name": "Nick's PC", "server_caps": ["text", "audio-in", "speak-local"],
+            "display_name": "Nick's PC", "server_caps": ["text", "audio-in", "speak-local", "widgets"],
             "thread_id": "desktop-nick-pc#desktop",
         })
         self.audit.assert_any_call("companion_connect", result="ok", user_id="desktop-nick-pc",
@@ -850,13 +853,12 @@ class TestFrames(CompanionTest):
             ws.send_json(hello())
             self.assertEqual(receive(ws)["code"], "bad_frame")
 
-    def test_widgets_are_not_served_yet(self):
+    def test_a_subscribe_naming_too_many_is_a_bad_frame(self):
         ws, welcome = self.desk()
-        self.assertNotIn("widgets", welcome["server_caps"])
-        ws.send_json({"type": "subscribe", "widgets": ["clock"]})
+        self.assertIn("widgets", welcome["server_caps"])
+        ws.send_json({"type": "subscribe", "widgets": ["clock"] * 9})
         error = receive(ws)
         self.assertEqual((error["code"], error["turn_id"]), ("bad_frame", None))
-        self.assertEqual(self.fake.calls, [])
 
 
 class FakeTranscribe:
@@ -1139,11 +1141,11 @@ class TestSpokenReplies(CompanionTest):
 
     def test_the_welcome_offers_speak_local_only_with_local_tts(self):
         _ws, welcome = self.desk()
-        self.assertEqual(welcome["server_caps"], ["text", "audio-in", "speak-local"])
+        self.assertEqual(welcome["server_caps"], ["text", "audio-in", "speak-local", "widgets"])
         for mode in ("off", "xtts"):
             with self.subTest(mode=mode), patch.object(fritz_utils, "COMPANION_TTS", mode):
                 ws, welcome = self.desk()
-                self.assertEqual(welcome["server_caps"], ["text", "audio-in"])
+                self.assertEqual(welcome["server_caps"], ["text", "audio-in", "widgets"])
                 ws.close()
                 self.assertTrue(wait_for(lambda: len(companion_api._SESSIONS) < 2))
 
@@ -1367,6 +1369,252 @@ class TestHisMood(CompanionTest):
                          "Smoke, sir. Open a window.")
         self.assertEqual(frames[kinds.index("done")]["text"], "Smoke, sir. Open a window.")
         self.assertNotIn("[mood", json.dumps(frames))
+
+
+WEATHER_ANSWER = {
+    "utc_offset_seconds": -21600,
+    "current": {"time": "2026-11-26T15:15", "temperature_2m": 51.3, "apparent_temperature": 47.9,
+                "weather_code": 2, "wind_speed_10m": 7.4, "is_day": 1},
+    "daily": {"temperature_2m_max": [58.1], "temperature_2m_min": [39.2]},
+}
+WEATHER = {"temperature": 51.3, "feels_like": 47.9, "high": 58.1, "low": 39.2, "unit": "F", "code": 2,
+           "summary": "Partly cloudy", "wind": 7.4, "wind_unit": "mph", "is_day": True,
+           "observed_at": "2026-11-26T15:15-06:00"}
+
+
+class TestWidgets(CompanionTest):
+    """PR 14: a desk names the widgets it wants and is fed them: each at
+    once, the timed ones again on their cadence, his desk after each turn
+    that ends whole, to every desk of the identity that wants it."""
+
+    def setUp(self):
+        super().setUp()
+        for d in (widgets._LAST, widgets._FORGOTTEN):
+            self.stack.enter_context(patch.dict(d, clear=True))
+        self.weather = MagicMock()
+
+        async def get():
+            self.weather()
+            return WeatherPayload.model_validate(WEATHER)
+
+        self.stack.enter_context(patch.object(widgets.WEATHER, "get", get))
+
+    def subscribe(self, ws, *names):
+        ws.send_json({"type": "subscribe", "widgets": list(names)})
+
+    def widget(self, ws, name=None, timeout=10.0):
+        """The next widget frame (of `name`, if given), skipping others."""
+        end = time.monotonic() + timeout
+        while True:
+            f = receive(ws, max(0.1, end - time.monotonic()))
+            if f["type"] == "widget" and (name is None or f["name"] == name):
+                return f
+
+    def test_each_named_widget_comes_at_once(self):
+        ws, _ = self.desk()
+        self.subscribe(ws, "desk", "clock", "weather")
+        got = {}
+        while len(got) < 3:
+            f = self.widget(ws)
+            got[f["name"]] = f
+        self.assertEqual(got["desk"], {"type": "widget", "name": "desk", "payload": {"last": None}, "ttl_s": 0})
+        clock = got["clock"]["payload"]
+        self.assertEqual((clock["zone"], got["clock"]["ttl_s"]), ("UTC", 120))
+        self.assertTrue(clock["now"].endswith("+00:00"))
+        self.assertEqual(got["weather"]["payload"], WEATHER)
+        self.assertGreater(got["weather"]["ttl_s"], 0)
+
+    def test_and_the_timed_ones_again_on_their_cadence(self):
+        ws, _ = self.desk()
+        with patch.object(widgets, "CLOCK_EVERY_S", 0.05):
+            self.subscribe(ws, "clock")
+            times = [self.widget(ws, "clock") for _ in range(3)]
+        self.assertEqual(len(times), 3)
+
+    def test_a_widget_it_doesnt_feed_is_let_be(self):
+        ws, _ = self.desk()
+        self.subscribe(ws, "agenda", "clock", "clock")
+        self.assertEqual(self.widget(ws)["name"], "clock")
+        session = next(iter(companion_api._SESSIONS))
+        self.assertEqual(session.widgets, frozenset({"clock"}))
+
+    def test_no_weather_to_be_had_sends_none(self):
+        async def none():
+            return None
+        ws, _ = self.desk()
+        with patch.object(widgets.WEATHER, "get", none):
+            self.subscribe(ws, "weather", "clock")
+            self.assertEqual(self.widget(ws)["name"], "clock")
+
+    def test_a_new_subscribe_replaces_the_last_and_none_stops_them(self):
+        ws, _ = self.desk()
+        with patch.object(widgets, "CLOCK_EVERY_S", 0.05):
+            self.subscribe(ws, "clock")
+            self.widget(ws, "clock")
+            session = next(iter(companion_api._SESSIONS))
+            clock = list(session.feed)
+            self.subscribe(ws, "desk")
+            self.widget(ws, "desk")
+            self.assertTrue(wait_for(lambda: all(t.done() for t in clock)))
+            self.assertTrue(all(t.cancelled() for t in clock), "the clock it replaced is stopped")
+            self.assertEqual(session.widgets, frozenset({"desk"}))
+            first = list(session.feed)
+            self.subscribe(ws)
+            self.assertTrue(wait_for(lambda: session.feed == [] and all(t.done() for t in first)))
+            self.assertEqual(session.widgets, frozenset())
+
+    def test_his_desk_after_a_turn_that_ends_whole(self):
+        self.use(FakeAskStuff(deltas=("A quarter", " past nine, sir."), mood="dry"))
+        ws, _ = self.desk()
+        self.subscribe(ws, "desk")
+        self.assertIsNone(self.widget(ws, "desk")["payload"]["last"])
+        frames = self.turn(ws, "w1", "what time is it")
+        # It may come just before the turn's idle, or just after.
+        sent = [f for f in frames if f["type"] == "widget"]
+        last = (sent[-1] if sent else self.widget(ws, "desk"))["payload"]["last"]
+        self.assertEqual((last["asked"], last["answered"], last["mood"]),
+                         ("what time is it", "A quarter past nine, sir.", "dry"))
+
+    def test_not_after_one_cut_short_or_failed(self):
+        ws, _ = self.desk()
+        self.subscribe(ws, "desk")
+        self.widget(ws, "desk")
+        self.use(FakeAskStuff(fail=RuntimeError("the model fell over")))
+        self.turn(ws, "w2")
+        self.use(FakeAskStuff(deltas=("",)))
+        self.turn(ws, "w3")
+        self.assertEqual(widgets._LAST, {})
+
+    def test_not_after_one_interrupted(self):
+        gate = threading.Event()
+        self.use(FakeAskStuff(deltas=("one ", "two ", "three"), gate=gate, pause_after=1))
+        ws, _ = self.desk()
+        self.subscribe(ws, "desk")
+        self.widget(ws, "desk")
+        ws.send_json({"type": "say", "turn_id": "w6", "text": "go on"})
+        self.assertTrue(self.fake.in_flight.wait(10))
+        ws.send_json({"type": "cancel", "turn_id": "w6"})
+        gate.set()
+        frames = self.until_idle(ws, "w6")
+        self.assertTrue(next(f for f in frames if f["type"] == "done")["interrupted"])
+        self.assertEqual(widgets._LAST, {})
+
+    def test_the_clock_never_waits_on_the_weather(self):
+        async def slow():
+            await asyncio.sleep(5)
+            return WeatherPayload.model_validate(WEATHER)
+        ws, _ = self.desk()
+        with patch.object(widgets.WEATHER, "get", slow):
+            started = time.monotonic()
+            self.subscribe(ws, "weather", "clock")
+            self.assertEqual(self.widget(ws)["name"], "clock")
+            self.assertLess(time.monotonic() - started, 2)
+
+    def test_a_failed_fetch_is_tried_again_soon_not_at_the_quarter_hour(self):
+        fresh = widgets._Weather()
+        fetch = MagicMock(side_effect=[OSError("down"), WEATHER_ANSWER])
+
+        async def fetch_weather(place):
+            out = fetch(place)
+            if isinstance(out, Exception):
+                raise out
+            return out
+
+        ws, _ = self.desk()
+        with patch.object(widgets, "WEATHER", fresh), patch.object(widgets, "fetch_weather", fetch_weather), \
+                patch.object(widgets, "RETRY_S", 0.2), patch.object(widgets, "WEATHER_EVERY_S", 3600.0), \
+                self.assertLogs(widgets.logger, "WARNING"):
+            self.subscribe(ws, "weather")
+            got = self.widget(ws, "weather", timeout=5)
+        self.assertEqual(got["payload"]["temperature"], 51.3)
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_weather_is_sent_with_the_time_it_has_left(self):
+        ws, _ = self.desk()
+        with patch.object(widgets.WEATHER, "ttl_left", lambda: 777):
+            self.subscribe(ws, "weather")
+            self.assertEqual(self.widget(ws, "weather")["ttl_s"], 777)
+
+    def test_a_turn_under_way_when_the_desk_was_forgotten_leaves_nothing(self):
+        gate = threading.Event()
+        self.use(FakeAskStuff(deltas=("A secret", " answer."), gate=gate, pause_after=1))
+        ws, _ = self.desk()
+        self.subscribe(ws, "desk")
+        self.widget(ws, "desk")
+        # Forgotten once already, so the count it notes isn't the default.
+        widgets.forget("desktop-nick-pc")
+        ws.send_json({"type": "say", "turn_id": "w7", "text": "a secret question"})
+        self.assertTrue(self.fake.in_flight.wait(10))
+        widgets.forget("desktop-nick-pc")
+        gate.set()
+        self.until_idle(ws, "w7")
+        time.sleep(0.2)
+        self.assertEqual(widgets._LAST, {})
+        # A turn begun after the forget is the desk's again.
+        self.use(FakeAskStuff(deltas=("Quite.",)))
+        self.turn(ws, "w8", "and now")
+        self.assertTrue(wait_for(lambda: "desktop-nick-pc" in widgets._LAST))
+
+    def test_a_widget_that_fails_leaves_the_rest_fed(self):
+        async def broken():
+            raise RuntimeError("weather exploded")
+        ws, _ = self.desk()
+        with patch.object(widgets.WEATHER, "get", broken), patch.object(widgets, "CLOCK_EVERY_S", 0.05), \
+                self.assertLogs(companion_api.logger, "ERROR") as logs:
+            self.subscribe(ws, "weather", "clock")
+            for _ in range(3):
+                self.assertEqual(self.widget(ws)["name"], "clock")
+        self.assertIn("widget weather failed", logs.output[0])
+
+    def test_a_widget_that_failed_is_offered_again(self):
+        calls = []
+
+        async def flaky():
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("weather exploded")
+            return WeatherPayload.model_validate(WEATHER)
+
+        ws, _ = self.desk()
+        with patch.object(widgets.WEATHER, "get", flaky), patch.object(widgets.WEATHER, "next_in", lambda: 0.05), \
+                self.assertLogs(companion_api.logger, "ERROR"):
+            self.subscribe(ws, "weather")
+            self.assertEqual(self.widget(ws, "weather")["payload"], WEATHER)
+        self.assertGreaterEqual(len(calls), 2)
+
+    def test_every_desk_of_the_identity_that_wants_it(self):
+        self.use(FakeAskStuff(deltas=("Very good, sir.",)))
+        client = self.client(COMPANION_MAX_CLIENTS=3)
+        a, _ = self.desk(client)
+        b, _ = self.desk(client)
+        other, _ = self.desk(client, client={"id": "other-pc", "name": "Other", "caps": ["text"]})
+        for ws in (a, b, other):
+            self.subscribe(ws, "desk")
+            self.widget(ws, "desk")
+        self.turn(a, "w4", "good evening")
+        self.assertEqual(self.widget(b, "desk")["payload"]["last"]["asked"], "good evening")
+        self.subscribe(other, "clock")
+        self.assertEqual(self.widget(other)["name"], "clock", "another identity's desk isn't told")
+
+    def test_a_desk_gone_takes_its_feed_with_it(self):
+        ws, _ = self.desk()
+        self.subscribe(ws, "clock")
+        self.widget(ws, "clock")
+        session = next(iter(companion_api._SESSIONS))
+        feed = list(session.feed)
+        ws.close()
+        self.assertTrue(wait_for(lambda: all(t.done() for t in feed)))
+        self.assertTrue(all(t.cancelled() for t in feed))
+
+    def test_forgetting_the_conversation_tells_the_desk(self):
+        self.use(FakeAskStuff(deltas=("Quite.",)))
+        ws, _ = self.desk()
+        self.subscribe(ws, "desk")
+        self.widget(ws, "desk")
+        self.turn(ws, "w5", "hm")
+        self.widget(ws, "desk")
+        widgets.forget("desktop-nick-pc")
+        self.assertIsNone(self.widget(ws, "desk")["payload"]["last"])
 
 
 class TestOverARealSocket(CompanionTest):

@@ -21,6 +21,11 @@ Where this differs from the plan's sketch, and why:
 - Done.images are data: URLs (see Done).
 - mood (PR 11, the owner's Q3 call: inline tags) is a frame of its own, which
   the plan named only as "state-adjacent".
+- Subscribe names at most WIDGETS_MAX widgets, and a name the server doesn't
+  feed is let be rather than refused (a newer desk may ask for more). Each
+  widget's payload has a model of its own (WIDGET_PAYLOADS), generated to
+  TypeScript; the Widget frame carries it as an object. ttl_s 0 means it
+  holds until the next (PR 14).
 
 Most models are declared ahead of the server code that sends or reads them,
 so the generated types are whole from the start. Which frames the server
@@ -55,6 +60,8 @@ TurnState = Literal["listening", "transcribing", "thinking", "speaking", "idle"]
 ErrorCode = Literal["busy", "bad_frame", "turn_failed", "stt_failed", "not_allowed", "internal"]
 # His mood, as the model's leading [mood:…] tag names it (mood_tags.py).
 MoodName = Literal["dry", "pleased", "alarmed", "weary"]
+# The most widgets one subscribe may name.
+WIDGETS_MAX = 8
 
 
 # ── client → server ──────────────────────────────────────────────────────────
@@ -93,9 +100,10 @@ class Cancel(BaseModel):
 
 
 class Subscribe(BaseModel):
-    """Phase 3: the widgets the client wants fed."""
+    """The widgets the client wants fed, replacing any it asked for before;
+    none stops the feed. A name the server doesn't feed is let be."""
     type: Literal["subscribe"] = "subscribe"
-    widgets: list[str]
+    widgets: list[str] = Field(max_length=WIDGETS_MAX)
 
 
 class Ping(BaseModel):
@@ -202,11 +210,62 @@ class Error(BaseModel):
 
 
 class Widget(BaseModel):
-    """Phase 3."""
+    """One widget's news: `payload` is its payload model's (WidgetPayloads
+    in TypeScript), as an object. It holds for `ttl_s` more seconds (0:
+    until the next), so a desk can tell a stale one."""
     type: Literal["widget"] = "widget"
     name: str
     payload: dict
     ttl_s: int
+
+
+# ── widget payloads (PR 14) ──────────────────────────────────────────────────
+
+class ClockPayload(BaseModel):
+    """The brain's time: `now` in ISO 8601 with its zone's offset, and the
+    zone's IANA name (SCHEDULE_TIMEZONE). The desk ticks the seconds itself."""
+    now: str
+    zone: str
+
+
+class WeatherPayload(BaseModel):
+    """Now and today at the brain's WEATHER_LATITUDE and WEATHER_LONGITUDE,
+    from Open-Meteo. `code` is the WMO weather code and `summary` its words;
+    `observed_at` is Open-Meteo's time for `now`, ISO 8601 with the place's
+    offset."""
+    temperature: float
+    feels_like: float
+    high: float
+    low: float
+    unit: Literal["F", "C"]
+    code: int
+    summary: str
+    wind: float
+    wind_unit: Literal["mph", "km/h"]
+    is_day: bool
+    observed_at: str
+
+
+class DeskExchange(BaseModel):
+    """One question and its answer, each cut to its first few hundred
+    characters, his mood for it, and when it ended (ISO 8601, UTC)."""
+    asked: str
+    answered: str
+    mood: MoodName | None
+    at: str
+
+
+class DeskPayload(BaseModel):
+    """His desk: the last exchange at a desk of this identity since the
+    brain started, or none yet."""
+    last: DeskExchange | None
+
+
+WIDGET_PAYLOADS: dict[str, type[BaseModel]] = {
+    "clock": ClockPayload,
+    "weather": WeatherPayload,
+    "desk": DeskPayload,
+}
 
 
 class Reminder(BaseModel):

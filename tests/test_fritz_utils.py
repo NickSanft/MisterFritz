@@ -535,6 +535,54 @@ class TestDesktopCompanionKnobs(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assertIn(expected, src)
 
+    def test_the_widgets_defaults(self):
+        """PR 14: weather for Murfreesboro, Tennessee in fahrenheit unless
+        told otherwise, the owner's call; the host's zone unless one is named."""
+        src = pathlib.Path(fu.__file__).read_text(encoding="utf-8")
+        for expected in ('os.environ.get("WEATHER_LATITUDE", "35.85")',
+                         'os.environ.get("WEATHER_LONGITUDE", "-86.39")',
+                         'os.environ.get("WEATHER_UNIT", "fahrenheit")',
+                         '(os.environ.get("SCHEDULE_TIMEZONE") or "").strip() or _host_zone()'):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, src)
+
+    def test_the_host_zone_is_an_iana_name_or_utc(self):
+        from zoneinfo import ZoneInfo
+        ZoneInfo(fu._host_zone())
+        with patch("tzlocal.get_localzone_name", side_effect=RuntimeError("no zone")):
+            self.assertEqual(fu._host_zone(), "UTC")
+        with patch("tzlocal.get_localzone_name", return_value=None):
+            self.assertEqual(fu._host_zone(), "UTC")
+
+    def test_a_zone_this_machine_doesnt_know_is_refused(self):
+        for zone in ("Mars/Olympus_Mons", "America/Chicag", "../etc"):
+            with self.subTest(zone=zone), patch.object(fu, "SCHEDULE_TIMEZONE", zone):
+                self.assertIn("SCHEDULE_TIMEZONE", self._refusal())
+        for zone in ("America/Chicago", "Europe/London", "UTC"):
+            with self.subTest(zone=zone), patch.object(fu, "SCHEDULE_TIMEZONE", zone), self._patched():
+                fu.validate_config()
+
+    def test_the_weather_place(self):
+        cases = {("35.85", "-86.39"): (35.85, -86.39), ("", ""): None, ("-90", "180"): (-90.0, 180.0)}
+        for (lat, lon), place in cases.items():
+            with self.subTest(lat=lat, lon=lon), patch.object(fu, "WEATHER_LATITUDE", lat), \
+                    patch.object(fu, "WEATHER_LONGITUDE", lon):
+                self.assertEqual(fu.weather_place(), place)
+        for lat, lon, why in (("35.85", "", "together"), ("", "-86.39", "together"), ("north", "-86.39", "numbers"),
+                              ("91", "0", "off the globe"), ("0", "-180.5", "off the globe")):
+            with self.subTest(lat=lat, lon=lon), patch.object(fu, "WEATHER_LATITUDE", lat), \
+                    patch.object(fu, "WEATHER_LONGITUDE", lon):
+                with self.assertRaises(ValueError) as caught:
+                    fu.weather_place()
+                self.assertIn(why, str(caught.exception))
+                self.assertIn(why, self._refusal())
+
+    def test_a_weather_unit_it_doesnt_know_is_refused(self):
+        with patch.object(fu, "WEATHER_UNIT", "kelvin"):
+            self.assertIn("WEATHER_UNIT", self._refusal())
+        with patch.object(fu, "WEATHER_UNIT", "celsius"), self._patched():
+            fu.validate_config()
+
     def test_the_defaults_start_cleanly_and_quietly(self):
         with self._patched(), self.assertNoLogs("fritz_utils", level="WARNING"):
             fu.validate_config()

@@ -368,6 +368,50 @@ _COMPANION_TTS_MODES = frozenset({"local", "xtts", "off"})
 _COMPANION_TOKEN_MIN_CHARS = 32
 
 
+def _host_zone() -> str:
+    """The host's time zone as an IANA name (tzlocal reads Windows' from the
+    registry), or UTC when it can't be told."""
+    try:
+        from tzlocal import get_localzone_name
+        return get_localzone_name() or "UTC"
+    except Exception:
+        return "UTC"
+
+
+# The zone Fritz keeps time in (plan 14 PR 14, plan 13 Q1): the desk's clock
+# widget now, and the zone a reminder is made in once PR 14's second commit
+# lands. An IANA name, the host's by default. validate_config refuses one it
+# can't load.
+SCHEDULE_TIMEZONE: str = (os.environ.get("SCHEDULE_TIMEZONE") or "").strip() or _host_zone()
+# Where the desk's weather widget is for (PR 14): sent to Open-Meteo, which
+# needs no key, every 15 minutes while a desk asks for weather (every 2 while
+# its fetch fails), with nothing but the units and what to report. Murfreesboro, Tennessee by default, the owner's call;
+# both set empty, there is no weather. Degrees, read by weather_place().
+WEATHER_LATITUDE: str = os.environ.get("WEATHER_LATITUDE", "35.85").strip()
+WEATHER_LONGITUDE: str = os.environ.get("WEATHER_LONGITUDE", "-86.39").strip()
+# fahrenheit (with wind in mph) or celsius (km/h).
+WEATHER_UNIT: str = os.environ.get("WEATHER_UNIT", "fahrenheit").strip().lower()
+_WEATHER_UNITS = frozenset({"fahrenheit", "celsius"})
+
+
+def weather_place() -> tuple[float, float] | None:
+    """WEATHER_LATITUDE and WEATHER_LONGITUDE as degrees, or None when both
+    are empty (no weather). ValueError for one without the other, a number
+    that isn't one, or one off the globe."""
+    lat, lon = WEATHER_LATITUDE, WEATHER_LONGITUDE
+    if not lat and not lon:
+        return None
+    if not lat or not lon:
+        raise ValueError("WEATHER_LATITUDE and WEATHER_LONGITUDE are set together, or both left empty.")
+    try:
+        place = (float(lat), float(lon))
+    except ValueError:
+        raise ValueError(f"WEATHER_LATITUDE={lat!r} and WEATHER_LONGITUDE={lon!r} must be numbers (degrees).") from None
+    if not (-90 <= place[0] <= 90 and -180 <= place[1] <= 180):
+        raise ValueError(f"WEATHER_LATITUDE={lat} or WEATHER_LONGITUDE={lon} is off the globe.")
+    return place
+
+
 def _is_wildcard_bind(host: str) -> bool:
     """True if binding `host` would listen on every interface.
 
@@ -1280,9 +1324,11 @@ def _validate_identity_links() -> None:
 def _validate_companion_knobs() -> None:
     """Plan 14's knobs: the safety rules, and the truth about the rest.
 
-    The three refusals hold whatever is built, because each describes a
+    The refusals hold whatever is built, because each describes a
     configuration that must not exist: a wildcard bind, an enabled companion
-    with no token, and a TTS mode nobody will understand. The warnings say
+    with no token, a TTS mode nobody will understand, and (PR 14) a time zone
+    the machine doesn't know, a weather place that isn't one, and a weather
+    unit that isn't either. The warnings say
     what a setting will not do: a short token, a companion with no server to
     serve it, and the knobs that are set but read by nothing yet.
     """
@@ -1304,6 +1350,20 @@ def _validate_companion_knobs() -> None:
             f"COMPANION_TTS={COMPANION_TTS!r} is not one of "
             f"{', '.join(sorted(_COMPANION_TTS_MODES))}."
         )
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(SCHEDULE_TIMEZONE)
+    except Exception:
+        raise RuntimeError(
+            f"SCHEDULE_TIMEZONE={SCHEDULE_TIMEZONE!r} is not a time zone this machine knows. "
+            "Use an IANA name, such as America/Chicago or Europe/London."
+        ) from None
+    try:
+        weather_place()
+    except ValueError as e:
+        raise RuntimeError(str(e)) from None
+    if WEATHER_UNIT not in _WEATHER_UNITS:
+        raise RuntimeError(f"WEATHER_UNIT={WEATHER_UNIT!r} is not one of {', '.join(sorted(_WEATHER_UNITS))}.")
     log = logging.getLogger(__name__)
     if COMPANION_TOKEN and len(COMPANION_TOKEN) < _COMPANION_TOKEN_MIN_CHARS:
         log.warning(
