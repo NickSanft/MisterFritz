@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "wallpaper",
+  "description": "The study scene's windows behind the icons (built at runtime by wallpaper.rs, one per monitor, labelled wallpaper-<slot>-<n>): the events they listen to (settings:changed, power:display, wallpaper:covered), nothing else. Their app commands (get_settings, power_display, wallpaper_covered) are not ACL-checked without an app manifest, and must be granted here if one is ever added; wallpaper_covered checks the calling window itself. They are never given companion_config, a window's focus call, or anything that moves a window: the shell places them.",
+  "windows": ["wallpaper-*"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}

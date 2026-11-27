@@ -9,9 +9,9 @@ import { Appearance, motionLine } from "./Appearance";
 const DEFAULTS: Theme = parseTheme(fixture.themeDefaults)!;
 const theme = (more: Partial<Theme> = {}): Theme => ({ ...DEFAULTS, ...more });
 
-function mount(t: Theme | null, lessMotion = false) {
+function mount(t: Theme | null, lessMotion = false, wallpaper: boolean | null = t ? true : null) {
   const set = vi.fn();
-  const view = render(() => <Appearance theme={t} lessMotion={lessMotion} set={set} />);
+  const view = render(() => <Appearance theme={t} wallpaper={wallpaper} lessMotion={lessMotion} set={set} />);
   return { view, set };
 }
 
@@ -52,6 +52,28 @@ describe("Settings › Appearance", () => {
       .toHaveAttribute("aria-checked", "true");
   });
 
+  it("shows and sets the study scene behind the icons, on by default", () => {
+    const on = mount(DEFAULTS);
+    const sw = on.view.getByRole("switch", { name: "Study scene behind the icons" });
+    expect(sw).toHaveAttribute("aria-checked", "true");
+    expect(sw.closest(".row")!.textContent).toContain("in place of your wallpaper");
+    fireEvent.click(sw);
+    expect(on.set).toHaveBeenCalledWith("wallpaper.on", false);
+    on.view.unmount();
+    const off = mount(DEFAULTS, false, false);
+    const offSw = off.view.getByRole("switch", { name: "Study scene behind the icons" });
+    expect(offSw).toHaveAttribute("aria-checked", "false");
+    fireEvent.click(offSw);
+    expect(off.set).toHaveBeenCalledWith("wallpaper.on", true);
+    off.view.unmount();
+    // The theme known, the switch not yet: it waits.
+    const waiting = mount(DEFAULTS, false, null);
+    const w = waiting.view.getByRole("switch", { name: "Study scene behind the icons" });
+    expect(w).toBeDisabled();
+    fireEvent.click(w);
+    expect(waiting.set).not.toHaveBeenCalled();
+  });
+
   it("shows motion at the level the windows snap it to", () => {
     const label = { functional: "Functional", ambient: "Ambient", rich: "Rich" } as const;
     for (const [m, level] of fixture.motionSnap as [number, keyof typeof label][]) {
@@ -90,7 +112,7 @@ describe("Settings › Appearance", () => {
   it("shows what the settings say, not what was clicked", () => {
     const set = vi.fn();
     const [t, setT] = createSignal<Theme>(DEFAULTS);
-    const view = render(() => <Appearance theme={t()} lessMotion={false} set={set} />);
+    const view = render(() => <Appearance theme={t()} wallpaper={true} lessMotion={false} set={set} />);
     fireEvent.click(view.getByRole("radio", { name: "Midnight" }));
     expect(set).toHaveBeenCalledWith("theme.mood", "midnight");
     expect(picked(view, "Colour mood")).toBe("Ink + candle");

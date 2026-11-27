@@ -313,6 +313,7 @@ export function App(): JSX.Element {
 
             <Appearance
               theme={settings()?.theme ?? null}
+              wallpaper={settings()?.wallpaper.on ?? null}
               lessMotion={lessMotion()}
               set={(path, value) => void set(path, value, "change that")}
             />

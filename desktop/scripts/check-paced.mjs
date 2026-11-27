@@ -1,15 +1,16 @@
-// Build-time gate for the pages drawn over the owner's desktop: the avatar
-// animates only through the paced setTimeout loop (src/avatar/PacedLoop.ts),
-// and the prompt not at all. requestAnimationFrame, three.js's
-// setAnimationLoop (rAF underneath), the Web Animations API and CSS
-// animations or transitions, set in a stylesheet or from code, all keep
-// Chromium's compositor presenting every vsync, which is the idle GPU cost
-// Spike 0 measures (Lorraine's lesson). For each page in PAGES, it checks our
-// own modules the page loads (scripts/reach.mjs follows its imports, into
-// src/divora and src/shared too) and the page itself. Packages are listed,
-// not read: three.js has rAF paths of its own (setAnimationLoop, which this
-// forbids us to call). Stylesheets are check-no-css-animation.mjs's. Node ESM
-// only, so it runs the same in PowerShell, cmd and CI.
+// Build-time gate for the pages drawn over (or behind) the owner's desktop:
+// the avatar and the study scene animate only through the paced setTimeout
+// loop (src/avatar/PacedLoop.ts), and the prompt not at all.
+// requestAnimationFrame, three.js's setAnimationLoop (rAF underneath), the
+// Web Animations API and CSS animations or transitions, set in a stylesheet
+// or from code, all keep Chromium's compositor presenting every vsync, which
+// is the idle GPU cost Spike 0 measures (Lorraine's lesson). For each page in
+// PAGES, it checks our own modules the page loads (scripts/reach.mjs follows
+// its imports, into src/divora and src/shared too) and the page itself.
+// Packages are listed, not read: three.js has rAF paths of its own
+// (setAnimationLoop, which this forbids us to call). Stylesheets are
+// check-no-css-animation.mjs's. Node ESM only, so it runs the same in
+// PowerShell, cmd and CI.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,10 +43,10 @@ function blankHtmlComments(text) {
 }
 
 /** Each line of `text` (comments aside) that breaks a rule; `html` reads it
- * as the page rather than as a module. */
-export function violations(text, html = false) {
+ * as the page rather than as a module, `jsx` as a .tsx or .jsx one. */
+export function violations(text, html = false, jsx = true) {
   const out = [];
-  (html ? blankHtmlComments(text) : blankComments(text))
+  (html ? blankHtmlComments(text) : blankComments(text, jsx))
     .split("\n")
     .forEach((line, i) => {
       for (const [re, what] of FORBIDDEN) {
@@ -68,7 +69,7 @@ function main() {
     const found = [];
     for (const file of files) {
       const text = fs.readFileSync(file, "utf8");
-      for (const v of violations(text, file.endsWith(".html"))) found.push(`${path.relative(root, file)}:${v}`);
+      for (const v of violations(text, file.endsWith(".html"), /\.[jt]sx$/.test(file))) found.push(`${path.relative(root, file)}:${v}`);
     }
     if (found.length) {
       console.error(`\n${name} may animate only through PacedLoop:\n`);

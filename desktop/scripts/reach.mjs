@@ -13,20 +13,48 @@ import ts from "typescript";
 const CODE = [".ts", ".tsx", ".js", ".mjs"];
 const TRY = [".ts", ".tsx", ".js", ".mjs", ".css", "/index.ts", "/index.tsx"];
 
-/** `text` (TypeScript or JavaScript) with every comment blanked, character
- * for character, so line numbers hold. TypeScript's scanner tells a comment
- * from a string or a template, which no regex can: a `/*` inside a line
- * comment or a string doesn't swallow the code after it. */
+/** `text` (TypeScript or JavaScript, and JSX when `jsx`) with every
+ * comment blanked, character for character, so line numbers hold. The
+ * comments are the TypeScript parser's own: the trivia before each token
+ * it reads, so a `/*` in a string, a template or a regular expression, a
+ * slash that divides or starts a regular expression, and text inside JSX
+ * are all told apart as the compiler tells them, which no regex and no
+ * bare scanner can. (A bare scanner lost its place after a template's
+ * `${...}`.) JSDoc is a comment like any other. */
 export function blankComments(text, jsx = true) {
-  const variant = jsx ? ts.LanguageVariant.JSX : ts.LanguageVariant.Standard;
-  const scanner = ts.createScanner(ts.ScriptTarget.Latest, false, variant, text);
+  const kind = jsx ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const source = ts.createSourceFile(jsx ? "x.tsx" : "x.ts", text, ts.ScriptTarget.Latest, false, kind);
   const out = text.split("");
-  for (let kind = scanner.scan(); kind !== ts.SyntaxKind.EndOfFileToken; kind = scanner.scan()) {
-    if (kind !== ts.SyntaxKind.SingleLineCommentTrivia && kind !== ts.SyntaxKind.MultiLineCommentTrivia) continue;
-    for (let i = scanner.getTokenStart(); i < scanner.getTokenEnd(); i++) {
+  const blank = (pos, end) => {
+    for (let i = pos; i < end; i++) {
       if (out[i] !== "\n" && out[i] !== "\r") out[i] = " ";
     }
-  }
+  };
+  // Reads trivia only, where a comment can't be mistaken for anything else.
+  const trivia = ts.createScanner(ts.ScriptTarget.Latest, false, ts.LanguageVariant.Standard);
+  const visit = (node) => {
+    // JSDoc hangs off the node it documents; its text is the trivia of the
+    // token that follows it, blanked there.
+    if (node.kind >= ts.SyntaxKind.FirstJSDocNode && node.kind <= ts.SyntaxKind.LastJSDocNode) return;
+    // The end of the file is a leaf like any token, though it hands back the
+    // JSDoc found after the last statement as its children.
+    const children = node.kind === ts.SyntaxKind.EndOfFileToken ? [] : node.getChildren(source);
+    if (children.length) {
+      for (const child of children) visit(child);
+      return;
+    }
+    // A token: what lies between its full start and its start is trivia,
+    // whitespace and comments only (JSX text has none: it is all token).
+    const start = node.getStart(source, false);
+    if (start <= node.pos) return;
+    trivia.setText(text, node.pos, start - node.pos);
+    for (let k = trivia.scan(); k !== ts.SyntaxKind.EndOfFileToken; k = trivia.scan()) {
+      if (k === ts.SyntaxKind.SingleLineCommentTrivia || k === ts.SyntaxKind.MultiLineCommentTrivia) {
+        blank(trivia.getTokenStart(), trivia.getTokenEnd());
+      }
+    }
+  };
+  visit(source);
   return out.join("");
 }
 

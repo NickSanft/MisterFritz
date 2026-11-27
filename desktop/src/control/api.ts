@@ -82,6 +82,8 @@ export interface ControlSettings {
   audio: { muted: boolean };
   diagnostics: { foregroundLog: boolean };
   theme: Theme;
+  /** The study scene behind the icons. */
+  wallpaper: { on: boolean };
 }
 
 export interface ModelInfo {
@@ -110,14 +112,16 @@ export function parseSettings(v: unknown): ControlSettings | null {
   const hotkeys = obj(o?.hotkeys);
   const audio = obj(o?.audio);
   const diagnostics = obj(o?.diagnostics);
+  const wallpaper = obj(o?.wallpaper);
   const theme = parseTheme(o?.theme);
   const brain = parseBrain(o?.brain);
-  if (!brain || !avatar || !hotkeys || !audio || !diagnostics || !theme) return null;
+  if (!brain || !avatar || !hotkeys || !audio || !diagnostics || !wallpaper || !theme) return null;
   if (typeof avatar.lookatCursor !== "boolean" || typeof avatar.clicks !== "boolean") return null;
   if (avatar.vrmPath !== null && typeof avatar.vrmPath !== "string") return null;
   if (!HOTKEY_ACTIONS.every((a) => typeof hotkeys[a] === "string")) return null;
   if (typeof audio.muted !== "boolean") return null;
   if (typeof diagnostics.foregroundLog !== "boolean") return null;
+  if (typeof wallpaper.on !== "boolean") return null;
   return {
     brain,
     avatar: { lookatCursor: avatar.lookatCursor, clicks: avatar.clicks, vrmPath: avatar.vrmPath as string | null },
@@ -125,6 +129,7 @@ export function parseSettings(v: unknown): ControlSettings | null {
     audio: { muted: audio.muted },
     diagnostics: { foregroundLog: diagnostics.foregroundLog },
     theme,
+    wallpaper: { on: wallpaper.on },
   };
 }
 

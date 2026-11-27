@@ -216,7 +216,7 @@ pub(crate) mod tests {
 
     /// Every module of the shell, by name, with its source (the mouse
     /// hook's scans read it too).
-    pub(crate) const SOURCES: [(&str, &str); 25] = [
+    pub(crate) const SOURCES: [(&str, &str); 28] = [
         ("audio_in", include_str!("audio_in.rs")),
         ("avatar_state", include_str!("avatar_state.rs")),
         ("companion", include_str!("companion.rs")),
@@ -225,6 +225,7 @@ pub(crate) mod tests {
         ("foreground_log", include_str!("foreground_log.rs")),
         ("hit_shape", include_str!("hit_shape.rs")),
         ("hook", include_str!("hook.rs")),
+        ("host", include_str!("host.rs")),
         ("hotkeys", include_str!("hotkeys.rs")),
         ("keyboard", include_str!("keyboard.rs")),
         ("kokoro_tts", include_str!("kokoro_tts.rs")),
@@ -241,7 +242,9 @@ pub(crate) mod tests {
         ("tray", include_str!("tray.rs")),
         ("tts_phonemize", include_str!("tts_phonemize.rs")),
         ("tts_tokens", include_str!("tts_tokens.rs")),
+        ("wallpaper", include_str!("wallpaper.rs")),
         ("windows_ext", include_str!("windows_ext.rs")),
+        ("workerw", include_str!("workerw.rs")),
     ];
 
     /// A source scan, the honest limit without a window: tauri's and tao's

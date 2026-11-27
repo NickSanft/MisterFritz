@@ -209,6 +209,7 @@ describe("the control window's wire", () => {
     hotkeys: { prompt: "Ctrl+Alt+F", ptt: "Ctrl+Alt+V", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" },
     audio: { inputDevice: null, outputDevice: null, muted: false, ttsVoice: "bm_george" },
     diagnostics: { foregroundLog: false },
+    wallpaper: { on: true },
     theme: { theme: "dark", mood: "ink", accent: "brand", motion: 0.6, grain: true, motionUser: false },
   };
 
@@ -220,6 +221,7 @@ describe("the control window's wire", () => {
       audio: { muted: false },
       diagnostics: { foregroundLog: false },
       theme: { theme: "dark", mood: "ink", accent: "brand", motion: 0.6, grain: true, motionUser: false },
+      wallpaper: { on: true },
     });
     const { prompt: _p, ...noPrompt } = settings.hotkeys;
     expect(parseSettings({ ...settings, hotkeys: noPrompt })).toBeNull();
@@ -238,6 +240,11 @@ describe("the control window's wire", () => {
     expect(parseSettings({ ...settings, avatar: { ...settings.avatar, vrmPath: 3 } })).toBeNull();
     expect(parseSettings({ ...settings, hotkeys: { ...settings.hotkeys, park: null } })).toBeNull();
     expect(parseSettings({ ...settings, diagnostics: {} })).toBeNull();
+    expect(parseSettings({ ...settings, wallpaper: { on: false } })?.wallpaper.on).toBe(false);
+    expect(parseSettings({ ...settings, wallpaper: {} })).toBeNull();
+    expect(parseSettings({ ...settings, wallpaper: { on: "yes" } })).toBeNull();
+    const { wallpaper: _w, ...noWallpaper } = settings;
+    expect(parseSettings(noWallpaper)).toBeNull();
     expect(parseSettings({ ...settings, audio: { ...settings.audio, muted: true } })?.audio.muted).toBe(true);
     expect(parseSettings({ ...settings, audio: { ...settings.audio, muted: "yes" } })).toBeNull();
     const { muted: _m, ...noMuted } = settings.audio;

@@ -18,6 +18,7 @@ mod cursor;
 mod foreground_log;
 mod hit_shape;
 mod hook;
+mod host;
 mod hotkeys;
 mod keyboard;
 mod kokoro_tts;
@@ -32,7 +33,9 @@ mod settings;
 mod tray;
 mod tts_phonemize;
 mod tts_tokens;
+mod wallpaper;
 mod windows_ext;
+mod workerw;
 
 use std::fs::File;
 use std::path::PathBuf;
@@ -189,6 +192,8 @@ pub(crate) fn quit(app: &AppHandle) {
     avatar_state::save_now(app);
     logs::startup("quit from the tray");
     overlay_windows::before_exit(app);
+    // The owner's own wallpaper back before the app has gone.
+    wallpaper::before_exit();
     app.exit(0);
 }
 
@@ -482,6 +487,8 @@ pub(crate) fn change_setting(
     }
     // Clicks on him turned off (or on) take the mouse hook out (or put it in).
     hook::poke();
+    // The study scene turned on or off, or a new mood for its backdrop.
+    wallpaper::poke();
     Ok(after)
 }
 
@@ -563,6 +570,18 @@ async fn mouse_hook_status() -> hook::HookStatus {
 #[tauri::command]
 async fn power_display() -> bool {
     power::display_on()
+}
+
+/// Whether the calling study scene's monitor is covered (another app's
+/// fullscreen window, or the lock screen): for a page that starts after the
+/// last `wallpaper:covered`. Only a wallpaper window is answered.
+#[tauri::command]
+async fn wallpaper_covered(webview: tauri::Webview) -> Result<bool, String> {
+    let label = webview.label();
+    if !wallpaper::is_wallpaper(label) {
+        return Err("only the study scene asks that".to_owned());
+    }
+    Ok(wallpaper::covered(label))
 }
 
 /// The cursor now: for a page that starts after the last `cursor` event
@@ -1342,6 +1361,7 @@ pub fn run() {
             hotkeys_bound,
             mouse_hook_status,
             power_display,
+            wallpaper_covered,
             cursor_now,
             set_parked,
             avatar_model,
@@ -1401,6 +1421,7 @@ pub fn run() {
             }
             cover::start(handle.clone());
             power::start(handle.clone());
+            wallpaper::start(handle.clone());
             avatar_state::start_saver(handle.clone());
             open_avatar(&handle);
             cursor::start(handle.clone());
@@ -1440,6 +1461,12 @@ pub fn run() {
                 }
             } else if window.label() == prompt::LABEL {
                 prompt::on_window_event(window.app_handle(), event);
+            } else if wallpaper::is_wallpaper(window.label()) {
+                // Only the shell takes the study scene down (it destroys,
+                // which asks no one): a close from anyone else is refused.
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                }
             } else if hides_on_close(window.label()) {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
@@ -1516,7 +1543,8 @@ mod tests {
         assert_eq!(events["pttNothing"], super::PTT_NOTHING_EVENT);
         assert_eq!(events["pttClip"], super::PTT_CLIP_EVENT);
         assert_eq!(events["pttLevel"], super::PTT_LEVEL_EVENT);
-        assert_eq!(events.len(), 16, "an event with no Rust half: {events:?}");
+        assert_eq!(events["wallpaperCovered"], crate::wallpaper::COVERED_EVENT);
+        assert_eq!(events.len(), 17, "an event with no Rust half: {events:?}");
         let sorted = |v: &Value| {
             let mut k: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
             k.sort_unstable();

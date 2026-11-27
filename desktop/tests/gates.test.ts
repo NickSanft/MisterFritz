@@ -15,6 +15,8 @@ import { PAGES as PACED_PAGES, violations, targets } from "../scripts/check-pace
 import { PAGES, checkBuilt, cssViolations, inlineCss, sourcePass } from "../scripts/check-no-css-animation.mjs";
 // @ts-expect-error: plain ESM scripts, no types
 import { PINNED, TOKENS, bodyOf, compare, pinnedOf, rewrite, tokenBlock } from "../scripts/sync-divora-tokens.mjs";
+// @ts-expect-error: plain ESM scripts, no types
+import { QUIET_PAGES, inputViolations } from "../scripts/check-no-input.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const rel = (files: string[]) => files.map((f) => path.relative(root, f).replace(/\\/g, "/")).sort();
@@ -70,6 +72,88 @@ describe("what the avatar page loads", () => {
     expect(blanked.split("\n")).toHaveLength(2);
   });
 
+  it("knows where a template's substitution ends, and a regular expression from a division", () => {
+    // After a `${...}`, the template's own text isn't code, and a comment
+    // after the template is still one.
+    const afterSub = blankComments("const q = `(a: ${x}dppx)`;\n// requestAnimationFrame\nrequestAnimationFrame(f);");
+    expect(afterSub.split("\n")[1].trim()).toBe("");
+    expect(afterSub).toContain("requestAnimationFrame(f);");
+    // `/*` in a template's text after a substitution hides nothing.
+    const hiding = blankComments("const s = `a ${b} /* c`;\nrequestAnimationFrame(f);\nconst t = `*/`;");
+    expect(hiding).toContain("requestAnimationFrame(f);");
+    // Nested, and braces inside a substitution.
+    const nested = blankComments("const n = `${ `${a}` + { k: 1 }.k } // x`;\nrequestAnimationFrame(f); // y");
+    expect(nested).toContain("// x`");
+    expect(nested).toContain("requestAnimationFrame(f);");
+    expect(nested).not.toContain("// y");
+    // A brace closed inside a substitution doesn't end it: the comment after
+    // it is still code's.
+    const braced = blankComments("const m = `x${ { a: 1 }.a /* gone */ }y`;");
+    expect(braced).not.toContain("gone");
+    expect(braced).toContain("}y`;");
+    // A regular expression with slashes in it is no comment; a division is
+    // still a division.
+    const re = blankComments("const r = /\\/\\//; requestAnimationFrame(f);\nconst h = a / b; // gone");
+    expect(re).toContain("requestAnimationFrame(f);");
+    expect(re).not.toContain("gone");
+    expect(re).toContain("a / b;");
+    // A division after a non-null `!`, a property named for a keyword, or a
+    // contextual keyword is still one; a regular expression after `return`
+    // or `await` is still one.
+    for (const line of ["const h = canvas.width! / 2;", "const h = get()! / 2;", "const t = e.type / 2;",
+                        "const d = m.default / 2;", "const r = x.return / 2;", "const n = number / 2;",
+                        "const o = of / 2;", "const u = undefined / 2;",
+                        // Unspaced, where only the operand tells it from a regex.
+                        "const h = canvas.width!/2;", "const t = e.type/2;", "const n = number/2;",
+                        "const d = m.default/2;"]) {
+      const out = blankComments(`${line} // gone`);
+      expect(out, line).not.toContain("gone");
+      expect(out, line).toContain(line);
+    }
+    expect(blankComments(String.raw`function f(s) { return /\/\//.test(s) && requestAnimationFrame(f); }`))
+      .toContain("requestAnimationFrame(f);");
+    // JSX: a tag whose last word is a keyword closes with `/>`, and a slash
+    // in its text is no regular expression.
+    for (const jsx of ["const v = <div data-new />; // gone", "const v = <Tab default />; /* gone\n gone */",
+                       "const v = <var />; // gone", "const v = <Tab new default />; // gone",
+                       "const v = <li>Path: / {/* gone */}</li>;"]) {
+      expect(blankComments(jsx), jsx).not.toContain("gone");
+    }
+    expect(blankComments('const v = <Tab default />, s = "a/b", t = "//", g = requestAnimationFrame(f);'))
+      .toContain("requestAnimationFrame(f);");
+    expect(blankComments(String.raw`function f(s) { return />\/*/.test(s) && requestAnimationFrame(f); /* x */ }`))
+      .toContain("requestAnimationFrame(f);");
+    // A regular expression that starts with a space, in a module of either
+    // kind; and JSX text that only looks like a comment is text.
+    for (const jsx of [true, false]) {
+      expect(blankComments('const a = s.split(/ +/); // gone', jsx)).not.toContain("gone");
+      expect(blankComments('const id = name.replace(/ /g, "-"); /* gone */', jsx)).not.toContain("gone");
+    }
+    expect(blankComments("const v = <li>// kept, it is text</li>;")).toContain("// kept, it is text");
+    // A .ts module's `<T>` cast is read as TypeScript, not JSX.
+    expect(blankComments("const n = <number>x; // gone\nrequestAnimationFrame(f);", false)).not.toContain("gone");
+    // Comments after the last statement, a JSDoc among them, and a file
+    // that is only a doc comment.
+    for (const jsx of [true, false]) {
+      expect(blankComments("export const a = 1;\n// requestAnimationFrame was here\n/** end */\n", jsx))
+        .not.toContain("requestAnimation");
+      expect(blankComments("/** requestAnimationFrame */", jsx)).not.toContain("requestAnimation");
+      expect(inputViolations("x;\n/**\n * @typedef {{ onclick: () => void }} H\n */\n", false, jsx)).toEqual([]);
+    }
+    // Blanking keeps every line where it was, so a gate names the right one.
+    const lines = blankComments("/* one\n   two */\r\nrequestAnimationFrame(f); // three\n").split("\n");
+    expect(lines).toHaveLength(4);
+    expect(lines[2]).toBe("requestAnimationFrame(f);         ");
+    expect(lines[1].endsWith("\r")).toBe(true);
+    expect(violations("/* one\n   two */\nrequestAnimationFrame(f);")[0]).toMatch(/^3: /);
+    // Read as a division, this one's `/*` would swallow the code after it.
+    expect(blankComments(String.raw`async function f() { await /\/*/.exec(s); requestAnimationFrame(f); /* x */ }`))
+      .toContain("requestAnimationFrame(f);");
+    expect(violations("const h = w! / 2; const g = \"src/**/*.ts\"; requestAnimationFrame(f);")).toHaveLength(1);
+    expect(violations("const q = `${x}`;\n// requestAnimationFrame here\nrequestAnimationFrame(f);")).toHaveLength(1);
+    expect(inputViolations("const q = `${x}`;\n// el.onclick = go\nel.onclick = go;")).toHaveLength(1);
+  });
+
   it("follows .tsx, and names an import that isn't there", () => {
     const files: Record<string, string> = {
       "/p/page.html": '<script type="module" src="/src/main.ts"></script>',
@@ -94,7 +178,7 @@ describe("what the prompt page loads", () => {
   const r = reached(path.join(root, "prompt.html"), { root });
 
   it("is read by both gates", () => {
-    expect(PAGES).toEqual(["avatar.html", "prompt.html"]);
+    expect(PAGES).toEqual(["avatar.html", "prompt.html", "wallpaper.html"]);
     expect(PACED_PAGES).toBe(PAGES);
     expect(sourcePass("prompt.html").found).toEqual([]);
     const files = rel(targets(path.join(root, "prompt.html")));
@@ -102,7 +186,7 @@ describe("what the prompt page loads", () => {
     expect(files).toContain("src/prompt/main.tsx");
     expect(files).toContain("src/prompt/Prompt.tsx");
     for (const f of targets(path.join(root, "prompt.html"))) {
-      expect(violations(readFileSync(f, "utf8"), f.endsWith(".html")), f).toEqual([]);
+      expect(violations(readFileSync(f, "utf8"), f.endsWith(".html"), /\.[jt]sx$/.test(f)), f).toEqual([]);
     }
   });
 
@@ -129,6 +213,79 @@ describe("what the prompt page loads", () => {
     expect(refused.found[0]).toContain("transition");
     expect(refused.removed).toBe(true);
     expect(existsSync(dist)).toBe(false);
+  });
+});
+
+describe("what the study scene loads", () => {
+  const page = path.join(root, "wallpaper.html");
+  const r = reached(page, { root });
+
+  it("is read by all three gates, and passes them", () => {
+    expect(PAGES).toContain("wallpaper.html");
+    expect(QUIET_PAGES).toEqual(["wallpaper.html"]);
+    expect(r.missing).toEqual([]);
+    expect(sourcePass("wallpaper.html").found).toEqual([]);
+    const files = targets(page);
+    expect(rel(files)).toEqual(expect.arrayContaining([
+      "wallpaper.html", "src/wallpaper/main.ts", "src/wallpaper/scene.ts", "src/wallpaper/backdrop.ts",
+      "src/avatar/PacedLoop.ts", "src/divora/theme.ts",
+    ]));
+    for (const f of files) {
+      const text = readFileSync(f, "utf8");
+      expect(violations(text, f.endsWith(".html"), /\.[jt]sx$/.test(f)), f).toEqual([]);
+      expect(inputViolations(text, f.endsWith(".html"), /\.[jt]sx$/.test(f)), f).toEqual([]);
+    }
+  });
+
+  it("loads only the tokens, and none of the avatar's or the control window's look", () => {
+    expect(rel(r.css)).toEqual(["src/divora/tokens.css"]);
+    const code = rel(r.code);
+    expect(code.some((f: string) => f.startsWith("src/control/"))).toBe(false);
+    expect(code).not.toContain("src/avatar/main.ts");
+    expect(code).not.toContain("src/avatar/VrmActor.ts");
+    expect(code.some((f: string) => f.includes(".test.") || /\/test[A-Z]/.test(f))).toBe(false);
+    expect(r.packages).not.toContain("three");
+  });
+});
+
+describe("the no-input gate", () => {
+  it("forbids every way to take a click, a key or a touch", () => {
+    for (const bad of [
+      '<canvas onclick="go()"></canvas>',
+      "<div onClick={go} />",
+      "<div on:click={go} />",
+      "el.onpointerdown = go;",
+      "el.onmousemove = go;",
+      "const props = { onMouseDown: go };",
+      'window.addEventListener("click", go);',
+      "window.addEventListener('pointermove', go);",
+      "window.addEventListener(`mouseup`, go);",
+      'el.addEventListener("dblclick", go);',
+      'el.addEventListener("contextmenu", go);',
+      'el.addEventListener("wheel", go, { passive: true });',
+      'el.addEventListener("touchstart", go);',
+      'el.addEventListener("dragover", go);',
+      'document.addEventListener("keydown", go);',
+      "el.onkeyup = go;",
+    ]) {
+      expect(inputViolations(bad, bad.startsWith("<")), bad).not.toEqual([]);
+    }
+  });
+
+  it("lets resize, timers, media queries, Tauri's events and comments through", () => {
+    for (const fine of [
+      'window.addEventListener("resize", fit);',
+      'q.addEventListener("change", cb);',
+      "setTimeout(step, 100);",
+      "await listen(POWER_EVENT, (e) => run.setDisplay(e.payload));",
+      "const onTheme = (t) => t;",
+      "// el.addEventListener('click', go) once lived here",
+      "/* onclick */",
+      "const label = 'Clicks on him';",
+    ]) {
+      expect(inputViolations(fine), fine).toEqual([]);
+    }
+    expect(inputViolations("<!-- <div onclick=\"x\"> --><canvas></canvas>", true)).toEqual([]);
   });
 });
 

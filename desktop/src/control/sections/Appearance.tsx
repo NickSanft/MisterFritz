@@ -50,6 +50,8 @@ export function motionLine(t: Theme | null, lessMotion: boolean): string {
 export interface AppearanceProps {
   /** null until the settings have loaded: every control waits. */
   theme: Theme | null;
+  /** The study scene behind the icons; null until the settings have loaded. */
+  wallpaper: boolean | null;
   /** Windows is asking apps for less motion (its Animation effects off). */
   lessMotion: boolean;
   set: (path: string, value: unknown) => void;
@@ -114,6 +116,17 @@ export function Appearance(props: AppearanceProps): JSX.Element {
           on={t()?.motionUser ?? false}
           disabled={off()}
           onChange={(on) => props.set("theme.motionUser", on)}
+        />
+      </Row>
+      <Row
+        title="Study scene behind the icons"
+        desc="His study, in your colour mood, drawn on every monitor in place of your wallpaper. Off gives your wallpaper back."
+      >
+        <Toggle
+          ariaLabel="Study scene behind the icons"
+          on={props.wallpaper ?? false}
+          disabled={props.wallpaper === null}
+          onChange={(on) => props.set("wallpaper.on", on)}
         />
       </Row>
       <Row title="Parchment grain" desc="A paper texture over this window, never over him.">

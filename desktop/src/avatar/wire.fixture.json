@@ -18,7 +18,8 @@
     "pttRefused": "ptt:refused",
     "pttNothing": "ptt:nothing",
     "pttClip": "ptt:clip",
-    "pttLevel": "ptt:level"
+    "pttLevel": "ptt:level",
+    "wallpaperCovered": "wallpaper:covered"
   },
   "hotkeys": {
     "arrange": "avatar:arrange"
@@ -209,6 +210,10 @@
     },
     "powerDisplay": {
       "name": "power_display",
+      "args": []
+    },
+    "wallpaperCovered": {
+      "name": "wallpaper_covered",
       "args": []
     },
     "cursorNow": {

@@ -519,6 +519,12 @@ pub fn covering_app(at: Bounds) -> Option<String> {
     touching(at, &all).into_iter().find_map(covered_monitor)
 }
 
+/// Whether another app's fullscreen window is at `m`'s centre: the study
+/// scene stops drawing on that monitor (`wallpaper.rs`).
+pub fn fullscreen_over(m: Bounds) -> bool {
+    covered_monitor(m).is_some()
+}
+
 /// The window at `m`'s centre, if another app's fullscreen window. Our own
 /// windows (Fritz is click-through, so the point passes through him anyway)
 /// and the shell's never count.

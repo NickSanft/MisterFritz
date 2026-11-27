@@ -3,7 +3,8 @@ import { defineConfig } from "vite";
 import solid from "vite-plugin-solid";
 
 // Multi-page, like Lorraine's: one HTML entry per window: the avatar, the
-// control window (Solid) and the prompt (Solid).
+// control window (Solid), the prompt (Solid) and the study scene behind the
+// icons (one window per monitor).
 export default defineConfig({
   plugins: [solid()],
   clearScreen: false,
@@ -23,6 +24,7 @@ export default defineConfig({
         avatar: fileURLToPath(new URL("./avatar.html", import.meta.url)),
         control: fileURLToPath(new URL("./control.html", import.meta.url)),
         prompt: fileURLToPath(new URL("./prompt.html", import.meta.url)),
+        wallpaper: fileURLToPath(new URL("./wallpaper.html", import.meta.url)),
       },
     },
   },

@@ -88,6 +88,8 @@ pub struct Settings {
     pub hotkeys: Hotkeys,
     /// PR 8 and 10.
     pub audio: Audio,
+    /// PR 12: the study scene behind the icons.
+    pub wallpaper: Wallpaper,
     /// Phase 3: Lorraine's widget positions, by widget id.
     pub widget_layout: BTreeMap<String, WidgetPos>,
     /// Phase 5.
@@ -104,6 +106,7 @@ impl Default for Settings {
             theme: Theme::default(),
             hotkeys: Hotkeys::default(),
             audio: Audio::default(),
+            wallpaper: Wallpaper::default(),
             widget_layout: BTreeMap::new(),
             run_at_startup: false,
             diagnostics: Diagnostics::default(),
@@ -266,6 +269,21 @@ impl Default for Audio {
             muted: false,
             tts_voice: "bm_george".to_owned(),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Wallpaper {
+    /// Fritz's study scene drawn behind the desktop's icons, on every
+    /// monitor (up to four), in place of the owner's own wallpaper. On by
+    /// default (the owner's call); Settings › Appearance turns it off.
+    pub on: bool,
+}
+
+impl Default for Wallpaper {
+    fn default() -> Self {
+        Self { on: true }
     }
 }
 
@@ -906,7 +924,22 @@ mod tests {
         assert!(s.avatar.lookat_cursor && !s.avatar.parked && s.avatar.rect.is_none());
         assert!(s.avatar.clicks, "clicks on him are on by default");
         assert!(!s.diagnostics.foreground_log, "the foreground log is opt-in");
+        assert!(s.wallpaper.on, "the study scene is on by default (the owner's call)");
         validate(&s).unwrap();
+    }
+
+    /// A file from before the study scene has it on; one that turned it off
+    /// keeps it off; a window may turn it either way.
+    #[test]
+    fn the_study_scene_is_a_setting() {
+        let old: Settings = serde_json::from_str(r#"{"version": 2, "theme": {"mood": "dusk"}}"#).unwrap();
+        assert!(old.wallpaper.on);
+        let off: Settings = serde_json::from_str(r#"{"version": 2, "wallpaper": {"on": false}}"#).unwrap();
+        assert!(!off.wallpaper.on);
+        let turned = with_value(&Settings::default(), "wallpaper.on", Value::Bool(false)).unwrap();
+        assert!(!turned.wallpaper.on);
+        assert!(with_value(&turned, "wallpaper.on", Value::Bool(true)).unwrap().wallpaper.on);
+        assert!(with_value(&turned, "wallpaper.on", Value::from("yes")).is_err());
     }
 
     /// The pages read the theme with these defaults in mind (theme.ts,
@@ -958,6 +991,7 @@ mod tests {
         assert!(v["brain"].get("clientId").is_some(), "{v}");
         assert!(v.get("runAtStartup").is_some() && v.get("widgetLayout").is_some(), "{v}");
         assert!(v["diagnostics"].get("foregroundLog").is_some(), "{v}");
+        assert_eq!(v["wallpaper"]["on"], true, "{v}");
     }
 
     #[test]

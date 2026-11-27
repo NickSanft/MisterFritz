@@ -18,6 +18,7 @@ const SETTINGS = {
   hotkeys: { prompt: "Ctrl+Alt+F", ptt: "Ctrl+Alt+V", arrange: "Ctrl+Alt+A", park: "Ctrl+Alt+H" },
   audio: { inputDevice: null, outputDevice: null, muted: false, ttsVoice: "bm_george" },
   diagnostics: { foregroundLog: false },
+  wallpaper: { on: true },
   theme: fixture.themeDefaults,
 };
 /** The mouse hook out while he is hidden, and in. */

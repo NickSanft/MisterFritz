@@ -1,9 +1,9 @@
-// Build-time gate (plan 14 build § 4.3): nothing the avatar page or the
-// prompt loads may animate in CSS. A @keyframes, an animation, a transition
-// or a smooth scroll keeps the compositor presenting every vsync (see
-// check-paced.mjs); the avatar animates only through the paced loop, writing
-// its styles from the tick, and the prompt not at all. Two passes, for each
-// page in PAGES:
+// Build-time gate (plan 14 build § 4.3): nothing the avatar page, the
+// prompt or the study scene loads may animate in CSS. A @keyframes, an
+// animation, a transition or a smooth scroll keeps the compositor presenting
+// every vsync (see check-paced.mjs); the avatar animates only through the
+// paced loop, writing its styles from the tick, the study scene only through
+// it, and the prompt not at all. Two passes, for each page in PAGES:
 // - the source: every stylesheet the page reaches through its imports
 //   (scripts/reach.mjs), and the page's own <style> and style= attributes;
 // - with --dist, after `vite build`: the built page's linked stylesheets
@@ -17,8 +17,9 @@ import { reached } from "./reach.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-/** The pages drawn over the owner's desktop, whose webviews never sleep. */
-export const PAGES = ["avatar.html", "prompt.html"];
+/** The pages drawn over (or behind) the owner's desktop, whose webviews
+ * never sleep. */
+export const PAGES = ["avatar.html", "prompt.html", "wallpaper.html"];
 
 export const FORBIDDEN = [
   [/@keyframes\b/, "a CSS @keyframes animation"],

@@ -10,7 +10,8 @@ the prompt (*Ask Fritz*: Ctrl+Alt+F, a double-click on him, or his menu),
 and a mouse hook that makes his body his to click. That is Phase 1 of the
 build plan, its CI job (PR 7) included. Voice (Phase 2) is under way: PR 8
 gives him ears (push-to-talk, below), which stay shut until his brain can
-hear; the wallpaper and the widgets come after. Spike 0 proved the window
+hear. Phase 3 has begun: his study scene is drawn behind your desktop's
+icons (*The study scene*, below); the widgets come after. Spike 0 proved the window
 ([docs/SPIKE0.md](docs/SPIKE0.md)), and its table is PR 2's acceptance.
 
 ## What it keeps, and where
@@ -347,6 +348,35 @@ away leaves it where you clicked. Its line says whether he can be asked now,
 in Settings' words. Nothing in it moves, and it uses only the text colours
 that read well on its panel in every mood.
 
+## The study scene
+
+Behind your desktop's icons, on every monitor (up to four), Fritz draws his
+study in place of your wallpaper: your colour mood's `--bg` and surfaces as
+one soft light that drifts too slowly to see it move
+([`wallpaper.html`](wallpaper.html), [`src/wallpaper/`](src/wallpaper)). It is
+on by default (`wallpaper.on`); Settings › Appearance › *Study scene behind
+the icons* turns it off, and your own wallpaper is back at once, as it is
+when Fritz quits. It draws 10 frames a second, at your motion level (slower
+at Ambient than Rich, one still frame at Functional), and not at all while
+the display is off, while the PC is locked, or on a monitor another app's
+fullscreen window covers (a game, a video): there it stops without hiding
+anything, so nothing flashes when it comes back. A maximised window doesn't
+stop it. It takes no clicks or keys: the icons above it get them all, and
+`scripts/check-no-input.mjs` keeps input handlers out of its page.
+
+How it gets there ([`wallpaper.rs`](src-tauri/src/wallpaper.rs), plumbing from
+Lorraine): each monitor's page lives in a hidden window of its own. The
+shell asks Explorer for the desktop's wallpaper layer, a `WorkerW` window
+below the icons ([`workerw.rs`](src-tauri/src/workerw.rs)), makes a plain host
+window there for each monitor ([`host.rs`](src-tauri/src/host.rs)) and moves
+the page's WebView2 controller into it. A watch looks every 600 ms, and
+builds a monitor's window anew (its page reloads) when Explorer restarts,
+when the monitor moves, changes size or scale, or is plugged in, and when
+the PC wakes from sleep; an unplugged monitor's goes, and a host the
+desktop's new layout has moved off its monitor is put back. After an Explorer
+restart the scene is back within a few seconds. Another live-wallpaper app
+in the same layer (Wallpaper Engine, Lively) hasn't been tried with it.
+
 ## Build
 
 Node 22.12+, 24 or 26+ (what the locked vitest runs on), pnpm (the version
@@ -370,7 +400,7 @@ The app is `src-tauri/target/release/mister-fritz-desktop.exe`.
   does not compile. Move tauri, tauri-build, tauri-runtime, tauri-runtime-wry
   and tauri-utils together, never one at a time.
 - **The pages are embedded in the exe at compile time**: after any change to
-  a page (`avatar.html`, `control.html`) or under `src/` or `public/`, run
+  a page (`avatar.html`, `control.html`, `prompt.html`, `wallpaper.html`) or under `src/` or `public/`, run
   `pnpm build` *and* the cargo build again.
 - **Quit Fritz before you build.** Windows won't let cargo replace an exe
   that is running, so a build while he is up ends with `error: failed to
@@ -394,15 +424,17 @@ The app is `src-tauri/target/release/mister-fritz-desktop.exe`.
   again. Signing the exe might help, though Microsoft doesn't promise it
   ends this; plan 14's risk table leaves it to consider in Phase 5.
 
-`pnpm build` refuses an avatar page that could animate outside its paced
-loop. `scripts/check-paced.mjs` reads our own modules `avatar.html` reaches
-(`scripts/reach.mjs` follows the imports; packages are listed, not read) for
-requestAnimationFrame, setAnimationLoop, the Web Animations API and motion
-set from code. `scripts/check-no-css-animation.mjs` reads every stylesheet
-the page reaches for @keyframes, animation, transition and smooth
-scrolling, then, after `vite build`, the built page's stylesheets, packages'
-included; a built page it refuses is removed, so the cargo build that
-follows stops rather than embed it. `pnpm sync:divora` compares
+`pnpm build` refuses an avatar, prompt or study-scene page that could
+animate outside its paced loop. `scripts/check-paced.mjs` reads our own
+modules each page reaches (`scripts/reach.mjs` follows the imports;
+packages are listed, not read) for requestAnimationFrame, setAnimationLoop,
+the Web Animations API and motion set from code.
+`scripts/check-no-css-animation.mjs` reads every stylesheet the page
+reaches for @keyframes, animation, transition and smooth scrolling, then,
+after `vite build`, the built page's stylesheets, packages' included; a
+built page it refuses is removed, so the cargo build that follows stops
+rather than embed it. `scripts/check-no-input.mjs` refuses a study-scene
+page that takes a click, a key, a touch or the wheel. `pnpm sync:divora` compares
 `src/divora/tokens.css` with DivoraVoice's tokens at the commit its header
 pins (it reads GitHub, so it isn't part of the build; `--sha <sha> --write`
 takes another commit's tokens and pins it).
@@ -418,7 +450,9 @@ CI's `desktop` job (`.github/workflows/ci.yml`, on `windows-latest`) runs
 both on every push to `master`, every pull request and nightly, with `pnpm install --frozen-lockfile`,
 `pnpm build` and `cargo check` besides, under Rust 1.89, the MSRV. Nothing
 in CI runs the overlay, the hook or WorkerW: [docs/SPIKE0.md](docs/SPIKE0.md)
-is their checklist.
+is the overlay's and the hook's checklist, and the build plan's Phase 3 gate
+(§ 6) the study scene's. The shell's tests make a host window under a plain
+parent, never in the real wallpaper layer.
 
 `FRITZ_SHOW_SETTINGS` set to anything shows the control window at start, for
 a run nobody clicks; set to a section (`brain`, `hotkeys`, `appearance`,

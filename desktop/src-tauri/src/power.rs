@@ -78,12 +78,15 @@ pub fn news(seen: Seen) -> Option<bool> {
 }
 
 /// Start the watch for the app: display changes go to every window as
-/// `power:display`, resumes to the logs.
+/// `power:display`, resumes to the logs and the study scene.
 pub fn start(app: AppHandle) {
     let started = watch(Box::new(move |seen| {
         if seen == Seen::Resumed {
             tracing::info!("resumed from sleep");
             crate::logs::startup("resumed from sleep");
+            // A controller can come back blank after a sleep (Lorraine's
+            // lesson): the study scene is built anew.
+            crate::wallpaper::resumed();
         }
         if let Some(on) = news(seen) {
             tracing::info!(on, "the display turned {}", if on { "on" } else { "off" });
