@@ -508,10 +508,11 @@ def make_list_schedules_tool(user_id: str, schedule_manager) -> BaseTool:
             return f"Failed to retrieve schedules: {e}"
         if not schedules:
             return "You have no active recurring scheduled tasks."
+        from scheduler import when   # a cron's hours, with the zone they are in
         lines = []
         for s in schedules:
             label = f" — {s['description']}" if s["description"] else ""
-            lines.append(f"ID `{s['id']}`{label}: every `{s['schedule']}` → {s['prompt']}")
+            lines.append(f"ID `{s['id']}`{label}: {when(s)} → {s['prompt']}")
         return "\n".join(lines)
 
     return list_my_schedules

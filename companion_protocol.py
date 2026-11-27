@@ -269,9 +269,12 @@ WIDGET_PAYLOADS: dict[str, type[BaseModel]] = {
 
 
 class Reminder(BaseModel):
-    """Phase 3."""
+    """A schedule of this desk's identity has fired (PR 14): its 8-character
+    id (the one /schedule list shows, or the one Fritz gave for a one-shot
+    reminder) and what Fritz said, also posted to its Discord channel when it
+    has one."""
     type: Literal["reminder"] = "reminder"
-    schedule_id: int
+    schedule_id: str
     text: str
 
 

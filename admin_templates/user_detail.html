@@ -99,7 +99,7 @@
             {% for s in own_schedules %}
             <tr>
                 <td><code>{{ s.id }}</code></td>
-                <td><code>{{ s.schedule }}</code></td>
+                <td><code>{{ s.schedule }}</code>{% set zone = s | cron_zone %}{% if zone %} <span class="muted">{{ zone }}</span>{% endif %}</td>
                 <td>{{ s.prompt }}</td>
                 <td>
                     <form class="inline" method="post" action="/schedules/{{ s.id | urlencode }}/cancel"
@@ -153,7 +153,7 @@
             {% for s in data.schedules %}
             <tr>
                 <td><code>{{ s.id }}</code></td>
-                <td><code>{{ s.schedule }}</code></td>
+                <td><code>{{ s.schedule }}</code>{% set zone = s | cron_zone %}{% if zone %} <span class="muted">{{ zone }}</span>{% endif %}</td>
                 <td>{{ s.prompt }}</td>
                 <td>{{ s.description or "" }}</td>
             </tr>

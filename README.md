@@ -16,7 +16,7 @@ Mister Fritz is an AI-powered Discord bot with a sophisticated, sardonic persona
 | Voice Synthesis | Text-to-speech via Coqui XTTS v2 (plays in voice channel or uploads as file) |
 | Vision Analysis | Analyze user-attached images via LLaVA |
 | File Operations | Sandboxed file read/write/edit/search in a workspace of your own (`/workspace enable`); running programs is for admins only |
-| Scheduled tasks | Recurring prompts and one-shot reminders via `/schedule`, delivered in the channel they were set in |
+| Scheduled tasks | Recurring prompts and one-shot reminders via `/schedule`, delivered in the channel they were set in, and to your desktop app when it is connected |
 | Direct-message relay | `/tell @user` carries your exact words to another member by DM, attributed to you; they can reply through Fritz, or refuse with `/relay block`. Off by default — see [Direct-message relay](#direct-message-relay) |
 | Desktop companion | Fritz as a figure on your Windows desktop, asked from a prompt and answering in a bubble, talking to this brain over `/companion` — see [Desktop companion](#desktop-companion) |
 | Card Game | Built-in deck system with success/failure mechanics for tabletop-style play |
@@ -45,7 +45,7 @@ Mister Fritz is an AI-powered Discord bot with a sophisticated, sardonic persona
 | `/workspace set <path>` | (Admin only) Register an arbitrary host path as your workspace |
 | `/forget memories` / `conversation` / `schedules` / `all` | Delete stored data Fritz has about you |
 | `/export` | Download a JSON snapshot of everything Fritz has stored about you |
-| `/schedule add <cron\|interval> <prompt>` | Schedule a recurring prompt in this channel |
+| `/schedule add <cron\|interval> <prompt>` | Schedule a recurring prompt in this channel (a cron's hours are in `SCHEDULE_TIMEZONE`, kept with it) |
 | `/schedule list` / `remove <id>` | See or cancel your schedules |
 | `/schedule list_all` | (Admin only) Schedules across all users |
 | `/tell <member> <message>` | Carry your exact words to that member by DM, attributed to you. On unless `RELAY_ENABLED=false` |
@@ -236,10 +236,10 @@ the host through its bind mount, and Docker Desktop's file sharing may not
 carry the lock across, so stop it (`docker compose stop misterfritz`; its
 `restart: unless-stopped` brings it back after a reboot) before running one
 here; and on a filesystem that cannot lock at all, a brain starts with a
-warning instead of refusing. Schedules do not fire under `main_local.py`,
-because they can only be delivered to Discord. Recurring ones are kept and
-resume once `main_discord.py` is back; a run that falls due in between is
-skipped.
+warning instead of refusing. Schedules do not fire under `main_local.py`:
+it doesn't run the scheduler (plan 14's Q8, left as it is). Recurring ones
+are kept and resume once `main_discord.py` is back; a run that falls due in
+between is skipped.
 
 ```bash
 python main_local.py
@@ -320,7 +320,7 @@ What the brain feeds a desktop app that asks for widgets (plan 14, PR 14): the c
 
 | Variable | Default | Description |
 |---|---|---|
-| `SCHEDULE_TIMEZONE` | the host's zone | The zone Fritz keeps time in: the desk's clock now, and the zone a reminder is made in once plan 14's PR 14 is finished (until then reminders keep the host's zone, as before). An IANA name, such as `America/Chicago`. One the machine doesn't know refuses to start. In Docker the host is the container, so UTC unless you set this (or `TZ`). |
+| `SCHEDULE_TIMEZONE` | the host's zone | The zone Fritz keeps time in: the desk's clock, and the zone a schedule is made in. Each schedule keeps the zone it was made in, so `0 9 * * *` stays 9am there across a daylight-saving change, a move of the host, or a later change to this; `/schedule list` shows it. (On the nights the clocks change, a cron in the hour they go back fires twice, and one in the hour they skip fires an hour late.) A schedule made before Fritz kept zones keeps the host's, as does one whose zone a new host doesn't know. An IANA name, spelled exactly, such as `America/Chicago`. One the machine doesn't know refuses to start. In Docker the host is the container, so UTC unless you set this (or `TZ`). |
 | `WEATHER_LATITUDE` | `35.85` | Where the desk's weather is for, in degrees (Murfreesboro, Tennessee, by default). Sent to [Open-Meteo](https://open-meteo.com) (no key) every 15 minutes while a desk asks for weather (every 2 while the fetch fails), with nothing but the units and what to report. Set it and `WEATHER_LONGITUDE` both empty for no weather; one without the other refuses to start. |
 | `WEATHER_LONGITUDE` | `-86.39` | See `WEATHER_LATITUDE`. |
 | `WEATHER_UNIT` | `fahrenheit` | `fahrenheit` (wind in mph) or `celsius` (km/h). |
@@ -738,7 +738,7 @@ His answers at the desk, typed or spoken, are asked to begin with a mood tag, on
 
 ### Widgets
 
-A desktop app that asks for widgets is fed them by the brain over the same socket, worked out by plain Python, never the model: the **clock** (the brain's time in `SCHEDULE_TIMEZONE`, each minute; the app ticks the seconds), the **weather** (now and today at `WEATHER_LATITUDE` and `WEATHER_LONGITUDE`, from Open-Meteo, each quarter hour, however many desks ask), and **his desk** (the last question and answer at a desk of yours, cut short, with his mood for it, sent again after each turn that ends whole). The last exchange is kept in memory only, so it starts empty when the brain does, and it goes with the conversation when you forget it. The weather is the one widget that reaches the network, and only for the place and the units; each comes with how long it holds (30 minutes from its fetch), a failed fetch is logged once and tried again two minutes later, and a desk going away never cuts off a fetch others are waiting on. The desktop app doesn't show them yet: its wallpaper and widgets are plan 14's PRs 12 and 13.
+A desktop app that asks for widgets is fed them by the brain over the same socket, worked out by plain Python, never the model: the **clock** (the brain's time in `SCHEDULE_TIMEZONE`, each minute; the app ticks the seconds), the **weather** (now and today at `WEATHER_LATITUDE` and `WEATHER_LONGITUDE`, from Open-Meteo, each quarter hour, however many desks ask), and **his desk** (the last question and answer at a desk of yours, cut short, with his mood for it, sent again after each turn that ends whole). The last exchange is kept in memory only, so it starts empty when the brain does, and it goes with the conversation when you forget it. The weather is the one widget that reaches the network, and only for the place and the units; each comes with how long it holds (30 minutes from its fetch), a failed fetch is logged once and tried again two minutes later, and a desk going away never cuts off a fetch others are waiting on. The desktop app doesn't show them yet: its wallpaper and widgets are plan 14's PRs 12 and 13. A reminder you set with `/schedule` (or ask Fritz for on Discord) comes to every desk connected as you, as well as to its channel, when it fires: a desk linked to your Discord identity (`IDENTITY_LINKS`) is you. That needs `main_discord.py` to be the brain the desk talks to, since `main_local.py` runs no reminders; the app doesn't show them yet either.
 
 ### Who the desk is
 
@@ -763,7 +763,7 @@ What the link does, and what it does not:
 
 - **What he remembers of you follows you.** What Fritz remembers from Discord he knows at the desk, and what he learns at the desk he knows on Discord: the facts he keeps, summaries of past conversations, and what he knows of you as a person (your interests and dislikes, how you like to be spoken to). He calls you by the name last recorded for that identity, normally your Discord name; any other account linked to you that has a name of its own (a web login, a Telegram account, a second Discord account) can put its name there in its place, and the desk never does. With no name recorded (on a brain that has only ever run `main_local.py`, say, or after `/forget all`), he uses what follows the dash in your identity: for a Discord one, its number.
 - **The conversation does not.** The desk always has a thread of its own (`<identity>#desktop`), whatever `THREADS_PER_CHANNEL` says. What was said on one surface reaches the other only as what he remembered of it. Two desks linked to one identity share one desk conversation.
-- **No files, commands or reminders at the desk.** A desk turn has the tools every conversation has (the time, the web, the document store, his memories, pictures, dice, and any skills installed) and no others: no workspace, no `execute_command`, no schedules, whoever the desk is linked to.
+- **No files or commands at the desk, and no reminders set there.** A desk turn has the tools every conversation has (the time, the web, the document store, his memories, pictures, dice, and any skills installed) and no others: no workspace, no `execute_command`, no schedules, whoever the desk is linked to. Your reminders do come to a desk linked to you (see [Widgets](#widgets)).
 - **`/forget` covers it.** `/forget conversation` and `/forget all` from Discord, and *Forget everything about …* on your page in the admin panel, clear the desk's conversation with the rest. The desk has no way to forget or export by itself.
 - **What an unlinked desk learned stays behind.** A link changes where the desk reads and writes; it moves nothing. Memories and conversation from before the link stay under `desktop-<id>`, unread, and nothing reaches them while the link stands. If you mean to link a desk, link it before you use it.
 

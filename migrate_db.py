@@ -160,7 +160,8 @@ def _ensure_target_schema(conn: sqlite3.Connection) -> None:
             prompt TEXT NOT NULL,
             schedule_expr TEXT NOT NULL,
             description TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            timezone TEXT
         )
     """)
     conn.execute(

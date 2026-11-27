@@ -305,6 +305,26 @@ class TestUserDetailPage(unittest.TestCase):
         self.assertIn("morning", r.text)  # schedule description rendered
         self.assertIn("7", r.text)         # checkpoint count rendered
 
+    def test_a_crons_zone_on_the_users_page(self):
+        """Plan 14 PR 14: as /schedule list says it."""
+        client = _build_client(schedule_manager=MagicMock())
+        fake_data = {
+            "user_id": "alice", "memories": [], "conversation_checkpoint_count": 0, "workspace_path": None,
+            "schedules": [
+                {"id": "s1", "prompt": "p", "schedule": "0 9 * * *", "description": "", "created": "now",
+                 "timezone": "Asia/Tokyo"},
+                {"id": "s2", "prompt": "p", "schedule": "0 7 * * *", "description": "", "created": "now",
+                 "timezone": None},
+                {"id": "s3", "prompt": "p", "schedule": "1h", "description": "", "created": "now",
+                 "timezone": "Europe/Paris"},
+            ],
+        }
+        with patch.object(privacy, "export_user_data", return_value=fake_data):
+            r = client.get("/users/alice", headers=_auth_header())
+        self.assertIn('<code>0 9 * * *</code> <span class="muted">Asia/Tokyo</span>', r.text)
+        self.assertIn('<code>0 7 * * *</code> <span class="muted">the host&#39;s zone</span>', r.text)
+        self.assertNotIn("Europe/Paris", r.text)
+
 
 class TestALinkedIdentityIsNotItsOwnPerson(unittest.TestCase):
     """IDENTITY_LINKS treats the desk as its owner, and every privacy function
@@ -465,7 +485,8 @@ class TestALinkedIdentityIsNotItsOwnPerson(unittest.TestCase):
                       f"A schedule here still runs, as <code>{self.OWNER}</code>", card)
         self.assertIn('<th>Workspace</th><td><code>/w/alt</code> <span class="muted">(this page cannot disable '
                       'it while the link stays: take the link out, then disable it here)</span>', card)
-        self.assertIn("<td><code>s77</code></td> <td><code>0 9 * * *</code></td> <td>the weather</td>", card)
+        self.assertIn("<td><code>s77</code></td> <td><code>0 9 * * *</code> "
+                      "<span class=\"muted\">the host&#39;s zone</span></td> <td>the weather</td>", card)
         self.assertIn('<form class="inline" method="post" action="/schedules/s77/cancel" '
                       'data-confirm="Cancel schedule s77 for discord-77?">', card)
         self.assertEqual(page.count("<form"), 1)
@@ -782,6 +803,23 @@ class TestSchedulesPage(unittest.TestCase):
         self.assertIn("alice", r.text)
         self.assertIn("bob", r.text)
         self.assertIn("morning", r.text)
+
+    def test_a_crons_zone_is_shown_and_an_intervals_isnt(self):
+        """Plan 14 PR 14: each schedule keeps the zone it was made in."""
+        manager = MagicMock()
+        manager.list_all_schedules.return_value = [
+            {"id": "s1", "user_id": "alice", "prompt": "p1", "schedule": "1h", "description": "",
+             "created": "now", "timezone": "Europe/Paris"},
+            {"id": "s2", "user_id": "bob", "prompt": "weather", "schedule": "0 9 * * *", "description": "",
+             "created": "now", "timezone": "Asia/Tokyo"},
+            {"id": "s3", "user_id": "carol", "prompt": "old", "schedule": "0 7 * * *", "description": "",
+             "created": "now", "timezone": None},
+        ]
+        client = _build_client(schedule_manager=manager)
+        r = client.get("/schedules", headers=_auth_header())
+        self.assertIn("Asia/Tokyo", r.text)
+        self.assertNotIn("Europe/Paris", r.text)
+        self.assertIn("the host&#39;s zone", r.text, "an older cron says whose zone")
 
     def test_empty_state_renders(self):
         manager = MagicMock()

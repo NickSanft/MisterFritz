@@ -21,8 +21,8 @@ What runs, compared with main_discord:
 
 - The brain is loaded at startup, as main_discord loads it at import, so a
   configuration it cannot start with fails here and not on the first message.
-- The scheduler does NOT run (plan 14, Q8): it can only post to Discord until
-  plan 14's DeliverySink (PR 14). A ScheduleManager is still built, and never
+- The scheduler does NOT run (plan 14, Q8, left as it is when PR 14 gave
+  reminders a way to the desk). A ScheduleManager is still built, and never
   started, because the admin panel's Forget, export, /users and /schedules
   reach the stored schedules through it.
 - The relay's retention purge does run, at startup and hourly. The relay is a

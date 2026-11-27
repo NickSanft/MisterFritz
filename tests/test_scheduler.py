@@ -187,7 +187,8 @@ class TestScheduleManagerDB(unittest.TestCase):
         # Insert a row with an invalid schedule_expr directly.
         with sqlite3.connect(self.db_path) as c:
             c.execute(
-                "INSERT INTO schedules VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO schedules (id, user_id, channel_id, guild_id, prompt, schedule_expr, description, "
+                "created_at) VALUES (?,?,?,?,?,?,?,?)",
                 ("badid123", "user1", 111, 999, "ping", "INVALID", None, "2024-01-01T00:00:00+00:00"),
             )
         self.manager.scheduler.reset_mock()
@@ -394,9 +395,13 @@ class RunTaskCase(unittest.IsolatedAsyncioTestCase):
         return cls(response, {"code": 0, "message": "no"})
 
     async def _run(self, manager, scheduler_module, *, answer="the reminder",
-                   raises=None):
-        ask = MagicMock(side_effect=raises) if raises else MagicMock(
-            return_value={"text": answer, "image_paths": []})
+                   raises=None, ask=None):
+        # Imported before sys.modules is patched, or it (and all it brings)
+        # is thrown away with the patch, and a later import builds a second.
+        import companion_api  # noqa: F401
+        if ask is None:
+            ask = MagicMock(side_effect=raises) if raises else MagicMock(
+                return_value={"text": answer, "image_paths": []})
         with patch.dict(sys.modules,
                         {"mister_fritz": MagicMock(ask_stuff=ask)}):
             with patch.object(scheduler_module.identity_store, "display_name",
@@ -474,6 +479,289 @@ class TestAReminderFiresIntoWhateverTheChannelIsNow(RunTaskCase):
         # The placeholder send is call one; the rest are the extra chunks.
         extra = [c.args[0] for c in channel.send.await_args_list[1:]]
         self.assertEqual(len(first) + sum(len(c) for c in extra), 4500)
+
+
+class TestTheZoneItWasMadeIn(unittest.TestCase):
+    """Plan 13 Q1, the owner's call (plan 14 PR 14): one zone, SCHEDULE_TIMEZONE,
+    kept with each schedule, so 9am means 9am there across a daylight-saving
+    change or a move of the host; one made before keeps the host's zone."""
+
+    def setUp(self):
+        fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        self.addCleanup(self._clean)
+
+    def _clean(self):
+        for ext in ("", "-wal", "-shm"):
+            try:
+                os.unlink(self.db_path + ext)
+            except OSError:
+                pass
+
+    def manager(self):
+        manager, module = _make_manager(self.db_path)
+        return manager, module
+
+    def test_a_new_schedule_keeps_the_zone_it_was_made_in(self):
+        import fritz_utils
+        manager, module = self.manager()
+        # A zone no host of this project has, so the host's own can't pass for it.
+        with patch.object(fritz_utils, "SCHEDULE_TIMEZONE", "Pacific/Chatham"):
+            sid = manager.add_schedule("discord-1", 111, 999, "stand up", "0 9 * * *")
+        with patch.object(fritz_utils, "SCHEDULE_TIMEZONE", "Europe/London"):
+            later = manager.add_schedule("discord-1", 111, 999, "tea", "30m")
+        with sqlite3.connect(self.db_path) as c:
+            zones = dict(c.execute("SELECT id, timezone FROM schedules"))
+        self.assertEqual(zones, {sid: "Pacific/Chatham", later: "Europe/London"})
+        trigger = manager.scheduler.add_job.call_args_list[0].kwargs["trigger"]
+        self.assertEqual(str(trigger.timezone), "Pacific/Chatham")
+        listed = {s["id"]: s["timezone"] for s in manager.list_schedules("discord-1")}
+        self.assertEqual(listed, zones)
+        self.assertEqual({s["id"]: s["timezone"] for s in manager.list_all_schedules()}, zones)
+
+    def test_nine_oclock_there_across_daylight_saving(self):
+        from datetime import datetime, timezone as tz
+        manager, module = self.manager()
+        trigger = manager._parse_trigger("0 9 * * *", "America/Chicago")
+        # US daylight saving begins at 2am on Sunday 8 March 2026: the 9am on
+        # the 7th is still standard time, the 9am on the 9th is daylight time.
+        winter = trigger.get_next_fire_time(None, datetime(2026, 3, 6, 16, 0, tzinfo=tz.utc))
+        summer = trigger.get_next_fire_time(None, datetime(2026, 3, 8, 16, 0, tzinfo=tz.utc))
+        self.assertEqual(winter.astimezone(tz.utc).hour, 15)    # 9am CST
+        self.assertEqual(summer.astimezone(tz.utc).hour, 14)    # 9am CDT
+        self.assertEqual((winter.hour, summer.hour), (9, 9))
+
+    def test_restored_in_the_zone_it_was_made_in(self):
+        import fritz_utils
+        manager, module = self.manager()
+        with patch.object(fritz_utils, "SCHEDULE_TIMEZONE", "Asia/Tokyo"):
+            manager.add_schedule("discord-1", 111, 999, "stand up", "0 9 * * *")
+        manager.scheduler.reset_mock()
+        with patch.object(fritz_utils, "SCHEDULE_TIMEZONE", "UTC"):
+            manager.start()
+        restored = [c.kwargs["trigger"] for c in manager.scheduler.add_job.call_args_list
+                    if c.kwargs.get("id") != "_internal_wal_checkpoint"]
+        self.assertEqual([str(t.timezone) for t in restored], ["Asia/Tokyo"])
+
+    def test_a_table_made_before_gains_the_column_and_its_rows_keep_the_hosts_zone(self):
+        with sqlite3.connect(self.db_path) as c:
+            c.execute("""CREATE TABLE schedules (id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+                         channel_id INTEGER NOT NULL, guild_id INTEGER, prompt TEXT NOT NULL,
+                         schedule_expr TEXT NOT NULL, description TEXT, created_at TEXT NOT NULL)""")
+            c.execute("INSERT INTO schedules VALUES ('old00001','discord-1',111,999,'ping','0 9 * * *',NULL,"
+                      "'2024-01-01T00:00:00+00:00')")
+        manager, module = self.manager()
+        with sqlite3.connect(self.db_path) as c:
+            columns = [r[1] for r in c.execute("PRAGMA table_info(schedules)")]
+        self.assertEqual(columns[-1], "timezone")
+        self.assertIsNone(manager.list_schedules("discord-1")[0]["timezone"])
+        manager.start()
+        trigger = next(c.kwargs["trigger"] for c in manager.scheduler.add_job.call_args_list
+                       if c.kwargs.get("id") == "old00001")
+        self.assertEqual(str(trigger.timezone), str(CronTrigger(hour=9).timezone), "the host's, as before")
+        # Whatever SCHEDULE_TIMEZONE says now (a zone neither host has).
+        import fritz_utils
+        manager.scheduler.reset_mock()
+        with patch.object(fritz_utils, "SCHEDULE_TIMEZONE", "Pacific/Chatham"):
+            manager.start()
+        trigger = next(c.kwargs["trigger"] for c in manager.scheduler.add_job.call_args_list
+                       if c.kwargs.get("id") == "old00001")
+        self.assertEqual(str(trigger.timezone), str(CronTrigger(hour=9).timezone))
+        # And made again (another start): the column is there already.
+        self.manager()
+
+    def test_a_zone_this_host_doesnt_know_falls_back_to_the_hosts_and_says_so(self):
+        manager, module = self.manager()
+        with sqlite3.connect(self.db_path) as c:
+            c.execute("INSERT INTO schedules (id, user_id, channel_id, guild_id, prompt, schedule_expr, created_at, "
+                      "timezone) VALUES ('mars0001','discord-1',111,999,'ping','0 9 * * *','now','Mars/Olympus')")
+        with self.assertLogs("scheduler", level="ERROR") as logs:
+            manager.start()
+        trigger = next(c.kwargs["trigger"] for c in manager.scheduler.add_job.call_args_list
+                       if c.kwargs.get("id") == "mars0001")
+        self.assertEqual(str(trigger.timezone), str(CronTrigger(hour=9).timezone))
+        self.assertIn("Mars/Olympus", logs.output[0])
+        # And it is listed in the zone it fires in.
+        listed = next(s for s in manager.list_schedules("discord-1") if s["id"] == "mars0001")
+        self.assertEqual(module.zone_of(listed), "the host's zone")
+
+    def test_an_interval_in_a_zone_this_host_doesnt_know_is_no_error(self):
+        manager, module = self.manager()
+        with sqlite3.connect(self.db_path) as c:
+            c.execute("INSERT INTO schedules (id, user_id, channel_id, guild_id, prompt, schedule_expr, created_at, "
+                      "timezone) VALUES ('int00001','discord-1',111,999,'ping','30m','now','Mars/Olympus')")
+        with self.assertNoLogs("scheduler", level="ERROR"):
+            manager.start()
+        self.assertIn("int00001", {c.kwargs.get("id") for c in manager.scheduler.add_job.call_args_list})
+
+    def test_a_bad_expression_in_an_unknown_zone_is_not_said_to_fire(self):
+        manager, module = self.manager()
+        with sqlite3.connect(self.db_path) as c:
+            c.execute("INSERT INTO schedules (id, user_id, channel_id, guild_id, prompt, schedule_expr, created_at, "
+                      "timezone) VALUES ('bad00002','discord-1',111,999,'ping','INVALID','now','Mars/Olympus')")
+        with self.assertLogs("scheduler", level="WARNING") as logs:
+            manager.start()
+        said = "; ".join(logs.output)
+        self.assertNotIn("fires in the host", said)
+        self.assertIn("Could not restore schedule bad00002", said)
+
+    def test_a_bad_expression_is_not_blamed_on_its_zone(self):
+        manager, module = self.manager()
+        with sqlite3.connect(self.db_path) as c:
+            c.execute("INSERT INTO schedules (id, user_id, channel_id, guild_id, prompt, schedule_expr, created_at, "
+                      "timezone) VALUES ('bad00001','discord-1',111,999,'ping','INVALID','now','America/Chicago')")
+        with self.assertLogs("scheduler", level="WARNING") as logs:
+            manager.start()
+        said = "; ".join(logs.output)
+        self.assertNotIn("doesn't know", said)
+        self.assertIn("bad00001", said)
+        self.assertNotIn("bad00001", {c.kwargs.get("id") for c in manager.scheduler.add_job.call_args_list})
+
+    def test_fritz_says_a_crons_zone_too(self):
+        import agent_tools
+        manager = MagicMock()
+        manager.list_schedules.return_value = [
+            {"id": "abc", "schedule": "0 9 * * *", "description": "", "prompt": "stand up", "timezone": "Asia/Tokyo"}]
+        said = agent_tools.make_list_schedules_tool("discord-1", manager).invoke({})
+        self.assertIn("every `0 9 * * *` (Asia/Tokyo) → stand up", said)
+
+    def test_when_says_a_crons_zone(self):
+        import scheduler
+        self.assertEqual(scheduler.when({"schedule": "0 9 * * *", "timezone": "America/Chicago"}),
+                         "every `0 9 * * *` (America/Chicago)")
+        self.assertEqual(scheduler.when({"schedule": "0 9 * * *", "timezone": None}),
+                         "every `0 9 * * *` (the host's zone)")
+        self.assertEqual(scheduler.when({"schedule": "30m", "timezone": "America/Chicago"}), "every `30m`")
+        self.assertEqual(scheduler.when({"schedule": "0 9 * * *", "timezone": "Mars/Olympus"}),
+                         "every `0 9 * * *` (the host's zone)", "a zone this host can't load isn't the one it fires in")
+
+
+class TestAReminderGoesWhereverItCan(RunTaskCase):
+    """Plan 14 PR 14: through each sink that can take it, the Discord channel
+    first (as before), then every desk connected as its owner."""
+
+    def desks(self, count=1):
+        import companion_api
+        sent = []
+        p1 = patch.object(companion_api, "desks_of", lambda identity: count if identity == "discord-1" else 0)
+        p2 = patch.object(companion_api, "deliver_reminder",
+                          lambda identity, text, sid: sent.append((identity, text, sid)) or count)
+        for p in (p1, p2):
+            p.start()
+            self.addCleanup(p.stop)
+        return sent
+
+    async def test_to_the_channel_and_then_the_desk(self):
+        manager, module = self._manager()
+        channel, status = self._channel()
+        manager.bot.get_channel.return_value = channel
+        sent = self.desks()
+        with self.assertLogs("scheduler", level="INFO") as logs:
+            await self._run(manager, module, answer="Time for tea, sir.")
+        self.assertEqual(status.edit.await_args.kwargs["content"], "Time for tea, sir.")
+        self.assertEqual(sent, [("discord-1", "Time for tea, sir.", "sid1")])
+        self.assertIn("delivered to discord, desk", "; ".join(logs.output))
+
+    async def test_to_the_desk_alone_when_the_channel_is_gone(self):
+        import discord
+        manager, module = self._manager()
+        manager.bot.get_channel.return_value = None
+        manager.bot.fetch_channel = AsyncMock(side_effect=self._discord_error(discord.NotFound, 404))
+        sent = self.desks()
+        with self.assertLogs("scheduler", level="WARNING"):
+            ask = await self._run(manager, module, answer="Stand up, sir.")
+        ask.assert_called_once()
+        self.assertEqual(sent, [("discord-1", "Stand up, sir.", "sid1")])
+
+    async def test_and_with_no_bot_at_all(self):
+        manager, module = self._manager()
+        manager.bot = None
+        sent = self.desks()
+        with self.assertNoLogs("scheduler", level="ERROR"):
+            await self._run(manager, module, answer="Stand up, sir.")
+        self.assertEqual([s[1] for s in sent], ["Stand up, sir."])
+
+    async def test_a_desk_that_connects_while_the_turn_runs_gets_it(self):
+        import discord
+        import companion_api
+        manager, module = self._manager()
+        channel, status = self._channel()
+        manager.bot.get_channel.return_value = channel   # the turn runs for the channel
+        desks = [0]
+        sent = []
+
+        def answering(*a, **k):
+            desks[0] = 1          # a desk connects mid-turn
+            return {"text": "Late, sir.", "image_paths": []}
+
+        with patch.object(companion_api, "desks_of", lambda identity: desks[0]), \
+                patch.object(companion_api, "deliver_reminder", lambda identity, text, sid: sent.append(text) or desks[0]):
+            await self._run(manager, module, ask=MagicMock(side_effect=answering))
+        self.assertEqual(sent, ["Late, sir."])
+
+    async def test_discords_placeholder_goes_up_before_the_turn(self):
+        manager, module = self._manager()
+        channel, status = self._channel()
+        manager.bot.get_channel.return_value = channel
+        self.desks(count=0)
+        seen = []
+
+        def answering(*a, **k):
+            seen.append(channel.send.await_count)
+            return {"text": "Tea, sir.", "image_paths": []}
+
+        await self._run(manager, module, ask=MagicMock(side_effect=answering))
+        self.assertEqual(seen, [1], "the placeholder was up when the turn ran")
+        self.assertIn("Running scheduled task", channel.send.await_args_list[0].args[0])
+
+    async def test_nowhere_to_go_is_not_run(self):
+        import discord
+        manager, module = self._manager()
+        manager.bot.get_channel.return_value = None
+        manager.bot.fetch_channel = AsyncMock(side_effect=self._discord_error(discord.NotFound, 404))
+        self.desks(count=0)
+        with self.assertLogs("scheduler", level="WARNING") as logs:
+            ask = await self._run(manager, module)
+        ask.assert_not_called()
+        self.assertIn("nowhere to go", "; ".join(logs.output))
+
+    async def test_its_owner_as_linked(self):
+        """A desk linked to the Discord user (IDENTITY_LINKS) is that user."""
+        manager, module = self._manager()
+        manager.bot = None
+        seen, delivered = [], []
+        import companion_api
+        linked = patch.object(module, "resolve_identity", lambda uid: "discord-owner" if uid == "discord-1" else uid)
+        counted = patch.object(companion_api, "desks_of", lambda identity: seen.append(identity) or 1)
+        sent = patch.object(companion_api, "deliver_reminder", lambda identity, text, sid: delivered.append(identity) or 1)
+        with linked, counted, sent:
+            await self._run(manager, module)
+        self.assertEqual((seen, delivered), (["discord-owner"], ["discord-owner"]))
+
+    async def test_a_sink_that_fails_leaves_the_others(self):
+        manager, module = self._manager()
+        channel, status = self._channel()
+        manager.bot.get_channel.return_value = channel
+        status.edit = AsyncMock(side_effect=RuntimeError("discord fell over"))
+        sent = self.desks()
+        with self.assertLogs("scheduler", level="ERROR"):
+            await self._run(manager, module, answer="Still, sir.")
+        self.assertEqual([s[1] for s in sent], ["Still, sir."])
+
+    async def test_a_sink_that_fails_to_get_ready_is_left_out(self):
+        manager, module = self._manager()
+        manager.bot.get_channel.side_effect = RuntimeError("cache exploded")
+        sent = self.desks()
+        with self.assertLogs("scheduler", level="ERROR"):
+            ask = await self._run(manager, module, answer="Still, sir.")
+        ask.assert_called_once()
+        self.assertEqual([s[1] for s in sent], ["Still, sir."])
+
+    def test_the_discord_sink_comes_first(self):
+        import scheduler
+        manager = scheduler.ScheduleManager.__new__(scheduler.ScheduleManager)
+        manager.bot = MagicMock()
+        self.assertEqual([s.name for s in manager._sinks(4242)], ["discord", "desk"])
 
 
 class TestRemovalSurvivesAJobThatIsAlreadyGone(unittest.TestCase):

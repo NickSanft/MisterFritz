@@ -151,9 +151,10 @@ To be yourself at the desk, copy the identity from that row into the brain's
 `IDENTITY_LINKS` (`desktop-nick-pc=discord-<your id>`) and restart the
 brain: the row then names your identity. The root README's
 [Desktop companion](../README.md#desktop-companion) section says what a link
-carries and what it doesn't (his memories of you do; the conversation, files
-and reminders don't), and what an unlinked desk leaves behind, so link the
-desk before you talk to him there.
+carries and what it doesn't (his memories of you do, and your reminders come
+to the desk; the conversation and files don't, and no reminder can be set
+there), and what an unlinked desk leaves behind, so link the desk before you
+talk to him there.
 
 A new `brain.clientId` is a new desk to the brain, and an unlinked one.
 What an unlinked desk learned stays under its old id. What a linked one

@@ -616,6 +616,50 @@ class TestEmbedsAndBounds(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(embed, discord.Embed)
         self.assertEqual(len(embed.fields), 1)
 
+    async def test_schedule_add_and_list_say_a_crons_zone(self):
+        """Plan 14 PR 14: a cron's hours mean nothing without the zone they
+        were made in."""
+        manager = MagicMock()
+        manager.add_schedule.return_value = "abc12345"
+        cog = _make_cog(schedule_manager=manager)
+        interaction = _fake_interaction("someone")
+        with patch.object(bot_commands.fritz_utils, "SCHEDULE_TIMEZONE", "America/Chicago"):
+            await cog.schedule_add.callback(cog, interaction, every="0 9 * * *", prompt="hello", description=None)
+        said = interaction.response.send_message.call_args.args[0]
+        self.assertIn("every `0 9 * * *` (America/Chicago)", said)
+        manager.list_schedules.return_value = [
+            {"id": "abc", "schedule": "0 9 * * *", "description": "", "prompt": "p", "timezone": "America/Chicago"},
+            {"id": "def", "schedule": "1h", "description": "", "prompt": "p", "timezone": "America/Chicago"},
+        ]
+        interaction = _fake_interaction("someone")
+        await cog.schedule_list.callback(cog, interaction)
+        names = [f.name for f in interaction.response.send_message.await_args.kwargs["embed"].fields]
+        self.assertEqual(names, ["`abc` · every `0 9 * * *` (America/Chicago)", "`def` · every `1h`"])
+
+    async def test_a_list_field_name_stays_within_discords_256(self):
+        manager = MagicMock()
+        manager.list_schedules.return_value = [
+            {"id": "abc", "schedule": "0 9 * * *", "description": "d" * 300, "prompt": "p",
+             "timezone": "America/Argentina/ComodRivadavia"}]
+        cog = _make_cog(schedule_manager=manager)
+        interaction = _fake_interaction("someone")
+        await cog.schedule_list.callback(cog, interaction)
+        name = interaction.response.send_message.await_args.kwargs["embed"].fields[0].name
+        self.assertEqual(len(name), 256)
+        self.assertTrue(name.startswith("`abc` · every `0 9 * * *` (America/Argentina/ComodRivadavia)"))
+
+    async def test_list_all_says_a_crons_zone(self):
+        manager = MagicMock()
+        manager.list_all_schedules.return_value = [
+            {"id": "abc", "user_id": "discord-1", "schedule": "0 9 * * *", "description": "", "prompt": "p",
+             "timezone": "America/Chicago"}]
+        cog = _make_cog(schedule_manager=manager)
+        with _patch_admins(root=FAKE_IDENTITY):
+            interaction = _fake_interaction(ROOT_NAME)
+            await cog.schedule_list_all.callback(cog, interaction)
+        said = interaction.response.send_message.call_args.args[0]
+        self.assertIn("every `0 9 * * *` (America/Chicago)", said)
+
     async def test_schedule_list_caps_at_25_fields(self):
         # Discord rejects an embed with more than 25 fields outright.
         manager = MagicMock()

@@ -288,7 +288,7 @@
         "why": "reminder",
         "frame": {
           "type": "reminder",
-          "schedule_id": 7,
+          "schedule_id": "3f9c2a1b",
           "text": "Good evening, sir."
         }
       },
@@ -1539,18 +1539,10 @@
         }
       },
       {
-        "why": "reminder.schedule_id: a string for an int",
+        "why": "reminder.schedule_id: a number for a string",
         "frame": {
           "type": "reminder",
-          "schedule_id": "1",
-          "text": "Good evening, sir."
-        }
-      },
-      {
-        "why": "reminder.schedule_id: a fraction for an int",
-        "frame": {
-          "type": "reminder",
-          "schedule_id": 1.5,
+          "schedule_id": 1,
           "text": "Good evening, sir."
         }
       },
@@ -1558,14 +1550,14 @@
         "why": "reminder without text",
         "frame": {
           "type": "reminder",
-          "schedule_id": 7
+          "schedule_id": "3f9c2a1b"
         }
       },
       {
         "why": "reminder.text: null where null isn't allowed",
         "frame": {
           "type": "reminder",
-          "schedule_id": 7,
+          "schedule_id": "3f9c2a1b",
           "text": null
         }
       },
@@ -1573,7 +1565,7 @@
         "why": "reminder.text: a number for a string",
         "frame": {
           "type": "reminder",
-          "schedule_id": 7,
+          "schedule_id": "3f9c2a1b",
           "text": 1
         }
       },

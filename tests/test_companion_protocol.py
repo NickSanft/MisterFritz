@@ -176,6 +176,12 @@ class TestTheServerFrames(unittest.TestCase):
         with self.assertRaises(ValidationError):
             cp.Error(code="oops", text="x")
 
+    def test_a_reminder_names_its_schedule_by_its_id(self):
+        frame = cp.parse_server_frame(json.dumps({"type": "reminder", "schedule_id": "3f9c2a1b", "text": "Tea."}))
+        self.assertEqual((type(frame), frame.schedule_id), (cp.Reminder, "3f9c2a1b"))
+        with self.assertRaises(ValidationError):
+            cp.Reminder.model_validate({"schedule_id": 7, "text": "Tea."}, strict=True)
+
     def test_a_mood_must_be_one_of_his(self):
         for mood in ("dry", "pleased", "alarmed", "weary"):
             frame = cp.parse_server_frame(json.dumps({"type": "mood", "turn_id": "t1", "mood": mood}))

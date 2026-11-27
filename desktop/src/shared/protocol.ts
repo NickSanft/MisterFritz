@@ -194,11 +194,14 @@ export interface Widget {
 }
 
 /**
- * Phase 3.
+ * A schedule of this desk's identity has fired (PR 14): its 8-character
+ * id (the one /schedule list shows, or the one Fritz gave for a one-shot
+ * reminder) and what Fritz said, also posted to its Discord channel when it
+ * has one.
  */
 export interface Reminder {
   type: "reminder";
-  schedule_id: number;
+  schedule_id: string;
   text: string;
 }
 
@@ -330,7 +333,7 @@ const SERVER_CHECKS: ReadonlyMap<string, Check> = new Map<string, Check>([
   ["done", shape({ type: oneOf(["done"]), turn_id: str, text: str, images: listOf(str), interrupted: bool })],
   ["error", shape({ type: oneOf(["error"]), turn_id: orNull(str), code: oneOf(ERROR_CODE_VALUES), text: str })],
   ["widget", shape({ type: oneOf(["widget"]), name: str, payload: isObj, ttl_s: int })],
-  ["reminder", shape({ type: oneOf(["reminder"]), schedule_id: int, text: str })],
+  ["reminder", shape({ type: oneOf(["reminder"]), schedule_id: str, text: str })],
   ["ping", shape({ type: oneOf(["ping"]), t: int })],
   ["pong", shape({ type: oneOf(["pong"]), t: int })],
 ]);

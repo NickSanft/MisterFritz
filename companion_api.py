@@ -79,6 +79,11 @@ fails), each by a task of its own, so the clock never waits on the weather,
 all gone with the session; `desk` (the identity's last exchange at a desk) is
 sent at once and again to every desk of the identity that wants it after each
 turn that ends whole, unless the conversation was forgotten meanwhile.
+
+Reminders (PR 14): a schedule that fires is sent, after its Discord channel,
+to every desk connected as its owner (scheduler.CompanionSink), as a
+`reminder` frame with its id and what Fritz said; from the scheduler's loop
+to each session's own.
 """
 from __future__ import annotations
 
@@ -107,7 +112,8 @@ import widgets
 from companion_protocol import (CLOSE_BAD_FRAME, CLOSE_BAD_TOKEN, CLOSE_FULL, CLOSE_GONE_QUIET,
                                 CLOSE_NO_HELLO, CLOSE_UNSUPPORTED, PROTOCOL_VERSION, AudioEnd, BadFrame,
                                 Cancel, Done, Error, Hello, Mood, Ping, Pong, Progress, Say, Speak,
-                                State, Stt, Subscribe, Token, Welcome, Widget, parse_client_frame)
+                                Reminder, State, Stt, Subscribe, Token, Welcome, Widget,
+                                parse_client_frame)
 from fritz_utils import MessageSource, canonical_user_id, resolve_identity
 from observability import audit_log
 
@@ -542,6 +548,29 @@ def _desk_changed(identity: str) -> None:
 
 
 widgets.watch(_desk_changed)
+
+
+def _desks(identity: str) -> list[_Session]:
+    with _SESSIONS_LOCK:
+        return [s for s in _SESSIONS if s.identity == identity]
+
+
+def desks_of(identity: str) -> int:
+    """How many desks are connected as `identity` (resolved, as a session's
+    is)."""
+    return len(_desks(identity))
+
+
+def deliver_reminder(identity: str, text: str, schedule_id: str) -> int:
+    """Schedule `schedule_id`'s reminder to every desk connected as
+    `identity`, each on its own loop (the scheduler runs on another): how many
+    it went to."""
+    desks = _desks(identity)
+    for s in desks:
+        s.send_from_thread(Reminder(schedule_id=schedule_id, text=text))
+    if desks:
+        logger.info("companion: reminder %s sent to %d desk(s)", schedule_id, len(desks))
+    return len(desks)
 
 
 def _turn_id_near_an_end(raw: str) -> str | None:

@@ -7,14 +7,30 @@ all persisted schedules are re-registered with APScheduler.
 Supported schedule expressions:
   Interval:  '30m', '2h', '1d'
   Cron:      '0 9 * * *'  (minute hour day month day_of_week)
+
+A cron's hours are in the zone the schedule was made in (plan 14 PR 14,
+plan 13 Q1): SCHEDULE_TIMEZONE at the time, kept in its row, so a reminder
+keeps meaning 9am there across a daylight-saving change or a move of the
+host. One made before the column existed has none, and keeps the host's
+zone, as it always had; one whose zone this host can't load keeps the
+host's too, and says so. On the nights the clocks change, APScheduler fires
+a cron in the hour they go back twice, and one in the hour they skip an hour
+late.
+
+Where a reminder goes (plan 14 PR 14): through each DeliverySink that can
+take it, the Discord channel first (today's path, so nothing changes with no
+desk connected), then every desktop app connected as the schedule's owner
+(companion_api, a `reminder` frame), including one that connected while the
+turn ran. A reminder with nowhere to go when it fires is not run.
 """
 import asyncio
+import functools
 import logging
 import re
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Protocol
 
 import discord
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -22,12 +38,119 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from fritz_utils import MAX_SCHEDULES_PER_USER, SCHEDULE_DB, SCHEDULE_MIN_DELAY_MIN, MessageSource
+import fritz_utils
+from fritz_utils import MAX_SCHEDULES_PER_USER, SCHEDULE_DB, SCHEDULE_MIN_DELAY_MIN, MessageSource, resolve_identity
 import identity_store
 
 logger = logging.getLogger(__name__)
 
 _INTERVAL_RE = re.compile(r'^(\d+)([mhd])$')
+
+# Discord refuses a message over this many characters.
+_DISCORD_MAX_CHARS = 2000
+
+
+def is_cron(schedule_expr: str) -> bool:
+    return len(schedule_expr.strip().split()) == 5
+
+
+@functools.lru_cache(maxsize=64)
+def zone_loads(zone: str) -> bool:
+    """Whether this host knows `zone`."""
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(zone)
+        return True
+    except Exception:
+        return False
+
+
+def zone_of(schedule: dict) -> str | None:
+    """The zone a cron's hours are in, as people read it: its own, or the
+    host's (one made before zones were kept, or one whose zone this host
+    doesn't know, which start() runs in the host's); None for an interval,
+    which has none."""
+    if not is_cron(schedule["schedule"]):
+        return None
+    zone = schedule.get("timezone")
+    return zone if zone and zone_loads(zone) else "the host's zone"
+
+
+def when(schedule: dict) -> str:
+    """A schedule's "every …" as people read it: a cron with its zone (its
+    hours mean nothing without one), an interval as it is."""
+    every = f"every `{schedule['schedule']}`"
+    zone = zone_of(schedule)
+    return every if zone is None else f"{every} ({zone})"
+
+
+class DeliverySink(Protocol):
+    """Somewhere a reminder can go (plan 14 PR 14). `ready` says whether it
+    can take this one now (and gets ready for it: Discord's placeholder);
+    `deliver` hands it the answer, and says whether it went."""
+
+    name: str
+
+    async def ready(self, identity: str, schedule_id: str) -> bool: ...
+
+    async def deliver(self, identity: str, text: str, *, schedule_id: str) -> bool: ...
+
+
+class DiscordChannelSink:
+    """The schedule's Discord channel, as before: a placeholder while the turn
+    runs, then the answer in it, in chunks Discord takes. A channel the cache
+    has lost is fetched; one gone, or no longer readable, can't take it."""
+
+    name = "discord"
+
+    def __init__(self, bot, channel_id: int):
+        self.bot, self.channel_id = bot, channel_id
+        self.channel = None
+        self.status = None
+
+    async def ready(self, identity: str, schedule_id: str) -> bool:
+        if self.bot is None:
+            return False
+        channel = self.bot.get_channel(self.channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(self.channel_id)
+            except discord.NotFound:
+                logger.warning("Channel %d not found for schedule %s", self.channel_id, schedule_id)
+                return False
+            except discord.Forbidden:
+                logger.warning("No permission to access channel %d for schedule %s", self.channel_id, schedule_id)
+                return False
+        self.channel = channel
+        self.status = await channel.send("⏰ *Running scheduled task...*")
+        return True
+
+    async def deliver(self, identity: str, text: str, *, schedule_id: str) -> bool:
+        chunks = [text[i:i + _DISCORD_MAX_CHARS] for i in range(0, len(text), _DISCORD_MAX_CHARS)]
+        if not chunks:
+            return False
+        await self.status.edit(content=chunks[0])
+        for chunk in chunks[1:]:
+            await self.channel.send(chunk)
+        return True
+
+
+class CompanionSink:
+    """Every desktop app connected as the schedule's owner (companion_api):
+    a `reminder` frame to each. None connected when it fires, it can't take
+    it; but it is still asked to deliver (`late`), for a desk that connected
+    while the turn ran, and finds the desks connected then."""
+
+    name = "desk"
+    late = True
+
+    async def ready(self, identity: str, schedule_id: str) -> bool:
+        import companion_api
+        return companion_api.desks_of(identity) > 0
+
+    async def deliver(self, identity: str, text: str, *, schedule_id: str) -> bool:
+        import companion_api
+        return companion_api.deliver_reminder(identity, text, schedule_id) > 0
 
 
 class ScheduleManager:
@@ -50,16 +173,23 @@ class ScheduleManager:
                     prompt TEXT NOT NULL,
                     schedule_expr TEXT NOT NULL,
                     description TEXT,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    timezone TEXT
                 )
             """)
+            # A table made before the zone was kept (plan 14 PR 14): its rows
+            # have none, and keep the host's zone.
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(schedules)")}
+            if "timezone" not in columns:
+                conn.execute("ALTER TABLE schedules ADD COLUMN timezone TEXT")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_schedules_user_id ON schedules(user_id)"
             )
             conn.commit()
 
-    def _parse_trigger(self, schedule_expr: str):
-        """Parse a schedule expression into an APScheduler trigger.
+    def _parse_trigger(self, schedule_expr: str, zone: str | None = None):
+        """Parse a schedule expression into an APScheduler trigger, a cron's
+        hours in `zone` (None: the host's).
 
         Raises ValueError if the expression is not recognised.
         """
@@ -79,6 +209,7 @@ class ScheduleManager:
             return CronTrigger(
                 minute=minute, hour=hour, day=day,
                 month=month, day_of_week=day_of_week,
+                timezone=zone,
             )
 
         raise ValueError(
@@ -87,23 +218,29 @@ class ScheduleManager:
             "or a 5-part cron expression like '0 9 * * *'."
         )
 
+    def _sinks(self, channel_id: int) -> list[DeliverySink]:
+        """Where a reminder may go, in order: its Discord channel first, so a
+        reminder with no desk connected goes as it always did."""
+        return [DiscordChannelSink(self.bot, channel_id), CompanionSink()]
+
     async def _run_task(self, schedule_id: str, user_id: str, channel_id: int, prompt: str):
-        """Execute a scheduled task and deliver the result to the Discord channel."""
+        """Execute a scheduled task and deliver the result through every sink
+        that can take it: the Discord channel, then the owner's desks."""
         from mister_fritz import ask_stuff
 
         logger.info("Running scheduled task %s for %s", schedule_id, user_id)
-        channel = self.bot.get_channel(channel_id)
-        if channel is None:
+        identity = resolve_identity(user_id)
+        sinks, ready = self._sinks(channel_id), []
+        for sink in sinks:
             try:
-                channel = await self.bot.fetch_channel(channel_id)
-            except discord.NotFound:
-                logger.warning("Channel %d not found for schedule %s — skipping", channel_id, schedule_id)
-                return
-            except discord.Forbidden:
-                logger.warning("No permission to access channel %d for schedule %s — skipping", channel_id, schedule_id)
-                return
-
-        status_msg = await channel.send("⏰ *Running scheduled task...*")
+                if await sink.ready(identity, schedule_id):
+                    ready.append(sink)
+            except Exception:
+                logger.exception("Schedule %s: the %s sink failed to get ready", schedule_id, sink.name)
+        if not ready:
+            logger.warning("Schedule %s has nowhere to go (channel %d unreachable, no desk of its owner "
+                           "connected) — skipping", schedule_id, channel_id)
+            return
 
         loop = asyncio.get_running_loop()
         try:
@@ -130,11 +267,15 @@ class ScheduleManager:
             logger.exception("Scheduled task %s failed", schedule_id)
             text = f"❌ Scheduled task failed: {e}"
 
-        chunks = [text[i:i + 2000] for i in range(0, len(text), 2000)]
-        if chunks:
-            await status_msg.edit(content=chunks[0])
-            for chunk in chunks[1:]:
-                await channel.send(chunk)
+        delivered = []
+        # Those that were ready, and those that look again as they deliver.
+        for sink in [s for s in sinks if s in ready or getattr(s, "late", False)]:
+            try:
+                if await sink.deliver(identity, text, schedule_id=schedule_id):
+                    delivered.append(sink.name)
+            except Exception:
+                logger.exception("Schedule %s: the %s sink failed to deliver", schedule_id, sink.name)
+        logger.info("Schedule %s delivered to %s", schedule_id, ", ".join(delivered) or "nowhere")
 
     def add_schedule(
         self,
@@ -150,7 +291,8 @@ class ScheduleManager:
         Raises ValueError on bad schedule_expr or when the user is already at
         MAX_SCHEDULES_PER_USER.
         """
-        trigger = self._parse_trigger(schedule_expr)  # raises ValueError on invalid
+        zone = fritz_utils.SCHEDULE_TIMEZONE
+        trigger = self._parse_trigger(schedule_expr, zone)  # raises ValueError on invalid
 
         with sqlite3.connect(SCHEDULE_DB) as conn:
             (existing,) = conn.execute(
@@ -165,9 +307,10 @@ class ScheduleManager:
             schedule_id = str(uuid.uuid4())[:8]
             now = datetime.now(timezone.utc).isoformat()
             conn.execute(
-                "INSERT INTO schedules VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO schedules (id, user_id, channel_id, guild_id, prompt, schedule_expr, "
+                "description, created_at, timezone) VALUES (?,?,?,?,?,?,?,?,?)",
                 (schedule_id, user_id, channel_id, guild_id, prompt,
-                 schedule_expr, description or None, now),
+                 schedule_expr, description or None, now, zone),
             )
             conn.commit()
 
@@ -177,7 +320,7 @@ class ScheduleManager:
             args=[schedule_id, user_id, channel_id, prompt],
             id=schedule_id,
         )
-        logger.info("Added schedule %s for %s: %s", schedule_id, user_id, schedule_expr)
+        logger.info("Added schedule %s for %s: %s (%s)", schedule_id, user_id, schedule_expr, zone)
         return schedule_id
 
     def remove_schedule(self, schedule_id: str, user_id: str) -> bool:
@@ -252,7 +395,7 @@ class ScheduleManager:
         """Return all schedules belonging to user_id."""
         with sqlite3.connect(SCHEDULE_DB) as conn:
             rows = conn.execute(
-                "SELECT id, prompt, schedule_expr, created_at, description "
+                "SELECT id, prompt, schedule_expr, created_at, description, timezone "
                 "FROM schedules WHERE user_id = ? ORDER BY created_at",
                 (user_id,),
             ).fetchall()
@@ -263,6 +406,7 @@ class ScheduleManager:
                 "schedule": r[2],
                 "created": r[3],
                 "description": r[4] or "",
+                "timezone": r[5],
             }
             for r in rows
         ]
@@ -307,7 +451,7 @@ class ScheduleManager:
         """Return every schedule across all users. Admin / observability use."""
         with sqlite3.connect(SCHEDULE_DB) as conn:
             rows = conn.execute(
-                "SELECT id, user_id, prompt, schedule_expr, created_at, description "
+                "SELECT id, user_id, prompt, schedule_expr, created_at, description, timezone "
                 "FROM schedules ORDER BY created_at"
             ).fetchall()
         return [
@@ -318,6 +462,7 @@ class ScheduleManager:
                 "schedule": r[3],
                 "created": r[4],
                 "description": r[5] or "",
+                "timezone": r[6],
             }
             for r in rows
         ]
@@ -347,13 +492,18 @@ class ScheduleManager:
         """Start the scheduler and restore all persisted schedules from SQLite."""
         with sqlite3.connect(SCHEDULE_DB) as conn:
             rows = conn.execute(
-                "SELECT id, user_id, channel_id, prompt, schedule_expr FROM schedules"
+                "SELECT id, user_id, channel_id, prompt, schedule_expr, timezone FROM schedules"
             ).fetchall()
 
         restored = 0
-        for schedule_id, user_id, channel_id, prompt, schedule_expr in rows:
+        for schedule_id, user_id, channel_id, prompt, schedule_expr, zone in rows:
             try:
-                trigger = self._parse_trigger(schedule_expr)
+                # A cron made in a zone this host doesn't know (made on
+                # another host, say) fires in the host's, rather than never
+                # again. An interval has no zone to miss; a bad expression is
+                # another matter, and goes to the warning below.
+                unknown = zone is not None and is_cron(schedule_expr) and not zone_loads(zone)
+                trigger = self._parse_trigger(schedule_expr, None if unknown else zone)
                 self.scheduler.add_job(
                     self._run_task,
                     trigger=trigger,
@@ -362,6 +512,9 @@ class ScheduleManager:
                     replace_existing=True,
                 )
                 restored += 1
+                if unknown:
+                    logger.error("Schedule %s was made in %r, which this host doesn't know: it fires in the "
+                                 "host's zone until it is made again", schedule_id, zone)
             except Exception as e:
                 logger.warning("Could not restore schedule %s: %s", schedule_id, e)
 

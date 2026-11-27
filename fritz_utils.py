@@ -370,18 +370,24 @@ _COMPANION_TOKEN_MIN_CHARS = 32
 
 def _host_zone() -> str:
     """The host's time zone as an IANA name (tzlocal reads Windows' from the
-    registry), or UTC when it can't be told."""
+    registry), or UTC when it can't be told. A Linux /etc/localtime linked
+    into zoneinfo's posix/ or right/ trees names the zone with that prefix,
+    which isn't its name."""
     try:
         from tzlocal import get_localzone_name
-        return get_localzone_name() or "UTC"
+        name = get_localzone_name() or "UTC"
     except Exception:
         return "UTC"
+    for tree in ("posix/", "right/"):
+        if name.startswith(tree):
+            name = name[len(tree):]
+    return name
 
 
 # The zone Fritz keeps time in (plan 14 PR 14, plan 13 Q1): the desk's clock
-# widget now, and the zone a reminder is made in once PR 14's second commit
-# lands. An IANA name, the host's by default. validate_config refuses one it
-# can't load.
+# widget, and the zone a schedule is made in (scheduler keeps it in the row).
+# An IANA name, the host's by default. validate_config refuses one it can't
+# load.
 SCHEDULE_TIMEZONE: str = (os.environ.get("SCHEDULE_TIMEZONE") or "").strip() or _host_zone()
 # Where the desk's weather widget is for (PR 14): sent to Open-Meteo, which
 # needs no key, every 15 minutes while a desk asks for weather (every 2 while
@@ -1351,12 +1357,17 @@ def _validate_companion_knobs() -> None:
             f"{', '.join(sorted(_COMPANION_TTS_MODES))}."
         )
     try:
-        from zoneinfo import ZoneInfo
+        from zoneinfo import ZoneInfo, available_timezones
         ZoneInfo(SCHEDULE_TIMEZONE)
+        # Spelled exactly: Windows finds America/chicago (its files are
+        # case-blind), and a schedule kept in that name wouldn't load on Linux.
+        known = SCHEDULE_TIMEZONE in available_timezones() or SCHEDULE_TIMEZONE == "UTC"
     except Exception:
+        known = False
+    if not known:
         raise RuntimeError(
-            f"SCHEDULE_TIMEZONE={SCHEDULE_TIMEZONE!r} is not a time zone this machine knows. "
-            "Use an IANA name, such as America/Chicago or Europe/London."
+            f"SCHEDULE_TIMEZONE={SCHEDULE_TIMEZONE!r} is not a time zone this machine knows, spelled "
+            "exactly. Use an IANA name, such as America/Chicago or Europe/London."
         ) from None
     try:
         weather_place()

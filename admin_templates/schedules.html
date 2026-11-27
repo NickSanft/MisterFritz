@@ -17,7 +17,7 @@
             <tr>
                 <td><code>{{ s.id }}</code></td>
                 <td><a href="/users/{{ s.user_id }}"><code>{{ s.user_id }}</code></a></td>
-                <td><code>{{ s.schedule }}</code></td>
+                <td><code>{{ s.schedule }}</code>{% set zone = s | cron_zone %}{% if zone %} <span class="muted">{{ zone }}</span>{% endif %}</td>
                 <td>{{ s.prompt | truncate(80) }}</td>
                 <td>{{ s.description or "" }}</td>
                 <td class="muted">{{ s.created }}</td>

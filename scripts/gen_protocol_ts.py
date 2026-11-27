@@ -97,7 +97,7 @@ SAMPLE_BY_MODEL = {
     ("Ping", "t"): 1763112000000,
     ("Pong", "t"): 1763112000000,
     ("Widget", "ttl_s"): 600,
-    ("Reminder", "schedule_id"): 7,
+    ("Reminder", "schedule_id"): "3f9c2a1b",
     ("ClockPayload", "now"): "2026-11-26T21:15:00-06:00",
     ("ClockPayload", "zone"): "America/Chicago",
     ("WeatherPayload", "code"): 2,

@@ -80,6 +80,7 @@ from fritz_utils import (
 )
 import identity_store
 from observability import audit_log, get_health_snapshot
+from scheduler import zone_of as _schedule_zone
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +242,8 @@ def _csp_nonce(request: Request) -> str:
 
 
 templates.env.globals["csp_nonce"] = _csp_nonce
+# A cron's zone, as the bot's /schedule list says it (plan 14 PR 14).
+templates.env.filters["cron_zone"] = _schedule_zone
 
 
 def _unauthorized() -> Response:

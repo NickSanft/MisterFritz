@@ -38,6 +38,7 @@ import identity_store
 from mister_fritz import ask_stuff
 from observability import METRICS, audit_log, get_health_snapshot
 import privacy
+from scheduler import when as schedule_when
 import relay_format
 import relay_router
 import relay_store
@@ -634,9 +635,10 @@ class FritzCommands(commands.Cog):
                 schedule_expr=every,
                 description=description or "",
             )
+            made = {"schedule": every, "timezone": fritz_utils.SCHEDULE_TIMEZONE}
             await interaction.response.send_message(
                 f"✅ Schedule `{schedule_id}` created.\n"
-                f"**Every:** `{every}`\n"
+                f"**When:** {schedule_when(made)}\n"
                 f"**Prompt:** {prompt}",
                 ephemeral=True,
             )
@@ -661,7 +663,8 @@ class FritzCommands(commands.Cog):
         for s in schedules[:25]:          # Discord caps an embed at 25 fields
             label = f" — {s['description']}" if s["description"] else ""
             embed.add_field(
-                name=f"`{s['id']}` · every `{s['schedule']}`{label}",
+                # Discord refuses a field name past 256 characters; the label goes first.
+                name=f"`{s['id']}` · {schedule_when(s)}{label}"[:256],
                 value=s["prompt"][:1024],  # per-field value cap
                 inline=False,
             )
@@ -707,7 +710,7 @@ class FritzCommands(commands.Cog):
         for s in schedules:
             label = f" — {s['description']}" if s["description"] else ""
             lines.append(
-                f"`{s['id']}` (@{s['user_id']}) every `{s['schedule']}`{label}\n  _{s['prompt']}_"
+                f"`{s['id']}` (@{s['user_id']}) {schedule_when(s)}{label}\n  _{s['prompt']}_"
             )
         body = "\n".join(lines)
         # Long lists chunk into multiple ephemeral replies to respect the 2000-char limit.

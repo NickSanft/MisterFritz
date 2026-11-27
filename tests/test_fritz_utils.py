@@ -546,6 +546,27 @@ class TestDesktopCompanionKnobs(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assertIn(expected, src)
 
+    def test_the_host_zone_without_zoneinfos_posix_or_right_trees(self):
+        for name, zone in (("posix/America/Chicago", "America/Chicago"), ("right/Europe/London", "Europe/London"),
+                           ("Asia/Tokyo", "Asia/Tokyo")):
+            with self.subTest(name=name), patch("tzlocal.get_localzone_name", return_value=name):
+                self.assertEqual(fu._host_zone(), zone)
+
+    def test_a_zone_is_spelled_exactly_wherever_it_is_checked(self):
+        """On a case-blind filesystem (Windows, macOS) ZoneInfo loads
+        america/chicago; a schedule kept in that name wouldn't load on Linux.
+        Such a filesystem is stood in for here, so the check runs on any."""
+        import zoneinfo
+        with patch.object(zoneinfo, "ZoneInfo", lambda key: object()):
+            for zone in ("america/chicago", "America/chicago", "America/Chicago."):
+                with self.subTest(zone=zone), patch.object(fu, "SCHEDULE_TIMEZONE", zone):
+                    self.assertIn("spelled exactly", self._refusal())
+            with patch.object(fu, "SCHEDULE_TIMEZONE", "America/Chicago"), self._patched():
+                fu.validate_config()
+        with patch.object(zoneinfo, "available_timezones", lambda: {"Europe/London"}), \
+                patch.object(fu, "SCHEDULE_TIMEZONE", "America/Chicago"):
+            self.assertIn("SCHEDULE_TIMEZONE", self._refusal())
+
     def test_the_host_zone_is_an_iana_name_or_utc(self):
         from zoneinfo import ZoneInfo
         ZoneInfo(fu._host_zone())
@@ -555,7 +576,7 @@ class TestDesktopCompanionKnobs(unittest.TestCase):
             self.assertEqual(fu._host_zone(), "UTC")
 
     def test_a_zone_this_machine_doesnt_know_is_refused(self):
-        for zone in ("Mars/Olympus_Mons", "America/Chicag", "../etc"):
+        for zone in ("Mars/Olympus_Mons", "America/Chicag", "../etc", "america/chicago", "America/Chicago."):
             with self.subTest(zone=zone), patch.object(fu, "SCHEDULE_TIMEZONE", zone):
                 self.assertIn("SCHEDULE_TIMEZONE", self._refusal())
         for zone in ("America/Chicago", "Europe/London", "UTC"):

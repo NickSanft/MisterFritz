@@ -1617,6 +1617,50 @@ class TestWidgets(CompanionTest):
         self.assertIsNone(self.widget(ws, "desk")["payload"]["last"])
 
 
+class TestReminders(CompanionTest):
+    """PR 14: a schedule that fires reaches every desk connected as its owner,
+    from the scheduler's thread, and no other."""
+
+    def test_every_desk_of_the_owner_and_no_other(self):
+        client = self.client(COMPANION_MAX_CLIENTS=3)
+        a, _ = self.desk(client)
+        b, _ = self.desk(client)
+        other, _ = self.desk(client, client={"id": "other-pc", "name": "Other", "caps": ["text"]})
+        self.assertEqual(companion_api.desks_of("desktop-nick-pc"), 2)
+        self.assertEqual(companion_api.desks_of("desktop-nobody"), 0)
+        sent, crossed = [], []
+        real = companion_api._Session.send_from_thread
+
+        def from_thread(session, frame):
+            crossed.append(type(frame).__name__)
+            return real(session, frame)
+
+        # From the scheduler's thread: each frame crosses to its session's loop.
+        with patch.object(companion_api._Session, "send_from_thread", from_thread):
+            t = threading.Thread(target=lambda: sent.append(
+                companion_api.deliver_reminder("desktop-nick-pc", "Time for tea, sir.", "3f9c2a1b")))
+            t.start()
+            t.join(5)
+        self.assertEqual(sent, [2])
+        self.assertEqual(crossed, ["Reminder", "Reminder"])
+        for ws in (a, b):
+            self.assertEqual(receive(ws), {"type": "reminder", "schedule_id": "3f9c2a1b", "text": "Time for tea, sir."})
+        other.send_json({"type": "ping", "t": 1})
+        self.assertEqual(receive(other)["type"], "pong", "nothing came to another identity's desk first")
+
+    def test_a_desk_linked_to_the_owner_is_the_owner(self):
+        self.stack.enter_context(patch.dict(fritz_utils.IDENTITY_LINKS, {"desktop-nick-pc": "discord-1"}))
+        ws, welcome = self.desk()
+        self.assertEqual(welcome["identity"], "discord-1")
+        self.assertEqual(companion_api.desks_of("discord-1"), 1)
+        self.assertEqual(companion_api.deliver_reminder("discord-1", "Tea, sir.", "3f9c2a1b"), 1)
+        self.assertEqual(receive(ws), {"type": "reminder", "schedule_id": "3f9c2a1b", "text": "Tea, sir."})
+        self.assertEqual(companion_api.desks_of("desktop-nick-pc"), 0, "known by whom it is linked to")
+
+    def test_none_connected_none_sent(self):
+        self.assertEqual(companion_api.deliver_reminder("desktop-nick-pc", "x", "3f9c2a1b"), 0)
+
+
 class TestOverARealSocket(CompanionTest):
     """uvicorn, configured as start_admin_panel configures it, and a real
     WebSocket client. The TestClient never touches uvicorn's WebSocket
