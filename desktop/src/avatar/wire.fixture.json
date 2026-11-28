@@ -19,7 +19,9 @@
     "pttNothing": "ptt:nothing",
     "pttClip": "ptt:clip",
     "pttLevel": "ptt:level",
-    "wallpaperCovered": "wallpaper:covered"
+    "wallpaperCovered": "wallpaper:covered",
+    "wallpaperFritz": "wallpaper:fritz",
+    "widgetSeen": "widget:seen"
   },
   "hotkeys": {
     "arrange": "avatar:arrange"
@@ -214,6 +216,18 @@
     },
     "wallpaperCovered": {
       "name": "wallpaper_covered",
+      "args": []
+    },
+    "wallpaperFritz": {
+      "name": "wallpaper_fritz",
+      "args": []
+    },
+    "companionWidget": {
+      "name": "companion_widget",
+      "args": ["name", "ttlS", "payload"]
+    },
+    "widgetsNow": {
+      "name": "widgets_now",
       "args": []
     },
     "cursorNow": {

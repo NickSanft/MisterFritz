@@ -129,7 +129,7 @@ export function Appearance(props: AppearanceProps): JSX.Element {
           onChange={(on) => props.set("wallpaper.on", on)}
         />
       </Row>
-      <Row title="Parchment grain" desc="A paper texture over this window, never over him.">
+      <Row title="Parchment grain" desc="A paper texture over this window and the study scene, never over him.">
         <Toggle
           ariaLabel="Parchment grain"
           on={t()?.grain ?? false}

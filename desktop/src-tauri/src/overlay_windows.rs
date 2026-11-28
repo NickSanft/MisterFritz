@@ -492,6 +492,8 @@ pub fn on_window_event(app: &AppHandle, event: &WindowEvent) {
             forget(&shared);
             let _ = step(app, Input::Destroyed);
         }
+        // The study circle follows him (wallpaper.rs).
+        WindowEvent::Moved(_) | WindowEvent::Resized(_) => crate::wallpaper::poke(),
         _ => {}
     }
 }

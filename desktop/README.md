@@ -90,8 +90,8 @@ tint from it, his outlines leaning toward the mood and a rim light in the
 accent. With no motion, or while Windows asks for less (its *Animation
 effects* switch) and *Keep his motion when Windows asks for less*
 (`theme.motionUser`) is off, he moves only to blink and breathe, to speak
-and to show his mood: no sway, no glance or tilt, and his eyes stay ahead. The parchment grain (`theme.grain`) is the control
-window's alone.
+and to show his mood: no sway, no glance or tilt, and his eyes stay ahead. The parchment grain (`theme.grain`) is on the control
+window and the study scene (below), never on him.
 
 The tray's *Settings…* opens the control window: his brain (where it is,
 the token, and whether he is connected), show or hide him, arrange him, his
@@ -363,6 +363,33 @@ fullscreen window covers (a game, a video): there it stops without hiding
 anything, so nothing flashes when it comes back. A maximised window doesn't
 stop it. It takes no clicks or keys: the icons above it get them all, and
 `scripts/check-no-input.mjs` keeps input handlers out of its page.
+
+On the monitor Fritz stands on, his study circle is drawn around him
+([`circle.ts`](src/wallpaper/circle.ts)), faint, like a watermark: a thin
+ring with small ticks that turns once in fifteen minutes (at Rich; slower
+at Ambient, still at Functional), his place as its core, and the brain's
+widgets (clock, weather, his desk) as small sigils on the ring, each on a
+thread from the core. A thread is lit while its widget's news is fresh
+(the clock for two minutes, the weather for its half hour, his desk until
+the next exchange) and the brain is connected, and dotted while it isn't;
+a spark runs along a lit one. The nodes sit on the part of the ring that
+is on the screen. The circle follows him when you move him (a quarter of a
+second behind, the loop running faster while it catches up, the shell
+looking again no oftener than every 33 ms while he is dragged), fades while
+he is hidden, and goes with him to another monitor; the others show the
+light alone. Settings › Appearance › *Parchment grain* (on by default)
+gives the scene a grain of its own too, in the mood's blend and a third
+of the control window's strength, still, which also hides the faint
+banding a big dark gradient can show.
+
+The widgets come from the brain over the one connection his window holds
+([`widgetLink.ts`](src/avatar/widgetLink.ts)): on each welcome from a brain
+that offers them, it asks for all three, and hands each that comes to the
+shell, which passes it on to the scene and keeps the newest of each for a
+page that starts later. Asking for the weather has the brain fetch it from
+Open-Meteo about every quarter hour while the desk is connected (one fetch,
+whoever asks). Nothing of them is shown yet beyond the threads: the
+widgets themselves are PR 13's.
 
 How it gets there ([`wallpaper.rs`](src-tauri/src/wallpaper.rs), plumbing from
 Lorraine): each monitor's page lives in a hidden window of its own. The

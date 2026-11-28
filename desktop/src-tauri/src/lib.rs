@@ -34,6 +34,7 @@ mod tray;
 mod tts_phonemize;
 mod tts_tokens;
 mod wallpaper;
+mod widget_feed;
 mod windows_ext;
 mod workerw;
 
@@ -582,6 +583,43 @@ async fn wallpaper_covered(webview: tauri::Webview) -> Result<bool, String> {
         return Err("only the study scene asks that".to_owned());
     }
     Ok(wallpaper::covered(label))
+}
+
+/// Where Fritz is on the calling study scene's monitor (`null` when he isn't
+/// on it): for a page that starts after the last `wallpaper:fritz`. Only a
+/// wallpaper window is answered.
+#[tauri::command]
+async fn wallpaper_fritz(webview: tauri::Webview) -> Result<Option<wallpaper::Fritz>, String> {
+    let label = webview.label();
+    if !wallpaper::is_wallpaper(label) {
+        return Err("only the study scene asks that".to_owned());
+    }
+    Ok(wallpaper::fritz_for(label))
+}
+
+/// A widget the brain sent the avatar's page: kept, and passed on to the
+/// study scene's windows (`widget:seen`). Only his page hands them in.
+#[tauri::command]
+async fn companion_widget(
+    app: AppHandle,
+    webview: tauri::Webview,
+    name: String,
+    ttl_s: u32,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    from_the_avatar(webview.label())?;
+    let seen = widget_feed::keep(&name, ttl_s, payload)?;
+    for label in wallpaper::labels() {
+        let _ = app.emit_to(label.as_str(), widget_feed::SEEN_EVENT, &seen);
+    }
+    Ok(())
+}
+
+/// Every widget heard so far, with its age: for a study scene page that
+/// starts after them.
+#[tauri::command]
+async fn widgets_now() -> Vec<widget_feed::Seen> {
+    widget_feed::now()
 }
 
 /// The cursor now: for a page that starts after the last `cursor` event
@@ -1362,6 +1400,9 @@ pub fn run() {
             mouse_hook_status,
             power_display,
             wallpaper_covered,
+            wallpaper_fritz,
+            companion_widget,
+            widgets_now,
             cursor_now,
             set_parked,
             avatar_model,
@@ -1544,7 +1585,9 @@ mod tests {
         assert_eq!(events["pttClip"], super::PTT_CLIP_EVENT);
         assert_eq!(events["pttLevel"], super::PTT_LEVEL_EVENT);
         assert_eq!(events["wallpaperCovered"], crate::wallpaper::COVERED_EVENT);
-        assert_eq!(events.len(), 17, "an event with no Rust half: {events:?}");
+        assert_eq!(events["wallpaperFritz"], crate::wallpaper::FRITZ_EVENT);
+        assert_eq!(events["widgetSeen"], crate::widget_feed::SEEN_EVENT);
+        assert_eq!(events.len(), 19, "an event with no Rust half: {events:?}");
         let sorted = |v: &Value| {
             let mut k: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
             k.sort_unstable();

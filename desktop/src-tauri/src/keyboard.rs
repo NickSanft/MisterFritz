@@ -216,7 +216,7 @@ pub(crate) mod tests {
 
     /// Every module of the shell, by name, with its source (the mouse
     /// hook's scans read it too).
-    pub(crate) const SOURCES: [(&str, &str); 28] = [
+    pub(crate) const SOURCES: [(&str, &str); 29] = [
         ("audio_in", include_str!("audio_in.rs")),
         ("avatar_state", include_str!("avatar_state.rs")),
         ("companion", include_str!("companion.rs")),
@@ -243,6 +243,7 @@ pub(crate) mod tests {
         ("tts_phonemize", include_str!("tts_phonemize.rs")),
         ("tts_tokens", include_str!("tts_tokens.rs")),
         ("wallpaper", include_str!("wallpaper.rs")),
+        ("widget_feed", include_str!("widget_feed.rs")),
         ("windows_ext", include_str!("windows_ext.rs")),
         ("workerw", include_str!("workerw.rs")),
     ];

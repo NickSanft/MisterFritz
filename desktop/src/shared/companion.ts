@@ -21,8 +21,12 @@
  * - A clip (`sendAudio`) goes only to a brain whose welcome offered
  *   `audio-in`: one binary frame of PCM16, then its `audio_end`.
  *
+ * - Widgets (`subscribe`, PR 12's study circle) are asked for by the
+ *   avatar page on each welcome whose brain offers them
+ *   (src/avatar/widgetLink.ts).
+ *
  * Retrying while offline isn't animation: it runs on the clock, not the
- * paced loop. Widgets (`subscribe`, PR 13) come with the PR that uses them.
+ * paced loop.
  */
 import { browserClock, type Clock } from "./clock";
 import {
@@ -38,6 +42,7 @@ import {
   type Ping,
   type Pong,
   type Say,
+  type Subscribe,
   type ServerFrame,
 } from "./protocol";
 
@@ -145,6 +150,7 @@ export const helloFrame = (c: CompanionConfig): Hello => ({
 export const sayFrame = (turnId: string, text: string): Say => ({ type: "say", turn_id: turnId, text });
 export const cancelFrame = (turnId: string): Cancel => ({ type: "cancel", turn_id: turnId });
 export const audioEndFrame = (turnId: string): AudioEnd => ({ type: "audio_end", turn_id: turnId, ...AUDIO_FORMAT });
+export const subscribeFrame = (widgets: readonly string[]): Subscribe => ({ type: "subscribe", widgets: [...widgets] });
 export const pingFrame = (t: number): Ping => ({ type: "ping", t });
 export const pongFrame = (t: number): Pong => ({ type: "pong", t });
 
@@ -289,6 +295,15 @@ export class CompanionClient {
     if (!TURN_ID_PATTERN.test(turnId)) return null;
     if (!this.sendRaw(pcm)) return null;
     return this.send(audioEndFrame(turnId)) ? turnId : null;
+  }
+
+  /** Ask the brain for these widgets, in place of any asked for before
+   * (none, to stop them): whether it went, which needs the link online and
+   * a brain whose welcome offered `widgets`. A welcome is a new session,
+   * which has asked for none. */
+  subscribe(widgets: readonly string[]): boolean {
+    if (!this.online() || !this.current.serverCaps.includes("widgets")) return false;
+    return this.send(subscribeFrame(widgets));
   }
 
   /** Stop a turn (the brain ends it with `done`, interrupted). */

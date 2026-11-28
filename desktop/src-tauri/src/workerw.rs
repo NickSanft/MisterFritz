@@ -38,8 +38,8 @@ const SPAWN_WORKERW: u32 = 0x052C;
 const SPAWN_WAIT_MS: u32 = 1000;
 /// `MONITORINFO.dwFlags`' primary-monitor bit.
 const MONITORINFOF_PRIMARY: u32 = 1;
-/// How many looks Progman (the fallback) is kept for before Progman is
-/// asked again: about six seconds at the wallpaper watch's pace.
+/// How many of the wallpaper watch's ticks Progman (the fallback) is kept
+/// for before Progman is asked again: about six seconds.
 const FALLBACK_LOOKS: u32 = 10;
 
 /// A monitor: where it is, in physical pixels, its effective DPI, and
@@ -175,12 +175,15 @@ pub fn keep(kept: Found, alive: bool, left: u32) -> bool {
 
 /// [`find`], kept between looks while it stays a window, as Lorraine kept
 /// it (so Progman isn't asked on every look); Progman itself is kept for
-/// [`FALLBACK_LOOKS`] looks at most.
-pub fn layer() -> Option<Found> {
+/// [`FALLBACK_LOOKS`] of the watch's ticks at most (`ticked`: this look is
+/// one; a look a poke adds counts nothing).
+pub fn layer(ticked: bool) -> Option<Found> {
     let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some((found, left)) = kept.as_mut() {
         if keep(*found, is_window(found.window()), *left) {
-            *left = left.saturating_sub(1);
+            if ticked {
+                *left = left.saturating_sub(1);
+            }
             return Some(*found);
         }
     }

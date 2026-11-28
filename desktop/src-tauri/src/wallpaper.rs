@@ -37,12 +37,22 @@
 //! locked, is told so (`wallpaper:covered`) and its page stops drawing;
 //! nothing is hidden, so nothing flashes. No gift, buddy, casting or
 //! hit-rect code.
+//!
+//! Fritz's place (the study circle's core, plan 14 PR 12's second commit):
+//! each look, where he stands, as his window's middle at the height of his
+//! body (below the bubble's room), goes to the page of the monitor it is on
+//! (`wallpaper:fritz`, physical pixels from that monitor's corner, with his
+//! height and whether he is shown), and `null` to every other; the newest
+//! is kept for a page that starts later (`wallpaper_fritz`). A move or a
+//! resize of his window pokes the watch, so the circle follows Arrange;
+//! looks come no oftener than every 33 ms however fast the pokes do, and
+//! what counts looks counts only the 600 ms ticks.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::webview::Color;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -57,12 +67,23 @@ pub const LABEL_PREFIX: &str = "wallpaper-";
 /// To one wallpaper window: `true` while its monitor is covered (another
 /// app's fullscreen window, or the lock screen), `false` when it isn't.
 pub const COVERED_EVENT: &str = "wallpaper:covered";
+/// To one wallpaper window: where Fritz is on its monitor ([`Fritz`]), or
+/// `null` when he isn't on it.
+pub const FRITZ_EVENT: &str = "wallpaper:fritz";
+/// The top of his window kept for his bubble (src/avatar/framing.ts).
+pub const HEADROOM: f64 = 0.28;
 const PAGE: &str = "wallpaper.html";
 const TITLE: &str = "Mister Fritz study scene";
 /// Monitors drawn on, at most: Lorraine's four.
 pub const MAX_SLOTS: usize = 4;
-/// The watch's pace: Lorraine's 600 ms.
+/// The watch's pace: Lorraine's 600 ms. What counts looks (a homing
+/// unheard, a failed build's wait, the layer's fallback) counts only these
+/// ticks, never the looks pokes add.
 const TICK: Duration = Duration::from_millis(600);
+/// The least time between two looks: a drag in Arrange pokes at the
+/// mouse's rate, and the circle needs a look no oftener than the scene's
+/// fastest frames.
+const MIN_GAP: Duration = Duration::from_millis(33);
 /// Looks a homing may go unheard before the slot is built anew.
 const UNHEARD: u32 = 10;
 /// Looks a slot whose window couldn't be built waits before trying again,
@@ -186,6 +207,37 @@ pub fn plan(v: View, want: Option<Geometry>, layer: Option<isize>, forced: bool)
     }
 }
 
+/// Fritz on one monitor: his core (the middle of his window at the height
+/// of his body's middle) in physical pixels from the monitor's corner, his
+/// window's height, and whether he is shown (not hidden, by the owner or a
+/// fullscreen app, and his window open).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Fritz {
+    pub x: i32,
+    pub y: i32,
+    pub size: i32,
+    pub shown: bool,
+}
+
+/// His core on the screen, for his window at `at`: its middle, at the
+/// height of the middle of what is below the bubble's room. Pure.
+pub fn core_of(at: Bounds) -> (i32, i32) {
+    let h = f64::from(at.height());
+    #[allow(clippy::cast_possible_truncation)]
+    let down = (h * (HEADROOM + (1.0 - HEADROOM) / 2.0)).round() as i32;
+    (at.left + at.width() / 2, at.top + down)
+}
+
+/// Fritz on `monitor`, for his window at `at` (none when there is no
+/// window): there only if his core is. Pure.
+pub fn fritz_on(monitor: Bounds, at: Option<Bounds>, shown: bool) -> Option<Fritz> {
+    let at = at?;
+    let (x, y) = core_of(at);
+    let inside = x >= monitor.left && x < monitor.right && y >= monitor.top && y < monitor.bottom;
+    inside.then_some(Fritz { x: x - monitor.left, y: y - monitor.top, size: at.height(), shown })
+}
+
 /// What the watch keeps of a slot.
 #[derive(Debug, Clone)]
 struct Slot {
@@ -204,6 +256,8 @@ struct Slot {
     failures: u32,
     /// What its page was last told.
     covered: bool,
+    /// Where its page was last told Fritz is.
+    fritz: Option<Fritz>,
     /// The layer is known to be missing, and that was said in the log.
     waiting_said: bool,
 }
@@ -220,6 +274,7 @@ impl Slot {
         cooldown: 0,
         failures: 0,
         covered: false,
+        fritz: None,
         waiting_said: false,
     };
 
@@ -237,6 +292,9 @@ static FORCE: AtomicBool = AtomicBool::new(false);
 /// Quit has begun: the watch does nothing more.
 static STOPPING: AtomicBool = AtomicBool::new(false);
 static POKE: OnceLock<Sender<()>> = OnceLock::new();
+/// A poke is on its way: more are one look, not many (a drag in Arrange
+/// moves his window many times a second).
+static POKED: AtomicBool = AtomicBool::new(false);
 
 fn slots() -> MutexGuard<'static, [Slot; MAX_SLOTS]> {
     SLOTS.lock().unwrap_or_else(PoisonError::into_inner)
@@ -310,14 +368,28 @@ pub fn start(app: AppHandle) {
     }
     let spawned = thread::Builder::new()
         .name("fritz-wallpaper-watch".into())
-        .spawn(move || loop {
-            if STOPPING.load(Ordering::SeqCst) {
-                break;
-            }
-            crate::logs::guard("wallpaper watch", || look(&app));
-            match rx.recv_timeout(TICK) {
-                Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        .spawn(move || {
+            let mut last_tick: Option<Instant> = None;
+            let mut last_look: Option<Instant> = None;
+            loop {
+                if STOPPING.load(Ordering::SeqCst) {
+                    break;
+                }
+                if let Some(wait) = last_look.and_then(|at| MIN_GAP.checked_sub(at.elapsed())) {
+                    thread::sleep(wait);
+                }
+                POKED.store(false, Ordering::SeqCst);
+                let ticked = last_tick.is_none_or(|at| at.elapsed() >= TICK);
+                let now = Instant::now();
+                if ticked {
+                    last_tick = Some(now);
+                }
+                last_look = Some(now);
+                crate::logs::guard("wallpaper watch", || look(&app, ticked));
+                match rx.recv_timeout(TICK) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
             }
         });
     if let Err(e) = spawned {
@@ -325,11 +397,27 @@ pub fn start(app: AppHandle) {
     }
 }
 
-/// Look again now, not at the next tick.
+/// Look again now, not at the next tick; once for any number of pokes
+/// before the look begins.
 pub fn poke() {
+    if !first_poke(&POKED) {
+        return;
+    }
     if let Some(tx) = POKE.get() {
         let _ = tx.send(());
     }
+}
+
+/// Whether a poke is the first since the last look began (`poked` is
+/// cleared as each begins).
+fn first_poke(poked: &AtomicBool) -> bool {
+    !poked.swap(true, Ordering::SeqCst)
+}
+
+/// Whether Fritz is shown, for the circle: his window open and not parked
+/// (by the owner's Hide or a fullscreen app). Pure.
+pub fn shown(open: bool, parked: bool) -> bool {
+    open && !parked
 }
 
 /// From the power watch: the PC woke, so every homed slot is built anew.
@@ -338,15 +426,24 @@ pub fn resumed() {
     poke();
 }
 
-/// One look: every slot planned and stepped.
-fn look(app: &AppHandle) {
+/// One look: every slot planned and stepped; `ticked`, whether it is one
+/// of the 600 ms ticks (what counts looks counts only those).
+fn look(app: &AppHandle, ticked: bool) {
     let (on, theme) = crate::settings::peek(|s| (s.wallpaper.on, s.theme.clone()));
     crate::host::set_backdrop(backdrop(&theme));
     let monitors = if on { workerw::monitors() } else { Vec::new() };
     // Progman is asked only while the scene is wanted.
-    let layer = if on { workerw::layer() } else { None };
+    let layer = if on { workerw::layer(ticked) } else { None };
     let forced = FORCE.swap(false, Ordering::SeqCst);
     let locked = crate::cover::locked() == Some(true);
+    let status = crate::overlay_windows::status(app);
+    let shown = shown(status.open, status.parked);
+    let standing = crate::overlay_windows::standing(app).map(|r| Bounds {
+        left: r.x,
+        top: r.y,
+        right: r.x.saturating_add(i32::try_from(r.width).unwrap_or(0)),
+        bottom: r.y.saturating_add(i32::try_from(r.height).unwrap_or(0)),
+    });
     for i in 0..MAX_SLOTS {
         let want = monitors.get(i).map(|m| Geometry { bounds: m.bounds, dpi: m.dpi });
         // Twice at most: a window built now is homed now, not a tick later.
@@ -361,7 +458,7 @@ fn look(app: &AppHandle) {
             let step = {
                 let mut all = slots();
                 let s = &mut all[i];
-                if s.busy > 0 {
+                if s.busy > 0 && ticked {
                     s.busy += 1;
                     if s.busy > UNHEARD {
                         tracing::warn!(slot = i, "the study scene's homing went unheard");
@@ -370,7 +467,9 @@ fn look(app: &AppHandle) {
                     }
                 }
                 if s.cooldown > 0 {
-                    s.cooldown -= 1;
+                    if ticked {
+                        s.cooldown -= 1;
+                    }
                     Step::Nothing
                 } else {
                     plan(view_of(s, gone), want, layer.map(Found::window), forced)
@@ -382,6 +481,7 @@ fn look(app: &AppHandle) {
             }
         }
         tell_covered(app, i, want, locked);
+        tell_fritz(app, i, want.and_then(|g| fritz_on(g.bounds, standing, shown)));
     }
 }
 
@@ -688,6 +788,43 @@ fn tell_covered(app: &AppHandle, i: usize, want: Option<Geometry>, locked: bool)
     let _ = app.emit_to(label.as_str(), COVERED_EVENT, now);
 }
 
+/// Tell a homed slot's page where Fritz is on its monitor, when that
+/// changed.
+fn tell_fritz(app: &AppHandle, i: usize, now: Option<Fritz>) {
+    let label = {
+        let mut all = slots();
+        match to_tell(&mut all[i], now) {
+            Some(l) => l,
+            None => return,
+        }
+    };
+    let _ = app.emit_to(label.as_str(), FRITZ_EVENT, now);
+}
+
+/// The label to tell Fritz's place `now`, if slot `s`'s page is to be told:
+/// it is homed and was told otherwise; noted as told. Pure but for the
+/// slot.
+fn to_tell(s: &mut Slot, now: Option<Fritz>) -> Option<String> {
+    match (&s.label, s.homed) {
+        (Some(l), true) if s.fritz != now => {
+            s.fritz = now;
+            Some(l.clone())
+        }
+        _ => None,
+    }
+}
+
+/// For `wallpaper_fritz`: where Fritz is on the window `label`'s monitor
+/// (none for a window the watch doesn't know, or before it was told).
+pub fn fritz_for(label: &str) -> Option<Fritz> {
+    slots().iter().find(|s| s.label.as_deref() == Some(label)).and_then(|s| s.fritz)
+}
+
+/// Every study scene window's label now.
+pub fn labels() -> Vec<String> {
+    slots().iter().filter_map(|s| s.label.clone()).collect()
+}
+
 /// For `wallpaper_covered`: whether the window `label`'s monitor is covered
 /// now (false for a window the watch doesn't know).
 pub fn covered(label: &str) -> bool {
@@ -835,6 +972,81 @@ mod tests {
     }
 
     #[test]
+    fn his_core_is_his_bodys_middle() {
+        let at = Bounds { left: 1000, top: 200, right: 1340, bottom: 840 };
+        // 640 tall: 0.28 of it is the bubble's, his body's middle is 0.64 down.
+        assert_eq!(core_of(at), (1170, 200 + 410));
+        let fixture = include_str!("../../src/avatar/framing.ts");
+        assert!(fixture.contains(&format!("export const HEADROOM = {HEADROOM};")), "the page's HEADROOM");
+    }
+
+    #[test]
+    fn he_is_on_the_monitor_his_core_is_on() {
+        let left = Bounds { left: -1920, top: 0, right: 0, bottom: 1080 };
+        let right = Bounds { left: 0, top: 0, right: 2560, bottom: 1440 };
+        let at = Bounds { left: -200, top: 300, right: 140, bottom: 940 };
+        // His core is at x -30: on the left monitor, though he overlaps both.
+        assert_eq!(fritz_on(left, Some(at), true), Some(Fritz { x: 1890, y: 710, size: 640, shown: true }));
+        assert_eq!(fritz_on(right, Some(at), true), None);
+        assert_eq!(fritz_on(left, Some(at), false).map(|f| f.shown), Some(false), "hidden, where he would stand");
+        assert_eq!(fritz_on(left, None, true), None, "no window");
+        // A core on the edge belongs to the monitor it starts.
+        let edge = Bounds { left: -170, top: 0, right: 170, bottom: 640 };
+        assert!(fritz_on(right, Some(edge), true).is_some());
+        assert!(fritz_on(left, Some(edge), true).is_none());
+        let wire = serde_json::to_value(Fritz { x: 1, y: 2, size: 3, shown: true }).unwrap();
+        assert_eq!(wire, serde_json::json!({"x": 1, "y": 2, "size": 3, "shown": true}));
+    }
+
+    #[test]
+    fn hidden_is_parked_or_closed() {
+        assert!(shown(true, false));
+        assert!(!shown(true, true), "the owner's Hide, or a fullscreen app's park");
+        assert!(!shown(false, false), "no window");
+    }
+
+    #[test]
+    fn a_page_is_told_his_place_once_homed_and_on_each_change() {
+        let f = Some(Fritz { x: 1, y: 2, size: 3, shown: true });
+        let mut s = Slot { label: Some(label(0, 1)), ..Slot::EMPTY };
+        assert_eq!(to_tell(&mut s, f), None, "not homed yet");
+        assert_eq!(s.fritz, None);
+        s.homed = true;
+        assert_eq!(to_tell(&mut s, f), Some(label(0, 1)));
+        assert_eq!(to_tell(&mut s, f), None, "the same place twice");
+        let hidden = Some(Fritz { shown: false, ..f.unwrap() });
+        assert_eq!(to_tell(&mut s, hidden), Some(label(0, 1)), "hidden is news");
+        assert_eq!(to_tell(&mut s, None), Some(label(0, 1)), "gone to another monitor is news");
+        assert_eq!(s.fritz, None);
+    }
+
+    #[test]
+    fn pokes_before_a_look_are_one() {
+        let poked = AtomicBool::new(false);
+        assert!(first_poke(&poked));
+        assert!(!first_poke(&poked));
+        assert!(!first_poke(&poked));
+        poked.store(false, Ordering::SeqCst); // a look begins
+        assert!(first_poke(&poked));
+    }
+
+    /// His window's moves and resizes poke the watch, so the circle
+    /// follows Arrange (a scan, as the hook's pokes are pinned).
+    #[test]
+    fn his_window_moving_pokes_the_watch() {
+        let src = include_str!("overlay_windows.rs").replace("\r\n", "\n");
+        let at = src.find("pub fn on_window_event(").unwrap();
+        let body = &src[at..at + src[at..].find("\n}\n").unwrap()];
+        assert!(body.contains("WindowEvent::Moved(_) | WindowEvent::Resized(_) => crate::wallpaper::poke(),"), "{body}");
+        let watch = include_str!("wallpaper.rs").replace("\r\n", "\n");
+        // Halves, so this test doesn't find itself.
+        assert!(watch.contains(concat!("if s.busy > 0 && ", "ticked {")), "a poked look counts nothing");
+        assert!(watch.contains(concat!("workerw::layer(", "ticked)")));
+        assert!(watch.contains(concat!("if ticked {
+                        s.cooldown -= ", "1;")));
+    }
+
+    #[test]
     fn the_lock_screen_covers_every_monitor() {
         assert!(covered_now(true, || panic!("not asked while locked")));
         assert!(covered_now(false, || true));
@@ -893,8 +1105,10 @@ mod tests {
     fn a_slot_taken_down_moves_its_count_on() {
         let mut s =
             Slot { gen: 4, label: Some("x".into()), host: 9, homed: true, covered: true, failures: 2, ..Slot::EMPTY };
+        s.fritz = Some(Fritz { x: 0, y: 0, size: 1, shown: true });
         s.clear();
         assert_eq!(s.gen, 5, "a homing for what was taken down is ignored");
+        assert_eq!(s.fritz, None, "a new page is told afresh");
         assert_eq!(s.failures, 2, "how its builds have gone is kept");
         assert!(s.label.is_none() && s.host == 0 && !s.homed && !s.covered);
     }
@@ -944,6 +1158,11 @@ mod tests {
         slots()[3].covered = true;
         assert!(covered(&label(3, 5)));
         assert!(!covered(&label(3, 4)));
+        assert_eq!(fritz_for(&label(3, 5)), None);
+        slots()[3].fritz = Some(Fritz { x: 1, y: 2, size: 3, shown: true });
+        assert_eq!(fritz_for(&label(3, 5)).map(|f| f.x), Some(1));
+        assert_eq!(fritz_for(&label(3, 4)), None);
+        assert!(labels().contains(&label(3, 5)));
         // Taken down, then a late report for the build it had: ignored.
         slots()[3].clear();
         heard(3, 5, true);

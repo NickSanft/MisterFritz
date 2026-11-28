@@ -43,9 +43,15 @@ export class SceneRun {
   private factor = 0;
   private themed = false;
   private t = 0;
+  /** What the covered page keeps is out of date (his place changed while
+   * the display was off): drawn once the display is back. */
+  private stale = false;
 
+  /** `paint(t, dt)`: draw the scene at scene time `t`, `dt` seconds of
+   * real time after the last frame (0 for a frame drawn out of turn: a
+   * resize, new colours, a still frame), for what eases in real time. */
   constructor(
-    private readonly paint: (t: number) => void,
+    private readonly paint: (t: number, dt: number) => void,
     private readonly loop: Loop,
   ) {}
 
@@ -60,18 +66,27 @@ export class SceneRun {
 
   /** One of the loop's frames, `dt` seconds after the last. */
   tick(dt: number): void {
-    if (Number.isFinite(dt) && dt > 0) this.t += dt * this.factor;
-    this.paint(this.t);
+    const real = Number.isFinite(dt) && dt > 0 ? dt : 0;
+    this.t += real * this.factor;
+    this.paint(this.t, real);
   }
 
   setDisplay(on: boolean): void {
     this.displayOn = on;
     this.apply();
+    if (on && this.covered && this.stale && this.themed) {
+      this.stale = false;
+      this.paint(this.t, 0);
+    }
   }
 
   setCovered(covered: boolean): void {
+    const was = this.covered;
     this.covered = covered;
     this.apply();
+    // Covered now: the frame kept is drawn as things are now, with
+    // whatever was on its way (a fade, a still frame due) put in place.
+    if (covered && !was) this.keep();
   }
 
   /** A theme, with the motion factor it brings (0, 0.6 or 1): its colours
@@ -80,13 +95,38 @@ export class SceneRun {
     this.factor = Number.isFinite(factor) && factor > 0 ? factor : 0;
     this.themed = true;
     this.apply();
-    if (this.now === "loop") this.paint(this.t);
+    if (this.now === "loop") this.paint(this.t, 0);
   }
 
   /** Something the scene shows changed (a resize, new colours): drawn now,
    * unless nothing is being drawn. */
   redraw(): void {
-    if (this.now !== "none") this.paint(this.t);
+    if (this.now !== "none") this.paint(this.t, 0);
+  }
+
+  /** Something drawn changed out of turn (where Fritz is). While the
+   * monitor is covered, nothing is drawn, but the frame its page keeps is
+   * the one the owner sees the moment the cover goes, so it must be how
+   * things are now (Fritz hidden by the fullscreen app, say): it is drawn
+   * at the cover's coming and at each change under it, or, with the
+   * display off (or no theme yet), once that is back. Otherwise what it
+   * means: the loop will draw it, a still scene is to be drawn again, or
+   * nothing is drawn. */
+  placed(): "covered" | Drawing {
+    if (!this.covered) return this.now;
+    this.keep();
+    return "covered";
+  }
+
+  /** Draw the frame a covered page keeps as things are now, or owe it
+   * until the display (and a theme) is there. */
+  private keep(): void {
+    if (this.themed && this.displayOn) {
+      this.stale = false;
+      this.paint(this.t, 0);
+    } else {
+      this.stale = true;
+    }
   }
 
   /** Start or stop the loop for the decision now; a still frame is drawn
@@ -99,6 +139,6 @@ export class SceneRun {
       return;
     }
     this.loop.stop();
-    if (now === "still") this.paint(this.t);
+    if (now === "still") this.paint(this.t, 0);
   }
 }

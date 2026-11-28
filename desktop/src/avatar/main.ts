@@ -71,6 +71,7 @@ import {
   takeClip,
   takeSay,
 } from "./companionLink";
+import { linkWidgets } from "./widgetLink";
 import { BubbleClock, anchorAbove, charCount, plainText } from "./bubble";
 import { createBubble } from "./BubbleView";
 import { watchMuted } from "./muted";
@@ -527,6 +528,7 @@ async function main(): Promise<void> {
     });
   });
   void startCompanion(companion);
+  linkWidgets(companion);
   await listen(RELOAD_EVENT, () => void load());
   await load();
 }

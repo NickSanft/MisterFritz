@@ -21,7 +21,7 @@ export interface Theme {
   accent: Accent;
   /** 0 to 1; snapped to a level (theme.ts `motionLevel`). */
   motion: number;
-  /** Parchment grain, in the control window only. */
+  /** Parchment grain, on the control window and the study scene, never on him. */
   grain: boolean;
   /** Keep his motion when Windows asks for less. */
   motionUser: boolean;
